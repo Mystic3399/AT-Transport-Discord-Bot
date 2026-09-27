@@ -2580,11 +2580,11 @@ async def trucksbook_profile_test(
     # Railway can show more information.
     railway_preview = diagnostic_text[:10000]
 
-    # ------------------------------------------
+      # ------------------------------------------
     # EXTRA DIRECT CHECKS
     # ------------------------------------------
 
-       lower_page = page_text.lower()
+    lower_page = page_text.lower()
 
     mystic_found = (
         "mystical custom"
@@ -2604,7 +2604,6 @@ async def trucksbook_profile_test(
     # ------------------------------------------
     # RAILWAY OUTPUT
     # ------------------------------------------
-
     print("--------------------------------")
     print("TRUCKSBOOK PROFILE SEARCH")
     print(f"Requested User ID: {numeric_id}")
