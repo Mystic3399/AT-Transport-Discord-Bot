@@ -17,6 +17,37 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 GUILD_ID = int(os.getenv("GUILD_ID"))
 
 
+def optional_snowflake_env(variable_name):
+    """Read an optional Discord ID without making bot startup fragile."""
+    raw_value = os.getenv(variable_name, "").strip()
+
+    if not raw_value:
+        return None
+
+    try:
+        value = int(raw_value)
+    except ValueError:
+        print(
+            f"CONFIGURATION ERROR: {variable_name} must be a valid "
+            "Discord channel ID. Milestone announcements are disabled."
+        )
+        return None
+
+    if value <= 0:
+        print(
+            f"CONFIGURATION ERROR: {variable_name} must be a valid "
+            "Discord channel ID. Milestone announcements are disabled."
+        )
+        return None
+
+    return value
+
+
+MILESTONE_ANNOUNCEMENT_CHANNEL_ID = optional_snowflake_env(
+    "MILESTONE_ANNOUNCEMENT_CHANNEL_ID"
+)
+
+
 # --------------------------------------------------
 # ONBOARDING CONFIGURATION
 # --------------------------------------------------
@@ -188,6 +219,27 @@ async def setup_database():
                 accepted_distance INTEGER NOT NULL,
                 statistics TEXT NOT NULL,
                 processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        # ------------------------------------------
+        # ANNOUNCED PROGRESSION MILESTONES
+        # ------------------------------------------
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS announced_milestones (
+                discord_user_id BIGINT NOT NULL,
+                milestone_miles BIGINT NOT NULL,
+                trucksbook_name TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                announced_at TIMESTAMPTZ,
+                PRIMARY KEY (
+                    discord_user_id,
+                    milestone_miles
+                )
             );
             """
         )
@@ -418,6 +470,20 @@ async def record_real_job(
     async with db_pool.acquire() as connection:
         async with connection.transaction():
 
+            previous_real_miles = await connection.fetchval(
+                """
+                SELECT real_miles
+                FROM driver_progress
+                WHERE discord_user_id = $1
+                FOR UPDATE;
+                """,
+                discord_user_id,
+            )
+
+            previous_real_miles = int(
+                previous_real_miles or 0
+            )
+
             inserted_job_id = (
                 await connection.fetchval(
                     """
@@ -450,6 +516,7 @@ async def record_real_job(
                 return {
                     "status": "duplicate",
                     "real_miles": None,
+                    "crossed_milestones": [],
                 }
 
             await connection.execute(
@@ -492,10 +559,229 @@ async def record_real_job(
                 )
             )
 
+            real_miles = int(real_miles)
+
+            crossed_milestones = []
+
+            for (
+                milestone_miles,
+                _,
+                milestone_rank,
+            ) in PROGRESSION_ROLES:
+                if milestone_miles <= 0:
+                    continue
+
+                if not (
+                    previous_real_miles
+                    < milestone_miles
+                    <= real_miles
+                ):
+                    continue
+
+                inserted_milestone = await connection.fetchval(
+                    """
+                    INSERT INTO announced_milestones (
+                        discord_user_id,
+                        milestone_miles,
+                        trucksbook_name,
+                        job_id
+                    )
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (
+                        discord_user_id,
+                        milestone_miles
+                    )
+                    DO NOTHING
+                    RETURNING milestone_miles;
+                    """,
+                    discord_user_id,
+                    milestone_miles,
+                    trucksbook_name,
+                    job_id,
+                )
+
+                if inserted_milestone is not None:
+                    crossed_milestones.append(
+                        {
+                            "miles": int(inserted_milestone),
+                            "rank": milestone_rank,
+                        }
+                    )
+
             return {
                 "status": "added",
-                "real_miles": int(real_miles),
+                "real_miles": real_miles,
+                "previous_real_miles": previous_real_miles,
+                "crossed_milestones": crossed_milestones,
             }
+
+
+async def mark_milestone_announced(
+    discord_user_id,
+    milestone_miles,
+):
+    if db_pool is None:
+        return False
+
+    async with db_pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            UPDATE announced_milestones
+            SET announced_at = NOW()
+            WHERE discord_user_id = $1
+              AND milestone_miles = $2
+              AND announced_at IS NULL;
+            """,
+            discord_user_id,
+            milestone_miles,
+        )
+
+    return result != "UPDATE 0"
+
+
+async def announce_progression_milestone(
+    guild,
+    member,
+    discord_user_id,
+    trucksbook_name,
+    milestone,
+    real_miles,
+):
+    """Send one newly recorded milestone without affecting saved mileage."""
+    milestone_miles = milestone["miles"]
+    milestone_rank = milestone["rank"]
+
+    if MILESTONE_ANNOUNCEMENT_CHANNEL_ID is None:
+        print(
+            "MILESTONE ANNOUNCEMENT SKIPPED: "
+            "MILESTONE_ANNOUNCEMENT_CHANNEL_ID is unset or invalid. "
+            f"Recorded {milestone_miles:,} miles for {trucksbook_name}."
+        )
+        return
+
+    channel = bot.get_channel(
+        MILESTONE_ANNOUNCEMENT_CHANNEL_ID
+    )
+
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(
+                MILESTONE_ANNOUNCEMENT_CHANNEL_ID
+            )
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ) as error:
+            print(
+                "MILESTONE ANNOUNCEMENT SKIPPED: Could not access "
+                f"channel {MILESTONE_ANNOUNCEMENT_CHANNEL_ID}: {error}"
+            )
+            return
+
+    if guild is not None and getattr(channel, "guild", None) != guild:
+        print(
+            "MILESTONE ANNOUNCEMENT SKIPPED: Configured channel is "
+            "not in the A&T Transport LTD server."
+        )
+        return
+
+    next_role = get_next_progression_role(
+        real_miles
+    )
+
+    driver_display = (
+        member.mention
+        if member is not None
+        else f"<@{discord_user_id}>"
+    )
+
+    embed = discord.Embed(
+        title="🏆 A&T TRANSPORT LTD — MILESTONE ACHIEVED",
+        description=(
+            f"Congratulations {driver_display}!\n\n"
+            f"💎 **{milestone_miles:,} REAL MILES**\n"
+            "A new A&T progression milestone has been reached."
+        ),
+        colour=discord.Colour.from_rgb(31, 78, 121),
+    )
+
+    if member is not None:
+        embed.set_thumbnail(
+            url=member.display_avatar.url
+        )
+
+    embed.add_field(
+        name="Discord Driver",
+        value=driver_display,
+        inline=True,
+    )
+    embed.add_field(
+        name="TrucksBook Driver",
+        value=f"`{trucksbook_name}`",
+        inline=True,
+    )
+    embed.add_field(
+        name="New Progression Rank",
+        value=f"🏅 **{milestone_rank}**",
+        inline=False,
+    )
+    embed.add_field(
+        name="Current Real Total",
+        value=f"🚛 **{real_miles:,} Real miles**",
+        inline=False,
+    )
+
+    if next_role is None:
+        embed.add_field(
+            name="Progression Status",
+            value="🌌 **Beyond Horizons — maximum rank achieved**",
+            inline=False,
+        )
+    else:
+        next_miles, _, next_rank = next_role
+        miles_remaining = max(next_miles - real_miles, 0)
+        embed.add_field(
+            name="Next Milestone",
+            value=f"🌠 **{next_miles:,} — {next_rank}**",
+            inline=True,
+        )
+        embed.add_field(
+            name="Miles Remaining",
+            value=f"📏 **{miles_remaining:,}**",
+            inline=True,
+        )
+
+    embed.set_footer(
+        text="A&T Transport LTD • Driven Beyond Horizons"
+    )
+
+    try:
+        await channel.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException) as error:
+        print(
+            "MILESTONE ANNOUNCEMENT ERROR: Mileage remains saved; "
+            f"Discord send failed for {trucksbook_name} at "
+            f"{milestone_miles:,} miles: {error}"
+        )
+        return
+
+    try:
+        await mark_milestone_announced(
+            discord_user_id,
+            milestone_miles,
+        )
+    except Exception as error:
+        print(
+            "MILESTONE DATABASE WARNING: Announcement was sent, but "
+            f"announced_at could not be updated: {error}"
+        )
+
+    print(
+        "MILESTONE ANNOUNCED: "
+        f"{trucksbook_name} reached {milestone_miles:,} Real miles "
+        f"and earned {milestone_rank}."
+    )
 
 
 # --------------------------------------------------
@@ -1338,6 +1624,28 @@ async def on_message(message):
                     print(
                         "ROLE ACTION ERROR: "
                         f"{error}"
+                    )
+
+            # --------------------------------------
+            # ANNOUNCE NEWLY CROSSED MILESTONES
+            # --------------------------------------
+
+            for milestone in result[
+                "crossed_milestones"
+            ]:
+                try:
+                    await announce_progression_milestone(
+                        guild=guild,
+                        member=member,
+                        discord_user_id=discord_user_id,
+                        trucksbook_name=trucksbook_name,
+                        milestone=milestone,
+                        real_miles=real_miles,
+                    )
+                except Exception as error:
+                    print(
+                        "MILESTONE ANNOUNCEMENT ERROR: Mileage remains "
+                        f"saved; unexpected failure: {error}"
                     )
 
         print("--------------------------------")
