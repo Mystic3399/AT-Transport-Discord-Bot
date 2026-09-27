@@ -129,7 +129,61 @@ async def on_message(message):
         print(f"Driver: {author}")
         print(f"Title: {title}")
         print(f"Description: {description}")
+# --------------------------------------------------
+# PARSE TRUCKSBOOK JOB
+# READ-ONLY - DOES NOT SAVE MILEAGE
+# --------------------------------------------------
 
+job_id = title.replace("Job delivery #", "").strip()
+
+statistics = None
+accepted_distance = None
+
+for field in data.get("fields", []):
+    field_name = field.get("name", "")
+    field_value = field.get("value", "")
+
+    if field_name == "Details":
+        for line in field_value.splitlines():
+            clean_line = line.strip()
+
+            if clean_line.startswith("Accepted distance:"):
+                distance_text = clean_line.replace(
+                    "Accepted distance:", ""
+                ).strip()
+
+                distance_number = distance_text.split()[0]
+                distance_number = distance_number.replace(",", "")
+
+                try:
+                    accepted_distance = int(distance_number)
+                except ValueError:
+                    accepted_distance = None
+
+            if clean_line.startswith("Statistics:"):
+                statistics = clean_line.replace(
+                    "Statistics:", ""
+                ).strip()
+
+print("--------------------------------")
+print("A&T JOB PARSER")
+
+print(f"Job ID: {job_id}")
+print(f"Driver: {author}")
+print(f"Statistics: {statistics}")
+print(f"Accepted Distance: {accepted_distance}")
+
+if statistics == "Real" and accepted_distance is not None:
+    print("QUALIFYING JOB: YES")
+    print(
+        f"ACTION: Would add {accepted_distance} miles "
+        "to A&T progression."
+    )
+else:
+    print("QUALIFYING JOB: NO")
+    print("ACTION: Job would be ignored.")
+
+print("--------------------------------")
         # ------------------------------------------
         # MATCH TRUCKSBOOK DRIVER TO DISCORD MEMBER
         # ------------------------------------------
