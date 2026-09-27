@@ -76,10 +76,6 @@ PROGRESSION_ROLES = [
 # --------------------------------------------------
 # TEMPORARY FALLBACK DRIVER MAPPING
 # --------------------------------------------------
-# PostgreSQL driver_links is now the primary source.
-# This mapping remains only as a fallback while the
-# live system is being tested.
-# --------------------------------------------------
 
 DRIVER_MAPPINGS = {
     "Mystical Custom": int(
@@ -170,7 +166,7 @@ bot = commands.Bot(
 
 
 # --------------------------------------------------
-# HELPER FUNCTIONS
+# BASIC HELPERS
 # --------------------------------------------------
 
 def extract_integer(value):
@@ -192,6 +188,24 @@ def extract_integer(value):
     except ValueError:
         return None
 
+
+def get_progression_role(real_miles):
+    target = PROGRESSION_ROLES[0]
+
+    for progression_role in PROGRESSION_ROLES:
+        required_miles = progression_role[0]
+
+        if real_miles >= required_miles:
+            target = progression_role
+        else:
+            break
+
+    return target
+
+
+# --------------------------------------------------
+# DRIVER DATABASE HELPERS
+# --------------------------------------------------
 
 async def find_driver_link(
     trucksbook_name,
@@ -316,6 +330,206 @@ async def record_real_job(
 
 
 # --------------------------------------------------
+# PROGRESSION ROLE MANAGEMENT
+# --------------------------------------------------
+
+async def sync_member_progression_role(
+    guild,
+    discord_user_id,
+    real_miles,
+):
+    member = guild.get_member(
+        discord_user_id
+    )
+
+    if member is None:
+        try:
+            member = await guild.fetch_member(
+                discord_user_id
+            )
+        except (
+            discord.NotFound,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            return {
+                "status": "member_missing",
+                "role_name": None,
+            }
+
+    (
+        required_miles,
+        target_role_id,
+        target_role_name,
+    ) = get_progression_role(
+        real_miles
+    )
+
+    target_role = guild.get_role(
+        target_role_id
+    )
+
+    if target_role is None:
+        return {
+            "status": "role_missing",
+            "role_name": target_role_name,
+        }
+
+    progression_role_ids = {
+        role_id
+        for (
+            _,
+            role_id,
+            _,
+        ) in PROGRESSION_ROLES
+    }
+
+    roles_to_remove = [
+        role
+        for role in member.roles
+        if (
+            role.id in progression_role_ids
+            and role.id != target_role_id
+        )
+    ]
+
+    changed = False
+
+    if roles_to_remove:
+        await member.remove_roles(
+            *roles_to_remove,
+            reason=(
+                "A&T automatic mileage "
+                "progression update"
+            ),
+        )
+
+        changed = True
+
+    if target_role not in member.roles:
+        await member.add_roles(
+            target_role,
+            reason=(
+                "A&T automatic mileage "
+                "progression update"
+            ),
+        )
+
+        changed = True
+
+    if changed:
+        return {
+            "status": "updated",
+            "role_name": target_role_name,
+            "required_miles": required_miles,
+        }
+
+    return {
+        "status": "correct",
+        "role_name": target_role_name,
+        "required_miles": required_miles,
+    }
+
+
+async def sync_all_driver_roles(
+    guild,
+):
+    if db_pool is None:
+        print(
+            "ROLE SYNC ERROR: "
+            "Database unavailable."
+        )
+        return
+
+    async with db_pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT
+                discord_user_id,
+                trucksbook_name,
+                real_miles
+            FROM driver_progress
+            ORDER BY real_miles DESC;
+            """
+        )
+
+    print("--------------------------------")
+    print("Synchronising driver roles...")
+
+    for row in rows:
+        discord_user_id = int(
+            row["discord_user_id"]
+        )
+
+        trucksbook_name = row[
+            "trucksbook_name"
+        ]
+
+        real_miles = int(
+            row["real_miles"]
+        )
+
+        try:
+            result = (
+                await sync_member_progression_role(
+                    guild,
+                    discord_user_id,
+                    real_miles,
+                )
+            )
+
+            status = result["status"]
+            role_name = result["role_name"]
+
+            if status == "updated":
+                print(
+                    f"ROLE UPDATED: "
+                    f"{trucksbook_name} -> "
+                    f"{role_name} "
+                    f"({real_miles:,} miles)"
+                )
+
+            elif status == "correct":
+                print(
+                    f"ROLE OK: "
+                    f"{trucksbook_name} -> "
+                    f"{role_name} "
+                    f"({real_miles:,} miles)"
+                )
+
+            elif status == "member_missing":
+                print(
+                    f"ROLE SKIPPED: "
+                    f"{trucksbook_name} "
+                    "is not currently in Discord."
+                )
+
+            elif status == "role_missing":
+                print(
+                    f"ROLE ERROR: "
+                    f"{role_name} "
+                    "could not be found."
+                )
+
+        except discord.Forbidden:
+            print(
+                f"ROLE ERROR: No permission "
+                f"to manage roles for "
+                f"{trucksbook_name}."
+            )
+
+        except discord.HTTPException as error:
+            print(
+                f"ROLE ERROR: "
+                f"{trucksbook_name}: "
+                f"{error}"
+            )
+
+    print("Driver role sync complete.")
+    print("--------------------------------")
+
+
+# --------------------------------------------------
 # BOT STARTUP
 # --------------------------------------------------
 
@@ -356,6 +570,8 @@ async def on_ready():
             "Checking A&T progression roles..."
         )
 
+        all_roles_found = True
+
         for (
             miles,
             role_id,
@@ -371,12 +587,26 @@ async def on_ready():
                     f"({miles:,}+ miles)"
                 )
             else:
+                all_roles_found = False
+
                 print(
                     "ERROR: Could not find role: "
                     f"{role_name}"
                 )
 
         print("--------------------------------")
+
+        if (
+            db_pool is not None
+            and all_roles_found
+        ):
+            await sync_all_driver_roles(
+                guild
+            )
+        else:
+            print(
+                "Automatic role sync skipped."
+            )
 
     try:
         synced = await bot.tree.sync()
@@ -399,14 +629,12 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # Only process webhook messages.
     if message.webhook_id is None:
         await bot.process_commands(
             message
         )
         return
 
-    # TrucksBook jobs arrive as embeds.
     if not message.embeds:
         await bot.process_commands(
             message
@@ -544,7 +772,7 @@ async def on_message(message):
                 )
 
         # ------------------------------------------
-        # LOG DETECTED JOB
+        # LOG JOB
         # ------------------------------------------
 
         print("--------------------------------")
@@ -598,7 +826,7 @@ async def on_message(message):
             continue
 
         # ------------------------------------------
-        # FIND DISCORD DRIVER
+        # FIND DRIVER
         # ------------------------------------------
 
         discord_user_id = (
@@ -682,17 +910,99 @@ async def on_message(message):
             result["status"]
             == "added"
         ):
+            real_miles = result[
+                "real_miles"
+            ]
+
             print(
                 "ACTION: Real mileage added."
             )
+
             print(
                 f"NEW A&T TOTAL: "
-                f"{result['real_miles']:,} miles"
+                f"{real_miles:,} miles"
             )
-            print(
-                "ROLE ACTION: Disabled "
-                "during verification."
-            )
+
+            # --------------------------------------
+            # UPDATE PROGRESSION ROLE
+            # --------------------------------------
+
+            if guild is None:
+                print(
+                    "ROLE ACTION: Server "
+                    "unavailable."
+                )
+            else:
+                try:
+                    role_result = (
+                        await sync_member_progression_role(
+                            guild,
+                            discord_user_id,
+                            real_miles,
+                        )
+                    )
+
+                    role_status = (
+                        role_result["status"]
+                    )
+
+                    role_name = (
+                        role_result["role_name"]
+                    )
+
+                    if (
+                        role_status
+                        == "updated"
+                    ):
+                        print(
+                            "ROLE ACTION: "
+                            f"Updated to "
+                            f"{role_name}."
+                        )
+
+                    elif (
+                        role_status
+                        == "correct"
+                    ):
+                        print(
+                            "ROLE ACTION: "
+                            f"Already "
+                            f"{role_name}."
+                        )
+
+                    elif (
+                        role_status
+                        == "member_missing"
+                    ):
+                        print(
+                            "ROLE ACTION: "
+                            "Discord member "
+                            "not found."
+                        )
+
+                    elif (
+                        role_status
+                        == "role_missing"
+                    ):
+                        print(
+                            "ROLE ACTION: "
+                            f"{role_name} "
+                            "was not found."
+                        )
+
+                except discord.Forbidden:
+                    print(
+                        "ROLE ACTION ERROR: "
+                        "Bot does not have "
+                        "permission to manage "
+                        "this member's roles."
+                    )
+
+                except discord.HTTPException as error:
+                    print(
+                        "ROLE ACTION ERROR: "
+                        f"{error}"
+                    )
 
         print("--------------------------------")
 
