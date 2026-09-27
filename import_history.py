@@ -12,13 +12,15 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 
 # --------------------------------------------------
-# AUTHORITATIVE TRUCKSBOOK TOTALS
+# AUTHORITATIVE TRUCKSBOOK DRIVER TOTALS
 # --------------------------------------------------
-# Source:
-# A&T Transport LTD -> Log Overview -> User summaries
 #
-# These are the current Accepted Distance totals
-# shown by TrucksBook.
+# Source:
+# A&T Transport LTD
+# Log Overview -> User summaries
+#
+# These individual displayed totals are used for
+# Discord progression.
 # --------------------------------------------------
 
 DRIVER_TOTALS = {
@@ -67,14 +69,43 @@ DRIVER_TOTALS = {
 
 
 # --------------------------------------------------
-# EXPECTED TOTAL
+# TRUCKSBOOK DISPLAY TOTAL
+# --------------------------------------------------
+#
+# TrucksBook displays 106,842 miles as the company
+# total.
+#
+# Its eight displayed driver totals add up to
+# 106,843 miles.
+#
+# This 1-mile difference is treated as a display /
+# rounding discrepancy. Individual driver totals
+# are authoritative for progression roles.
 # --------------------------------------------------
 
-EXPECTED_COMPANY_TOTAL = 106842
+TRUCKSBOOK_COMPANY_DISPLAY_TOTAL = 106842
+
+EXPECTED_DRIVER_TOTAL = 106843
 
 
 # --------------------------------------------------
-# MAIN REPAIR
+# EXPECTED DRIVER VALUES
+# --------------------------------------------------
+
+EXPECTED_DRIVER_MILES = {
+    "Mystical Custom": 40372,
+    "BUNGIE B": 33859,
+    "MR.HOBO": 22212,
+    "NXTCLUTCH": 3567,
+    "DannyAlpha": 3544,
+    "bran123": 1584,
+    "Dancus15": 1463,
+    "WILLIAM S.D016": 242,
+}
+
+
+# --------------------------------------------------
+# MAIN BASELINE REPAIR
 # --------------------------------------------------
 
 async def main():
@@ -87,34 +118,111 @@ async def main():
     print("A&T Transport Baseline Repair")
     print("--------------------------------")
 
-    calculated_total = sum(
+    # ----------------------------------------------
+    # SAFETY CHECK 1
+    # VERIFY ALL EIGHT DRIVERS
+    # ----------------------------------------------
+
+    if len(DRIVER_TOTALS) != 8:
+        raise RuntimeError(
+            "Safety check failed: "
+            "expected exactly 8 drivers."
+        )
+
+    print("Drivers: 8")
+
+    # ----------------------------------------------
+    # SAFETY CHECK 2
+    # VERIFY EACH DRIVER'S MILEAGE
+    # ----------------------------------------------
+
+    for (
+        trucksbook_name,
+        expected_miles,
+    ) in EXPECTED_DRIVER_MILES.items():
+
+        if (
+            trucksbook_name
+            not in DRIVER_TOTALS
+        ):
+            raise RuntimeError(
+                "Safety check failed: "
+                f"{trucksbook_name} is missing."
+            )
+
+        actual_miles = (
+            DRIVER_TOTALS[
+                trucksbook_name
+            ]["real_miles"]
+        )
+
+        if actual_miles != expected_miles:
+            raise RuntimeError(
+                "Safety check failed for "
+                f"{trucksbook_name}. "
+                f"Expected {expected_miles:,}, "
+                f"found {actual_miles:,}."
+            )
+
+    print(
+        "Individual driver totals verified."
+    )
+
+    # ----------------------------------------------
+    # SAFETY CHECK 3
+    # VERIFY SUM OF DISPLAYED DRIVER TOTALS
+    # ----------------------------------------------
+
+    calculated_driver_total = sum(
         driver["real_miles"]
         for driver in DRIVER_TOTALS.values()
     )
 
     print(
-        f"Drivers: {len(DRIVER_TOTALS)}"
+        "Calculated driver total: "
+        f"{calculated_driver_total:,} miles"
     )
 
-    print(
-        f"Calculated company total: "
-        f"{calculated_total:,} miles"
-    )
-
-    print(
-        f"Expected TrucksBook total: "
-        f"{EXPECTED_COMPANY_TOTAL:,} miles"
-    )
-
-    if calculated_total != EXPECTED_COMPANY_TOTAL:
+    if (
+        calculated_driver_total
+        != EXPECTED_DRIVER_TOTAL
+    ):
         raise RuntimeError(
-            "Safety check failed: driver totals "
-            "do not equal the TrucksBook company total."
+            "Safety check failed: "
+            "displayed driver totals have changed."
         )
 
     print(
-        "Safety check passed."
+        "Expected driver total: "
+        f"{EXPECTED_DRIVER_TOTAL:,} miles"
     )
+
+    # ----------------------------------------------
+    # REPORT TRUCKSBOOK ROUNDING DIFFERENCE
+    # ----------------------------------------------
+
+    difference = (
+        calculated_driver_total
+        - TRUCKSBOOK_COMPANY_DISPLAY_TOTAL
+    )
+
+    print(
+        "TrucksBook company display total: "
+        f"{TRUCKSBOOK_COMPANY_DISPLAY_TOTAL:,} miles"
+    )
+
+    print(
+        "Displayed total difference: "
+        f"{difference:+,} mile"
+    )
+
+    print(
+        "Safety checks passed."
+    )
+
+    # ----------------------------------------------
+    # CONNECT TO POSTGRESQL
+    # ----------------------------------------------
 
     connection = await asyncpg.connect(
         DATABASE_URL
@@ -164,7 +272,7 @@ async def main():
             )
 
             # --------------------------------------
-            # SET AUTHORITATIVE MILEAGE TOTALS
+            # SET AUTHORITATIVE MILEAGE
             # --------------------------------------
 
             for (
@@ -219,7 +327,7 @@ async def main():
             )
 
         # ------------------------------------------
-        # VERIFY DATABASE
+        # READ DATABASE BACK
         # ------------------------------------------
 
         rows = await connection.fetch(
@@ -232,45 +340,82 @@ async def main():
             """
         )
 
-        database_total = sum(
-            int(row["real_miles"])
-            for row in rows
-        )
-
         print("--------------------------------")
         print("DATABASE VERIFICATION")
         print("--------------------------------")
 
+        database_values = {}
+
         for row in rows:
-            print(
-                f"{row['trucksbook_name']}: "
-                f"{row['real_miles']:,} miles"
+            trucksbook_name = (
+                row["trucksbook_name"]
             )
+
+            real_miles = int(
+                row["real_miles"]
+            )
+
+            database_values[
+                trucksbook_name
+            ] = real_miles
+
+            print(
+                f"{trucksbook_name}: "
+                f"{real_miles:,} miles"
+            )
+
+        # ------------------------------------------
+        # VERIFY EACH DATABASE VALUE
+        # ------------------------------------------
+
+        for (
+            trucksbook_name,
+            expected_miles,
+        ) in EXPECTED_DRIVER_MILES.items():
+
+            database_miles = (
+                database_values.get(
+                    trucksbook_name
+                )
+            )
+
+            if database_miles != expected_miles:
+                raise RuntimeError(
+                    "Database verification "
+                    "failed for "
+                    f"{trucksbook_name}."
+                )
+
+        database_total = sum(
+            database_values.values()
+        )
 
         print("--------------------------------")
 
         print(
-            f"Database company total: "
+            "Database driver total: "
             f"{database_total:,} miles"
         )
 
-        if database_total == EXPECTED_COMPANY_TOTAL:
-            print(
-                "DATABASE TOTAL VERIFIED"
+        if database_total != EXPECTED_DRIVER_TOTAL:
+            raise RuntimeError(
+                "Database total verification "
+                "failed."
             )
-        else:
-            print(
-                "WARNING: Database total does "
-                "not match TrucksBook."
-            )
+
+        print(
+            "DATABASE DRIVER TOTALS VERIFIED"
+        )
 
         print("--------------------------------")
         print("BASELINE REPAIR COMPLETE")
         print("--------------------------------")
+
         print(
-            "No Discord roles have been changed "
+            "Discord roles were not changed "
             "by this importer."
         )
+
         print("--------------------------------")
 
     finally:
