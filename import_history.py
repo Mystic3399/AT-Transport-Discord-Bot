@@ -1,7 +1,5 @@
 import asyncio
-import csv
 import os
-import re
 
 import asyncpg
 
@@ -11,69 +9,72 @@ import asyncpg
 # --------------------------------------------------
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-CSV_FILE = "trucksbook_history.csv"
 
 
 # --------------------------------------------------
-# TRUCKSBOOK -> DISCORD LINKS
+# AUTHORITATIVE TRUCKSBOOK TOTALS
+# --------------------------------------------------
+# Source:
+# A&T Transport LTD -> Log Overview -> User summaries
+#
+# These are the current Accepted Distance totals
+# shown by TrucksBook.
 # --------------------------------------------------
 
-DRIVER_LINKS = {
-    "Mystical Custom": int(
-        os.getenv("DRIVER_MYSTICAL_CUSTOM")
-    ),
-    "BUNGIE B": 1416143371319115837,
-    "MR.HOBO": 1539275080134037504,
-    "NXTCLUTCH": 1545451538728882301,
-    "bran123": 1549476207215648879,
-    "DannyAlpha": 1120815164091023390,
-    "WILLIAM S.D016": 1009945499392020571,
-    "Dancus15": 1134534113345413212,
+DRIVER_TOTALS = {
+    "Mystical Custom": {
+        "discord_user_id": int(
+            os.getenv("DRIVER_MYSTICAL_CUSTOM")
+        ),
+        "real_miles": 40372,
+    },
+
+    "BUNGIE B": {
+        "discord_user_id": 1416143371319115837,
+        "real_miles": 33859,
+    },
+
+    "MR.HOBO": {
+        "discord_user_id": 1539275080134037504,
+        "real_miles": 22212,
+    },
+
+    "NXTCLUTCH": {
+        "discord_user_id": 1545451538728882301,
+        "real_miles": 3567,
+    },
+
+    "DannyAlpha": {
+        "discord_user_id": 1120815164091023390,
+        "real_miles": 3544,
+    },
+
+    "bran123": {
+        "discord_user_id": 1549476207215648879,
+        "real_miles": 1584,
+    },
+
+    "Dancus15": {
+        "discord_user_id": 1134534113345413212,
+        "real_miles": 1463,
+    },
+
+    "WILLIAM S.D016": {
+        "discord_user_id": 1009945499392020571,
+        "real_miles": 242,
+    },
 }
 
 
 # --------------------------------------------------
-# NUMBER PARSING
+# EXPECTED TOTAL
 # --------------------------------------------------
 
-def clean_number(value):
-    """
-    Converts TrucksBook values such as:
-
-    175 mi
-    60 mph
-    1,234 mi
-    62.4 mph
-
-    into a numeric value.
-    """
-
-    if value is None:
-        return 0
-
-    value = str(value).strip()
-
-    if not value:
-        return 0
-
-    match = re.search(
-        r"-?[\d,]+(?:\.\d+)?",
-        value,
-    )
-
-    if not match:
-        return 0
-
-    number = match.group(0).replace(",", "")
-
-    try:
-        return float(number)
-    except ValueError:
-        return 0
+EXPECTED_COMPANY_TOTAL = 106842
 
 
 # --------------------------------------------------
-# HISTORICAL IMPORT
+# MAIN REPAIR
 # --------------------------------------------------
 
 async def main():
@@ -83,238 +84,70 @@ async def main():
         )
 
     print("--------------------------------")
-    print("A&T Transport Historical Repair")
+    print("A&T Transport Baseline Repair")
     print("--------------------------------")
+
+    calculated_total = sum(
+        driver["real_miles"]
+        for driver in DRIVER_TOTALS.values()
+    )
+
+    print(
+        f"Drivers: {len(DRIVER_TOTALS)}"
+    )
+
+    print(
+        f"Calculated company total: "
+        f"{calculated_total:,} miles"
+    )
+
+    print(
+        f"Expected TrucksBook total: "
+        f"{EXPECTED_COMPANY_TOTAL:,} miles"
+    )
+
+    if calculated_total != EXPECTED_COMPANY_TOTAL:
+        raise RuntimeError(
+            "Safety check failed: driver totals "
+            "do not equal the TrucksBook company total."
+        )
+
+    print(
+        "Safety check passed."
+    )
 
     connection = await asyncpg.connect(
         DATABASE_URL
     )
 
     try:
-        # ------------------------------------------
-        # LOAD CSV FIRST
-        # ------------------------------------------
-
-        historical_rows = []
-
-        with open(
-            CSV_FILE,
-            "r",
-            encoding="utf-8-sig",
-            newline="",
-        ) as csv_file:
-            reader = csv.DictReader(
-                csv_file,
-                delimiter=";",
-            )
-
-            print("CSV columns:")
-            print(reader.fieldnames)
-
-            for row in reader:
-                historical_rows.append(row)
-
-        print(
-            f"Historical CSV jobs found: "
-            f"{len(historical_rows)}"
-        )
-
-        # ------------------------------------------
-        # VALIDATE CSV BEFORE DATABASE CHANGES
-        # ------------------------------------------
-
-        if not historical_rows:
-            raise RuntimeError(
-                "Historical CSV contains no jobs."
-            )
-
-        required_columns = {
-            "Name",
-            "Accepted distance",
-            "Maximal reached speed",
-            "TrucksBookID",
-        }
-
-        csv_columns = set(
-            historical_rows[0].keys()
-        )
-
-        missing_columns = (
-            required_columns - csv_columns
-        )
-
-        if missing_columns:
-            raise RuntimeError(
-                "Missing CSV columns: "
-                + ", ".join(
-                    sorted(missing_columns)
-                )
-            )
-
-        # ------------------------------------------
-        # PREPARE HISTORICAL JOBS
-        # ------------------------------------------
-
-        qualifying_jobs = []
-        race_jobs = []
-
-        unknown_drivers = 0
-        missing_job_ids = 0
-        duplicate_csv_ids = 0
-
-        seen_job_ids = set()
-
-        for row in historical_rows:
-            trucksbook_name = (
-                row.get(
-                    "Name",
-                    "",
-                ).strip()
-            )
-
-            if (
-                trucksbook_name
-                not in DRIVER_LINKS
-            ):
-                unknown_drivers += 1
-                continue
-
-            job_id = (
-                row.get(
-                    "TrucksBookID",
-                    "",
-                ).strip()
-            )
-
-            if not job_id:
-                missing_job_ids += 1
-                continue
-
-            if job_id in seen_job_ids:
-                duplicate_csv_ids += 1
-                continue
-
-            seen_job_ids.add(job_id)
-
-            accepted_distance = clean_number(
-                row.get(
-                    "Accepted distance"
-                )
-            )
-
-            max_speed = clean_number(
-                row.get(
-                    "Maximal reached speed"
-                )
-            )
-
-            discord_user_id = (
-                DRIVER_LINKS[
-                    trucksbook_name
-                ]
-            )
-
-            job_data = {
-                "job_id": job_id,
-                "discord_user_id":
-                    discord_user_id,
-                "trucksbook_name":
-                    trucksbook_name,
-                "accepted_distance":
-                    int(round(
-                        accepted_distance
-                    )),
-                "max_speed":
-                    max_speed,
-            }
-
-            # TrucksBook historical CSV does not
-            # include its Real/Race classification.
-            #
-            # A&T historical rule:
-            # 62 MPH or below = qualifying Real job.
-
-            if max_speed <= 62:
-                qualifying_jobs.append(
-                    job_data
-                )
-            else:
-                race_jobs.append(
-                    job_data
-                )
-
-        print("--------------------------------")
-        print("CSV VALIDATION")
-        print("--------------------------------")
-
-        print(
-            f"Qualifying Real jobs: "
-            f"{len(qualifying_jobs)}"
-        )
-
-        print(
-            f"Race jobs excluded: "
-            f"{len(race_jobs)}"
-        )
-
-        print(
-            f"Unknown drivers: "
-            f"{unknown_drivers}"
-        )
-
-        print(
-            f"Missing TrucksBook IDs: "
-            f"{missing_job_ids}"
-        )
-
-        print(
-            f"Duplicate CSV IDs: "
-            f"{duplicate_csv_ids}"
-        )
-
-        # ------------------------------------------
-        # SAFETY CHECKS
-        # ------------------------------------------
-
-        if unknown_drivers != 0:
-            raise RuntimeError(
-                "Import stopped because unknown "
-                "drivers were found."
-            )
-
-        if missing_job_ids != 0:
-            raise RuntimeError(
-                "Import stopped because jobs with "
-                "missing TrucksBook IDs were found."
-            )
-
-        if duplicate_csv_ids != 0:
-            raise RuntimeError(
-                "Import stopped because duplicate "
-                "TrucksBook IDs were found."
-            )
-
-        # ------------------------------------------
-        # DATABASE TRANSACTION
-        # ------------------------------------------
-
         async with connection.transaction():
 
             # --------------------------------------
-            # CREATE / UPDATE DRIVER LINKS
+            # UPDATE DRIVER LINKS
             # --------------------------------------
 
             for (
                 trucksbook_name,
-                discord_user_id,
-            ) in DRIVER_LINKS.items():
+                driver_data,
+            ) in DRIVER_TOTALS.items():
+
+                discord_user_id = (
+                    driver_data[
+                        "discord_user_id"
+                    ]
+                )
+
                 await connection.execute(
                     """
                     INSERT INTO driver_links (
                         trucksbook_name,
                         discord_user_id
                     )
-                    VALUES ($1, $2)
+                    VALUES (
+                        $1,
+                        $2
+                    )
                     ON CONFLICT (
                         trucksbook_name
                     )
@@ -327,114 +160,28 @@ async def main():
                 )
 
             print(
-                f"Driver links ready: "
-                f"{len(DRIVER_LINKS)}"
+                "Driver links updated."
             )
 
             # --------------------------------------
-            # REMOVE PREVIOUS HISTORICAL IMPORT
-            # --------------------------------------
-
-            all_csv_job_ids = list(
-                seen_job_ids
-            )
-
-            deleted_jobs = 0
-
-            if all_csv_job_ids:
-                result = (
-                    await connection.execute(
-                        """
-                        DELETE FROM processed_jobs
-                        WHERE job_id =
-                            ANY($1::text[]);
-                        """,
-                        all_csv_job_ids,
-                    )
-                )
-
-                try:
-                    deleted_jobs = int(
-                        result.split()[-1]
-                    )
-                except (
-                    ValueError,
-                    IndexError,
-                ):
-                    deleted_jobs = 0
-
-            print(
-                f"Previous historical jobs "
-                f"removed: {deleted_jobs}"
-            )
-
-            # --------------------------------------
-            # INSERT CORRECT REAL JOBS
-            # --------------------------------------
-
-            inserted_jobs = 0
-
-            for job in qualifying_jobs:
-                result = (
-                    await connection.execute(
-                        """
-                        INSERT INTO processed_jobs (
-                            job_id,
-                            discord_user_id,
-                            trucksbook_name,
-                            accepted_distance,
-                            statistics
-                        )
-                        VALUES (
-                            $1,
-                            $2,
-                            $3,
-                            $4,
-                            'Real'
-                        )
-                        ON CONFLICT (job_id)
-                        DO NOTHING;
-                        """,
-                        job["job_id"],
-                        job[
-                            "discord_user_id"
-                        ],
-                        job[
-                            "trucksbook_name"
-                        ],
-                        job[
-                            "accepted_distance"
-                        ],
-                    )
-                )
-
-                if result == "INSERT 0 1":
-                    inserted_jobs += 1
-
-            # --------------------------------------
-            # REBUILD DRIVER PROGRESS
+            # SET AUTHORITATIVE MILEAGE TOTALS
             # --------------------------------------
 
             for (
                 trucksbook_name,
-                discord_user_id,
-            ) in DRIVER_LINKS.items():
+                driver_data,
+            ) in DRIVER_TOTALS.items():
+
+                discord_user_id = (
+                    driver_data[
+                        "discord_user_id"
+                    ]
+                )
 
                 real_miles = (
-                    await connection.fetchval(
-                        """
-                        SELECT COALESCE(
-                            SUM(
-                                accepted_distance
-                            ),
-                            0
-                        )
-                        FROM processed_jobs
-                        WHERE discord_user_id = $1
-                          AND statistics = 'Real';
-                        """,
-                        discord_user_id,
-                    )
+                    driver_data[
+                        "real_miles"
+                    ]
                 )
 
                 await connection.execute(
@@ -467,8 +214,12 @@ async def main():
                     real_miles,
                 )
 
+            print(
+                "Driver mileage totals updated."
+            )
+
         # ------------------------------------------
-        # VERIFY FINAL DATABASE TOTALS
+        # VERIFY DATABASE
         # ------------------------------------------
 
         rows = await connection.fetch(
@@ -481,37 +232,13 @@ async def main():
             """
         )
 
-        processed_job_count = (
-            await connection.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM processed_jobs
-                WHERE statistics = 'Real';
-                """
-            )
+        database_total = sum(
+            int(row["real_miles"])
+            for row in rows
         )
 
         print("--------------------------------")
-        print("HISTORICAL REPAIR COMPLETE")
-        print("--------------------------------")
-
-        print(
-            f"Correct Real jobs inserted: "
-            f"{inserted_jobs}"
-        )
-
-        print(
-            f"Race jobs excluded: "
-            f"{len(race_jobs)}"
-        )
-
-        print(
-            f"Real jobs currently stored: "
-            f"{processed_job_count}"
-        )
-
-        print("--------------------------------")
-        print("A&T DRIVER MILEAGE")
+        print("DATABASE VERIFICATION")
         print("--------------------------------")
 
         for row in rows:
@@ -521,8 +248,28 @@ async def main():
             )
 
         print("--------------------------------")
+
         print(
-            "No Discord roles have been changed."
+            f"Database company total: "
+            f"{database_total:,} miles"
+        )
+
+        if database_total == EXPECTED_COMPANY_TOTAL:
+            print(
+                "DATABASE TOTAL VERIFIED"
+            )
+        else:
+            print(
+                "WARNING: Database total does "
+                "not match TrucksBook."
+            )
+
+        print("--------------------------------")
+        print("BASELINE REPAIR COMPLETE")
+        print("--------------------------------")
+        print(
+            "No Discord roles have been changed "
+            "by this importer."
         )
         print("--------------------------------")
 
@@ -531,7 +278,7 @@ async def main():
 
 
 # --------------------------------------------------
-# START IMPORT
+# START
 # --------------------------------------------------
 
 if __name__ == "__main__":
