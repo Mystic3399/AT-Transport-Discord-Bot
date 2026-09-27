@@ -2575,7 +2575,7 @@ async def trucksbook_profile_test(
         )
 
     # Keep Discord output within safe limits.
-    discord_preview = diagnostic_text[:3000]
+    discord_preview = diagnostic_text[:900]
 
     # Railway can show more information.
     railway_preview = diagnostic_text[:10000]
