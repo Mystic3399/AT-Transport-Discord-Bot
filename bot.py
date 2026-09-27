@@ -2,13 +2,19 @@ import os
 import discord
 from discord.ext import commands
 
+
 # --------------------------------------------------
-# A&T TRANSPORT LTD DISCORD BOT
+# A&T TRANSPORT LTD - CONFIGURATION
 # --------------------------------------------------
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 GUILD_ID = int(os.getenv("GUILD_ID"))
+
+
+# --------------------------------------------------
+# A&T MILEAGE PROGRESSION ROLES
+# --------------------------------------------------
 
 PROGRESSION_ROLES = [
     (0, int(os.getenv("ROLE_NEW_DRIVER")), "A&T New Driver"),
@@ -22,15 +28,35 @@ PROGRESSION_ROLES = [
     (40000, int(os.getenv("ROLE_AT_ROAD_LEGEND")), "A&T Road Legend"),
     (50000, int(os.getenv("ROLE_BEYOND_HORIZONS")), "Beyond Horizons"),
 ]
+
+
+# --------------------------------------------------
+# TRUCKSBOOK -> DISCORD DRIVER MAPPINGS
+# --------------------------------------------------
+
 DRIVER_MAPPINGS = {
     "Mystical Custom": int(os.getenv("DRIVER_MYSTICAL_CUSTOM")),
 }
+
+
+# --------------------------------------------------
+# DISCORD INTENTS
+# --------------------------------------------------
+
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
+
 bot = commands.Bot(
-    command_prefix="!", intents=intents)
+    command_prefix="!",
+    intents=intents
+)
+
+
+# --------------------------------------------------
+# BOT STARTUP
+# --------------------------------------------------
 
 @bot.event
 async def on_ready():
@@ -64,67 +90,109 @@ async def on_ready():
     except Exception as error:
         print(f"Slash command sync failed: {error}")
 
+
+# --------------------------------------------------
+# TRUCKSBOOK WEBHOOK DETECTOR
+# READ-ONLY - DOES NOT MODIFY MILEAGE OR ROLES
+# --------------------------------------------------
+
 @bot.event
 async def on_message(message):
-    # Only inspect webhook messages
+
+    # Ignore normal messages.
+    # We only want Discord webhook messages.
     if message.webhook_id is None:
         await bot.process_commands(message)
         return
 
-    # Only inspect TrucksBook webhook embeds
+    # Ignore webhook messages without embeds.
     if not message.embeds:
         await bot.process_commands(message)
         return
 
     for embed in message.embeds:
+
         data = embed.to_dict()
 
         title = data.get("title", "")
         description = data.get("description", "")
         author = data.get("author", {}).get("name", "")
 
-        # Ignore webhook messages that are not TrucksBook deliveries
+        # Check whether this is a TrucksBook delivery.
         combined_text = f"{title}\n{description}"
 
         if "Job delivery #" not in combined_text:
             continue
 
         print("--------------------------------")
-print("TRUCKSBOOK WEBHOOK DETECTED")
-print(f"Driver: {author}")
-print(f"Title: {title}")
-print(f"Description: {description}")
+        print("TRUCKSBOOK WEBHOOK DETECTED")
+        print(f"Driver: {author}")
+        print(f"Title: {title}")
+        print(f"Description: {description}")
 
-discord_user_id = DRIVER_MAPPINGS.get(author)
+        # ------------------------------------------
+        # MATCH TRUCKSBOOK DRIVER TO DISCORD MEMBER
+        # ------------------------------------------
 
-if discord_user_id:
-    guild = bot.get_guild(GUILD_ID)
-    member = guild.get_member(discord_user_id) if guild else None
+        discord_user_id = DRIVER_MAPPINGS.get(author)
 
-    if member:
-        print(f"MATCHED DISCORD MEMBER: {member}")
-        print(f"Discord User ID: {member.id}")
-    else:
-        print(f"WARNING: Discord member not found for {author}")
-        
-    else:
-    print(f"WARNING: No Discord mapping exists for {author}")
+        if discord_user_id:
+            guild = bot.get_guild(GUILD_ID)
 
-# Print embed fields so we can see exactly what Discord receives
-for field in data.get("fields", []):
-    print(
-        f"Field: {field.get('name')} = "
-        f"{field.get('value')}"
-    )
+            member = (
+                guild.get_member(discord_user_id)
+                if guild
+                else None
+            )
 
-print(f"Discord Message ID: {message.id}")
-print(f"Webhook ID: {message.webhook_id}")
-print("--------------------------------")
+            if member:
+                print(
+                    f"MATCHED DISCORD MEMBER: {member}"
+                )
+                print(
+                    f"Discord User ID: {member.id}"
+                )
+            else:
+                print(
+                    f"WARNING: Discord member not found for {author}"
+                )
+
+        else:
+            print(
+                f"WARNING: No Discord mapping exists for {author}"
+            )
+
+        # ------------------------------------------
+        # PRINT TRUCKSBOOK EMBED INFORMATION
+        # ------------------------------------------
+
+        for field in data.get("fields", []):
+            print(
+                f"Field: {field.get('name')} = "
+                f"{field.get('value')}"
+            )
+
+        print(
+            f"Discord Message ID: {message.id}"
+        )
+
+        print(
+            f"Webhook ID: {message.webhook_id}"
+        )
+
+        print("--------------------------------")
+
     await bot.process_commands(message)
+
+
+# --------------------------------------------------
+# START BOT
+# --------------------------------------------------
 
 if not TOKEN:
     raise RuntimeError(
         "DISCORD_TOKEN has not been configured."
     )
+
 
 bot.run(TOKEN)
