@@ -90,10 +90,24 @@ async def on_message(message):
             continue
 
         print("--------------------------------")
-        print("TRUCKSBOOK WEBHOOK DETECTED")
-        print(f"Driver: {author}")
-        print(f"Title: {title}")
-        print(f"Description: {description}")
+print("TRUCKSBOOK WEBHOOK DETECTED")
+print(f"Driver: {author}")
+print(f"Title: {title}")
+print(f"Description: {description}")
+
+discord_user_id = DRIVER_MAPPINGS.get(author)
+
+if discord_user_id:
+    guild = bot.get_guild(GUILD_ID)
+    member = guild.get_member(discord_user_id) if guild else None
+
+    if member:
+        print(f"MATCHED DISCORD MEMBER: {member}")
+        print(f"Discord User ID: {member.id}")
+    else:
+        print(f"WARNING: Discord member not found for {author}")
+else:
+    print(f"WARNING: No Discord mapping exists for {author}")
 
         # Print embed fields so we can see exactly what Discord receives
         for field in data.get("fields", []):
