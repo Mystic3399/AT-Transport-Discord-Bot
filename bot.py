@@ -2583,7 +2583,7 @@ async def trucksbook_profile_test(
     trucksbook_user_id: str = None,
 ):
     # ------------------------------------------
-    # MANAGEMENT-ONLY DIAGNOSTIC COMMAND
+    # MANAGEMENT-ONLY TEST COMMAND
     # ------------------------------------------
 
     if ctx.guild is None:
@@ -2594,8 +2594,10 @@ async def trucksbook_profile_test(
 
     if not member_is_verification_staff(ctx.author):
         await ctx.reply(
-            "This diagnostic command is restricted "
-            "to A&T Management.",
+            (
+                "This test command is restricted "
+                "to A&T Management."
+            ),
             mention_author=False,
         )
         return
@@ -2606,8 +2608,10 @@ async def trucksbook_profile_test(
 
     if trucksbook_user_id is None:
         await ctx.reply(
-            "Please provide a TrucksBook User ID.\n\n"
-            "Example: `!tbtest 553238`",
+            (
+                "Please provide a TrucksBook User ID.\n\n"
+                "Example: `!tbtest 553238`"
+            ),
             mention_author=False,
         )
         return
@@ -2616,8 +2620,10 @@ async def trucksbook_profile_test(
 
     if not trucksbook_user_id.isdigit():
         await ctx.reply(
-            "The TrucksBook User ID must contain "
-            "numbers only.",
+            (
+                "The TrucksBook User ID must contain "
+                "numbers only."
+            ),
             mention_author=False,
         )
         return
@@ -2632,306 +2638,217 @@ async def trucksbook_profile_test(
         return
 
     # ------------------------------------------
-    # REQUEST PUBLIC TRUCKSBOOK PROFILE
+    # START READ-ONLY PROFILE TEST
     # ------------------------------------------
-
-    profile_url = (
-        "https://trucksbook.eu/profile/"
-        f"{numeric_id}"
-    )
 
     await ctx.reply(
         (
-            "🔎 Searching TrucksBook profile "
+            "🔎 Checking TrucksBook profile "
             f"`{numeric_id}`...\n"
             "No A&T driver data will be changed."
         ),
         mention_author=False,
     )
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        ),
-        "Accept": (
-            "text/html,application/xhtml+xml,"
-            "application/xml;q=0.9,*/*;q=0.8"
-        ),
-        "Accept-Language": "en-GB,en;q=0.9",
-    }
-
-    timeout = aiohttp.ClientTimeout(
-        total=20
-    )
+    # ------------------------------------------
+    # USE REAL PROFILE PARSER
+    # ------------------------------------------
 
     try:
-        async with aiohttp.ClientSession(
-            timeout=timeout,
-            headers=headers,
-        ) as session:
-
-            async with session.get(
-                profile_url,
-                allow_redirects=True,
-            ) as response:
-
-                status_code = response.status
-                final_url = str(response.url)
-
-                html = await response.text(
-                    errors="replace"
-                )
+        result = await fetch_trucksbook_profile(
+            numeric_id
+        )
 
     except Exception as error:
         print("--------------------------------")
-        print("TRUCKSBOOK PROFILE SEARCH FAILED")
+        print("TRUCKSBOOK PROFILE TEST FAILED")
         print(f"User ID: {numeric_id}")
         print(f"Error: {error}")
         print("--------------------------------")
 
         await ctx.reply(
             (
-                "❌ TrucksBook request failed.\n\n"
-                f"**Error:** `{type(error).__name__}`"
+                "❌ The TrucksBook profile checker "
+                "encountered an unexpected error.\n\n"
+                "Check the Railway deployment logs."
             ),
             mention_author=False,
         )
         return
 
     # ------------------------------------------
-    # PARSE COMPLETE PAGE
+    # HANDLE FAILED PROFILE LOOKUP
     # ------------------------------------------
 
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
-
-    page_title = ""
-
-    if soup.title:
-        page_title = soup.title.get_text(
-            " ",
-            strip=True,
+    if not result.get("success"):
+        reason = result.get(
+            "reason",
+            "unknown_error",
         )
 
-    # Remove page elements that are not useful
-    # for profile identification.
-    for unwanted in soup(
-        [
-            "script",
-            "style",
-            "noscript",
-        ]
-    ):
-        unwanted.decompose()
-
-    page_text = soup.get_text(
-        "\n",
-        strip=True,
-    )
-
-    lines = [
-        line.strip()
-        for line in page_text.splitlines()
-        if line.strip()
-    ]
-
-    # ------------------------------------------
-    # SEARCH COMPLETE PROFILE
-    # ------------------------------------------
-
-    search_terms = [
-        str(numeric_id),
-        "Mystical Custom",
-        "A & T Transport LTD",
-        "company",
-        "employee",
-        "driver",
-        "User Profile",
-    ]
-
-    matched_sections = []
-
-    for index, line in enumerate(lines):
-        lower_line = line.lower()
-
-        matched_term = None
-
-        for term in search_terms:
-            if term.lower() in lower_line:
-                matched_term = term
-                break
-
-        if matched_term is None:
-            continue
-
-        start = max(
-            0,
-            index - 4,
-        )
-
-        end = min(
-            len(lines),
-            index + 8,
-        )
-
-        section = lines[
-            start:end
-        ]
-
-        section_text = "\n".join(
-            section
-        )
-
-        if section_text not in matched_sections:
-            matched_sections.append(
-                section_text
+        if reason == "request_failed":
+            message = (
+                "❌ TrucksBook could not be reached.\n\n"
+                "Please try the test again shortly."
             )
 
-    # ------------------------------------------
-    # BUILD DIAGNOSTIC RESULT
-    # ------------------------------------------
-
-    if matched_sections:
-        diagnostic_text = (
-            "\n\n--- MATCH ---\n\n".join(
-                matched_sections
+        elif reason == "http_error":
+            status_code = result.get(
+                "status_code",
+                "Unknown",
             )
+
+            message = (
+                "❌ TrucksBook returned an unexpected "
+                "HTTP response.\n\n"
+                f"**HTTP Status:** `{status_code}`"
+            )
+
+        elif reason == "profile_not_found":
+            message = (
+                "❌ A valid TrucksBook profile could "
+                "not be detected for that User ID."
+            )
+
+        else:
+            message = (
+                "❌ The TrucksBook profile could not "
+                "be verified."
+            )
+
+        await ctx.reply(
+            message,
+            mention_author=False,
         )
-    else:
-        diagnostic_text = (
-            "No requested profile search terms "
-            "were found in the readable page text."
-        )
-
-    # Keep Discord output within safe limits.
-    discord_preview = diagnostic_text[:900]
-
-    # Railway can show more information.
-    railway_preview = diagnostic_text[:10000]
+        return
 
     # ------------------------------------------
-    # EXTRA DIRECT CHECKS
+    # PROFILE INFORMATION
     # ------------------------------------------
 
-    lower_page = page_text.lower()
-
-    mystic_found = (
-        "mystical custom"
-        in lower_page
+    profile_id = result.get(
+        "trucksbook_user_id"
     )
 
-    at_transport_found = (
-        "a & t transport ltd"
-        in lower_page
+    trucksbook_name = result.get(
+        "trucksbook_name"
     )
 
-    user_id_found = (
-        str(numeric_id)
-        in page_text
+    company_name = result.get(
+        "company_name"
+    )
+
+    company_position = result.get(
+        "company_position"
+    )
+
+    belongs_to_at = result.get(
+        "belongs_to_at",
+        False,
     )
 
     # ------------------------------------------
-    # RAILWAY OUTPUT
+    # SAFE DISPLAY VALUES
     # ------------------------------------------
-    print("--------------------------------")
-    print("TRUCKSBOOK PROFILE SEARCH")
-    print(f"Requested User ID: {numeric_id}")
-    print(f"HTTP Status: {status_code}")
-    print(f"Final URL: {final_url}")
-    print(f"HTML Length: {len(html)}")
-    print(f"Page Title: {page_title}")
-    print(
-        "Requested User ID found in page: "
-        f"{user_id_found}"
+
+    display_name = (
+        trucksbook_name
+        if trucksbook_name
+        else "Not detected"
     )
-    print(
-        "Mystical Custom found: "
-        f"{mystic_found}"
+
+    display_company = (
+        company_name
+        if company_name
+        else "Not detected"
     )
-    print(
-        "A&T Transport found: "
-        f"{at_transport_found}"
+
+    display_position = (
+        company_position
+        if company_position
+        else "Not detected"
     )
-    print("PROFILE SEARCH RESULTS:")
-    print(railway_preview)
-    print("--------------------------------")
+
+    membership_text = (
+        "✅ Yes"
+        if belongs_to_at
+        else "❌ No"
+    )
 
     # ------------------------------------------
-    # DISCORD RESULT
+    # BUILD RESULT EMBED
     # ------------------------------------------
 
     embed = discord.Embed(
-        title="🔎 TrucksBook Profile Search",
+        title="🔎 TrucksBook Profile Verification Test",
+        description=(
+            "The A&T TrucksBook profile parser "
+            "completed its read-only verification.\n\n"
+            "**No driver data has been changed.**"
+        ),
         colour=(
             discord.Colour.green()
-            if status_code == 200
+            if belongs_to_at
             else discord.Colour.orange()
         ),
     )
 
     embed.add_field(
-        name="Requested User ID",
-        value=f"`{numeric_id}`",
+        name="TrucksBook User ID",
+        value=f"`{profile_id}`",
         inline=True,
     )
 
     embed.add_field(
-        name="HTTP Status",
-        value=f"`{status_code}`",
+        name="Driver",
+        value=f"`{display_name}`",
         inline=True,
     )
 
     embed.add_field(
-        name="Profile ID Detected",
-        value=(
-            "✅ Yes"
-            if user_id_found
-            else "❌ No"
-        ),
+        name="A&T Member",
+        value=membership_text,
         inline=True,
     )
 
     embed.add_field(
-        name="Mystical Custom",
-        value=(
-            "✅ Found"
-            if mystic_found
-            else "❌ Not found"
-        ),
+        name="Company",
+        value=f"`{display_company}`",
         inline=True,
     )
 
     embed.add_field(
-        name="A&T Transport",
-        value=(
-            "✅ Found"
-            if at_transport_found
-            else "❌ Not found"
-        ),
+        name="Company Position",
+        value=f"`{display_position}`",
         inline=True,
     )
 
     embed.add_field(
-        name="HTML Received",
-        value=f"`{len(html):,} characters`",
+        name="Parser Status",
+        value="✅ Profile successfully parsed",
         inline=True,
     )
 
-    embed.add_field(
-        name="Relevant Profile Text",
-        value=(
-            f"```text\n"
-            f"{discord_preview}\n"
-            f"```"
-        ),
-        inline=False,
-    )
+    if belongs_to_at:
+        embed.add_field(
+            name="Verification Result",
+            value=(
+                "✅ This TrucksBook profile is listed "
+                "as a member of **A & T Transport LTD**."
+            ),
+            inline=False,
+        )
+
+    else:
+        embed.add_field(
+            name="Verification Result",
+            value=(
+                "⚠️ The profile was found, but it was "
+                "not detected as a member of "
+                "**A & T Transport LTD**."
+            ),
+            inline=False,
+        )
 
     embed.set_footer(
         text=(
@@ -2944,6 +2861,19 @@ async def trucksbook_profile_test(
         embed=embed
     )
 
+    # ------------------------------------------
+    # RAILWAY DIAGNOSTIC OUTPUT
+    # ------------------------------------------
+
+    print("--------------------------------")
+    print("TRUCKSBOOK PARSER TEST COMPLETE")
+    print(f"Profile ID: {profile_id}")
+    print(f"Driver: {trucksbook_name}")
+    print(f"Company: {company_name}")
+    print(f"Position: {company_position}")
+    print(f"A&T Member: {belongs_to_at}")
+    print("NO DRIVER DATA WAS MODIFIED")
+    print("--------------------------------")
 
 
 @trucksbook_profile_test.error
@@ -2958,7 +2888,7 @@ async def trucksbook_profile_test_error(
 
     await ctx.reply(
         (
-            "❌ The TrucksBook diagnostic command "
+            "❌ The TrucksBook profile test "
             "encountered an error.\n\n"
             "Check the Railway deployment logs."
         ),
