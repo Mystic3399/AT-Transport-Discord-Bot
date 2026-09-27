@@ -314,10 +314,31 @@ def get_progression_role(real_miles):
 # DRIVER DATABASE HELPERS
 # --------------------------------------------------
 
+def normalise_trucksbook_name(trucksbook_name):
+    """Return the stable name used to match profiles and webhooks."""
+    name = " ".join((trucksbook_name or "").split())
+
+    # Public profiles may add the VTC prefix while job webhooks omit it.
+    return re.sub(
+        r"^a\s*&\s*t(?:\s+|$)",
+        "",
+        name,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+
 async def find_driver_link(
     trucksbook_name,
 ):
     if db_pool is None:
+        return None
+
+    normalised_name = normalise_trucksbook_name(
+        trucksbook_name
+    )
+
+    if not normalised_name:
         return None
 
     async with db_pool.acquire() as connection:
@@ -326,19 +347,32 @@ async def find_driver_link(
                 """
                 SELECT discord_user_id
                 FROM driver_links
-                WHERE LOWER(trucksbook_name)
-                    = LOWER($1);
+                WHERE LOWER(
+                    REGEXP_REPLACE(
+                        BTRIM(trucksbook_name),
+                        '^a\\s*&\\s*t(\\s+|$)',
+                        '',
+                        'i'
+                    )
+                ) = LOWER($1);
                 """,
-                trucksbook_name,
+                normalised_name,
             )
         )
 
     if discord_user_id:
         return int(discord_user_id)
 
-    return DRIVER_MAPPINGS.get(
-        trucksbook_name
-    )
+    for mapped_name, mapped_user_id in (
+        DRIVER_MAPPINGS.items()
+    ):
+        if (
+            normalise_trucksbook_name(mapped_name).casefold()
+            == normalised_name.casefold()
+        ):
+            return mapped_user_id
+
+    return None
 
 
 async def record_real_job(
@@ -1707,141 +1741,6 @@ async def cancel_verification_record(
 
     return result != "UPDATE 0"
 
-@bot.command(name="verifytest")
-async def verify_test(ctx):
-    if ctx.guild is None:
-        return
-
-    if ctx.guild.id != GUILD_ID:
-        return
-
-    # Management-only protection
-    if not member_is_verification_staff(ctx.author):
-        await ctx.reply(
-            "This test command is restricted to A&T Management.",
-            mention_author=False,
-        )
-        return
-
-    category = ctx.guild.get_channel(
-        VERIFICATION_CATEGORY_ID
-    )
-
-    if not isinstance(
-        category,
-        discord.CategoryChannel,
-    ):
-        await ctx.reply(
-            "The A&T verification category could not be found.",
-            mention_author=False,
-        )
-        return
-
-    member = ctx.author
-
-    overwrites = {
-        ctx.guild.default_role:
-            discord.PermissionOverwrite(
-                view_channel=False
-            ),
-
-        member:
-            discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-            ),
-
-        ctx.guild.me:
-            discord.PermissionOverwrite(
-                view_channel=True,
-                send_messages=True,
-                read_message_history=True,
-                manage_channels=True,
-                manage_messages=True,
-            ),
-    }
-
-    for role_id in VERIFICATION_STAFF_ROLE_IDS:
-        role = ctx.guild.get_role(role_id)
-
-        if role is not None:
-            overwrites[role] = (
-                discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    read_message_history=True,
-                    manage_messages=True,
-                )
-            )
-
-    try:
-        channel = await ctx.guild.create_text_channel(
-            name=f"test-verify-{member.id}",
-            category=category,
-            overwrites=overwrites,
-            reason="A&T onboarding system test",
-        )
-
-    except discord.Forbidden:
-        await ctx.reply(
-            "TEST FAILED: The bot does not have permission to create channels.",
-            mention_author=False,
-        )
-        return
-
-    except discord.HTTPException as error:
-        await ctx.reply(
-            f"TEST FAILED: Discord returned an error: `{error}`",
-            mention_author=False,
-        )
-        return
-
-    embed = discord.Embed(
-        title="🧪 A&T DRIVER VERIFICATION TEST",
-        description=(
-            f"{member.mention}\n\n"
-            "The private driver-verification channel was "
-            "created successfully.\n\n"
-            "### Permission Test\n"
-            "This channel should only be visible to:\n"
-            "• You\n"
-            "• Owners\n"
-            "• Admin\n"
-            "• Management\n"
-            "• Recruitment Manager\n"
-            "• A&T Transport Bot\n\n"
-            "No TrucksBook account, mileage, progression "
-            "role or driver link has been changed.\n\n"
-            "**TEST MODE — SAFE TO DELETE**"
-        ),
-        colour=discord.Colour.green(),
-    )
-
-    embed.set_footer(
-        text="A&T Transport LTD • Onboarding Test Mode"
-    )
-
-    await channel.send(
-        content=member.mention,
-        embed=embed,
-    )
-
-    await ctx.reply(
-        (
-            "✅ Verification channel test successful: "
-            f"{channel.mention}"
-        ),
-        mention_author=False,
-    )
-
-    print("--------------------------------")
-    print("A&T VERIFICATION TEST")
-    print(f"Tester: {member} ({member.id})")
-    print(f"Test Channel: {channel.id}")
-    print("NO DRIVER DATA WAS MODIFIED")
-    print("--------------------------------")
-
 @bot.command(
     name="verify"
 )
@@ -2852,23 +2751,58 @@ async def confirm_verification(
     # automatic mileage matching keeps working.
     # ------------------------------------------
 
-    link_name = trucksbook_name.strip()
-
-    if link_name.lower().startswith(
-        "a&t "
-    ):
-        link_name = link_name[4:].strip()
+    link_name = normalise_trucksbook_name(
+        trucksbook_name
+    )
 
     if not link_name:
-        link_name = trucksbook_name.strip()
+        await ctx.reply(
+            "❌ The verified TrucksBook driver name is invalid.",
+            mention_author=False,
+        )
+        return
 
     # ------------------------------------------
     # CREATE PERMANENT DRIVER LINK
     # ------------------------------------------
 
+    final_real_miles = 0
+
     try:
         async with db_pool.acquire() as connection:
             async with connection.transaction():
+
+                # Lock and re-check the verification inside the same
+                # transaction. This makes repeated/concurrent !confirm
+                # attempts safe and prevents stale verification data
+                # from being committed.
+                locked_verification = await connection.fetchrow(
+                    """
+                    SELECT
+                        status,
+                        trucksbook_name,
+                        trucksbook_user_id
+                    FROM driver_verifications
+                    WHERE discord_user_id = $1
+                      AND verification_channel_id = $2
+                    FOR UPDATE;
+                    """,
+                    applicant_id,
+                    ctx.channel.id,
+                )
+
+                if (
+                    locked_verification is None
+                    or locked_verification["status"] != "confirmed"
+                    or locked_verification["trucksbook_name"]
+                        != trucksbook_name
+                    or int(
+                        locked_verification["trucksbook_user_id"]
+                    ) != trucksbook_user_id
+                ):
+                    raise RuntimeError(
+                        "Verification record changed before completion."
+                    )
 
                 # ----------------------------------
                 # CHECK DISCORD ACCOUNT
@@ -2938,8 +2872,14 @@ async def confirm_verification(
                         """
                         SELECT discord_user_id
                         FROM driver_links
-                        WHERE LOWER(trucksbook_name)
-                            = LOWER($1);
+                        WHERE LOWER(
+                            REGEXP_REPLACE(
+                                BTRIM(trucksbook_name),
+                                '^a\\s*&\\s*t(\\s+|$)',
+                                '',
+                                'i'
+                            )
+                        ) = LOWER($1);
                         """,
                         link_name,
                     )
@@ -3005,6 +2945,20 @@ async def confirm_verification(
                     """,
                     applicant_id,
                     link_name,
+                )
+
+                # Preserve any legitimate pre-existing mileage record.
+                # A normal first-time driver receives zero miles.
+                final_real_miles = int(
+                    await connection.fetchval(
+                        """
+                        SELECT real_miles
+                        FROM driver_progress
+                        WHERE discord_user_id = $1;
+                        """,
+                        applicant_id,
+                    )
+                    or 0
                 )
 
                 # ----------------------------------
@@ -3073,7 +3027,7 @@ async def confirm_verification(
             await sync_member_progression_role(
                 ctx.guild,
                 applicant_id,
-                0,
+                final_real_miles,
             )
         )
 
@@ -3119,7 +3073,7 @@ async def confirm_verification(
 
     embed.add_field(
         name="Mileage",
-        value="`0 Real miles`",
+        value=f"`{final_real_miles:,} Real miles`",
         inline=True,
     )
 
@@ -3175,7 +3129,8 @@ async def confirm_verification(
             f"`{link_name}`\n"
             f"**TrucksBook ID:** "
             f"`{trucksbook_user_id}`\n"
-            "**Starting Mileage:** `0 Real miles`\n"
+            f"**Starting Mileage:** "
+            f"`{final_real_miles:,} Real miles`\n"
             f"**Progression Role:** "
             f"`{role_status}`\n"
             "**Status:** Completed"
@@ -3197,7 +3152,7 @@ async def confirm_verification(
         f"TrucksBook User ID: "
         f"{trucksbook_user_id}"
     )
-    print("Starting Mileage: 0")
+    print(f"Starting Mileage: {final_real_miles}")
     print("--------------------------------")
 
     # ------------------------------------------
@@ -3354,328 +3309,6 @@ async def cancel_verification(
             "ONBOARDING DELETE ERROR: "
             f"{error}"
         )
-
-# --------------------------------------------------
-# TRUCKSBOOK PROFILE TEST
-# --------------------------------------------------
-
-@bot.command(name="tbtest")
-async def trucksbook_profile_test(
-    ctx,
-    trucksbook_user_id: str = None,
-):
-    # ------------------------------------------
-    # MANAGEMENT-ONLY TEST COMMAND
-    # ------------------------------------------
-
-    if ctx.guild is None:
-        return
-
-    if ctx.guild.id != GUILD_ID:
-        return
-
-    if not member_is_verification_staff(ctx.author):
-        await ctx.reply(
-            (
-                "This test command is restricted "
-                "to A&T Management."
-            ),
-            mention_author=False,
-        )
-        return
-
-    # ------------------------------------------
-    # VALIDATE USER ID
-    # ------------------------------------------
-
-    if trucksbook_user_id is None:
-        await ctx.reply(
-            (
-                "Please provide a TrucksBook User ID.\n\n"
-                "Example: `!tbtest 553238`"
-            ),
-            mention_author=False,
-        )
-        return
-
-    trucksbook_user_id = trucksbook_user_id.strip()
-
-    if not trucksbook_user_id.isdigit():
-        await ctx.reply(
-            (
-                "The TrucksBook User ID must contain "
-                "numbers only."
-            ),
-            mention_author=False,
-        )
-        return
-
-    numeric_id = int(trucksbook_user_id)
-
-    if numeric_id <= 0:
-        await ctx.reply(
-            "That is not a valid TrucksBook User ID.",
-            mention_author=False,
-        )
-        return
-
-    # ------------------------------------------
-    # START READ-ONLY PROFILE TEST
-    # ------------------------------------------
-
-    await ctx.reply(
-        (
-            "🔎 Checking TrucksBook profile "
-            f"`{numeric_id}`...\n"
-            "No A&T driver data will be changed."
-        ),
-        mention_author=False,
-    )
-
-    # ------------------------------------------
-    # USE REAL PROFILE PARSER
-    # ------------------------------------------
-
-    try:
-        result = await fetch_trucksbook_profile(
-            numeric_id
-        )
-
-    except Exception as error:
-        print("--------------------------------")
-        print("TRUCKSBOOK PROFILE TEST FAILED")
-        print(f"User ID: {numeric_id}")
-        print(f"Error: {error}")
-        print("--------------------------------")
-
-        await ctx.reply(
-            (
-                "❌ The TrucksBook profile checker "
-                "encountered an unexpected error.\n\n"
-                "Check the Railway deployment logs."
-            ),
-            mention_author=False,
-        )
-        return
-
-    # ------------------------------------------
-    # HANDLE FAILED PROFILE LOOKUP
-    # ------------------------------------------
-
-    if not result.get("success"):
-        reason = result.get(
-            "reason",
-            "unknown_error",
-        )
-
-        if reason == "request_failed":
-            message = (
-                "❌ TrucksBook could not be reached.\n\n"
-                "Please try the test again shortly."
-            )
-
-        elif reason == "http_error":
-            status_code = result.get(
-                "status_code",
-                "Unknown",
-            )
-
-            message = (
-                "❌ TrucksBook returned an unexpected "
-                "HTTP response.\n\n"
-                f"**HTTP Status:** `{status_code}`"
-            )
-
-        elif reason == "profile_not_found":
-            message = (
-                "❌ A valid TrucksBook profile could "
-                "not be detected for that User ID."
-            )
-
-        else:
-            message = (
-                "❌ The TrucksBook profile could not "
-                "be verified."
-            )
-
-        await ctx.reply(
-            message,
-            mention_author=False,
-        )
-        return
-
-    # ------------------------------------------
-    # PROFILE INFORMATION
-    # ------------------------------------------
-
-    profile_id = result.get(
-        "trucksbook_user_id"
-    )
-
-    trucksbook_name = result.get(
-        "trucksbook_name"
-    )
-
-    company_name = result.get(
-        "company_name"
-    )
-
-    company_position = result.get(
-        "company_position"
-    )
-
-    belongs_to_at = result.get(
-        "belongs_to_at",
-        False,
-    )
-
-    # ------------------------------------------
-    # SAFE DISPLAY VALUES
-    # ------------------------------------------
-
-    display_name = (
-        trucksbook_name
-        if trucksbook_name
-        else "Not detected"
-    )
-
-    display_company = (
-        company_name
-        if company_name
-        else "Not detected"
-    )
-
-    display_position = (
-        company_position
-        if company_position
-        else "Not detected"
-    )
-
-    membership_text = (
-        "✅ Yes"
-        if belongs_to_at
-        else "❌ No"
-    )
-
-    # ------------------------------------------
-    # BUILD RESULT EMBED
-    # ------------------------------------------
-
-    embed = discord.Embed(
-        title="🔎 TrucksBook Profile Verification Test",
-        description=(
-            "The A&T TrucksBook profile parser "
-            "completed its read-only verification.\n\n"
-            "**No driver data has been changed.**"
-        ),
-        colour=(
-            discord.Colour.green()
-            if belongs_to_at
-            else discord.Colour.orange()
-        ),
-    )
-
-    embed.add_field(
-        name="TrucksBook User ID",
-        value=f"`{profile_id}`",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Driver",
-        value=f"`{display_name}`",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="A&T Member",
-        value=membership_text,
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Company",
-        value=f"`{display_company}`",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Company Position",
-        value=f"`{display_position}`",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Parser Status",
-        value="✅ Profile successfully parsed",
-        inline=True,
-    )
-
-    if belongs_to_at:
-        embed.add_field(
-            name="Verification Result",
-            value=(
-                "✅ This TrucksBook profile is listed "
-                "as a member of **A & T Transport LTD**."
-            ),
-            inline=False,
-        )
-
-    else:
-        embed.add_field(
-            name="Verification Result",
-            value=(
-                "⚠️ The profile was found, but it was "
-                "not detected as a member of "
-                "**A & T Transport LTD**."
-            ),
-            inline=False,
-        )
-
-    embed.set_footer(
-        text=(
-            "READ-ONLY TEST • "
-            "No A&T driver data was modified"
-        )
-    )
-
-    await ctx.send(
-        embed=embed
-    )
-
-    # ------------------------------------------
-    # RAILWAY DIAGNOSTIC OUTPUT
-    # ------------------------------------------
-
-    print("--------------------------------")
-    print("TRUCKSBOOK PARSER TEST COMPLETE")
-    print(f"Profile ID: {profile_id}")
-    print(f"Driver: {trucksbook_name}")
-    print(f"Company: {company_name}")
-    print(f"Position: {company_position}")
-    print(f"A&T Member: {belongs_to_at}")
-    print("NO DRIVER DATA WAS MODIFIED")
-    print("--------------------------------")
-
-
-@trucksbook_profile_test.error
-async def trucksbook_profile_test_error(
-    ctx,
-    error,
-):
-    print(
-        "TRUCKSBOOK PROFILE TEST COMMAND ERROR: "
-        f"{error}"
-    )
-
-    await ctx.reply(
-        (
-            "❌ The TrucksBook profile test "
-            "encountered an error.\n\n"
-            "Check the Railway deployment logs."
-        ),
-        mention_author=False,
-    )
 
 # --------------------------------------------------
 # ONBOARDING COMMAND ERROR HANDLING
