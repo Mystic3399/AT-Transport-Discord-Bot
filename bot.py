@@ -2584,17 +2584,16 @@ async def trucksbook_profile_test(
     # EXTRA DIRECT CHECKS
     # ------------------------------------------
 
-    lower_page = page_text.lower()
+       lower_page = page_text.lower()
 
     mystic_found = (
         "mystical custom"
         in lower_page
     )
 
-  at_transport_found = (
-    "a & t transport ltd"
-    in lower_page
-)
+    at_transport_found = (
+        "a & t transport ltd"
+        in lower_page
     )
 
     user_id_found = (
