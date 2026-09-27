@@ -89,7 +89,10 @@ async def main():
             encoding="utf-8-sig",
             newline="",
         ) as csv_file:
-            reader = csv.DictReader(csv_file)
+           reader = csv.DictReader(
+            csv_file,
+            delimiter=";",
+            )
 
             print("CSV columns:")
             print(reader.fieldnames)
