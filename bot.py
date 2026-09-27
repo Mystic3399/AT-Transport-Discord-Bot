@@ -2513,7 +2513,7 @@ async def trucksbook_profile_test(
     search_terms = [
         str(numeric_id),
         "Mystical Custom",
-        "A&T Transport",
+        "A & T Transport LTD",
         "company",
         "employee",
         "driver",
@@ -2591,9 +2591,10 @@ async def trucksbook_profile_test(
         in lower_page
     )
 
-    at_transport_found = (
-        "a&t transport"
-        in lower_page
+  at_transport_found = (
+    "a & t transport ltd"
+    in lower_page
+)
     )
 
     user_id_found = (
