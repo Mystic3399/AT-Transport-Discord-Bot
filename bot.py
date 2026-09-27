@@ -2267,6 +2267,10 @@ async def submit_trucksbook(
         )
         return
 
+    # ------------------------------------------
+    # VALIDATE TRUCKSBOOK USER ID
+    # ------------------------------------------
+
     if trucksbook_user_id is None:
         await ctx.reply(
             (
@@ -2279,9 +2283,7 @@ async def submit_trucksbook(
         )
         return
 
-    trucksbook_user_id = (
-        trucksbook_user_id.strip()
-    )
+    trucksbook_user_id = trucksbook_user_id.strip()
 
     if not trucksbook_user_id.isdigit():
         await ctx.reply(
@@ -2295,9 +2297,7 @@ async def submit_trucksbook(
         )
         return
 
-    numeric_id = int(
-        trucksbook_user_id
-    )
+    numeric_id = int(trucksbook_user_id)
 
     if numeric_id <= 0:
         await ctx.reply(
@@ -2308,6 +2308,10 @@ async def submit_trucksbook(
             mention_author=False,
         )
         return
+
+    # ------------------------------------------
+    # SAVE TRUCKSBOOK USER ID
+    # ------------------------------------------
 
     try:
         result = await save_trucksbook_id(
@@ -2811,7 +2815,7 @@ async def trucksbook_profile_test(
     # Railway can show more information.
     railway_preview = diagnostic_text[:10000]
 
-      # ------------------------------------------
+    # ------------------------------------------
     # EXTRA DIRECT CHECKS
     # ------------------------------------------
 
@@ -2940,250 +2944,6 @@ async def trucksbook_profile_test(
         embed=embed
     )
 
-
-@trucksbook_profile_test.error
-async def trucksbook_profile_test_error(
-    ctx,
-    error,
-):
-    print(
-        "TRUCKSBOOK PROFILE TEST COMMAND ERROR: "
-        f"{error}"
-    )
-
-    await ctx.reply(
-        (
-            "❌ The TrucksBook diagnostic command "
-            "encountered an error.\n\n"
-            "Check the Railway deployment logs."
-        ),
-        mention_author=False,
-    )
-    # ------------------------------------------
-    # MANAGEMENT-ONLY DIAGNOSTIC COMMAND
-    # ------------------------------------------
-
-    if ctx.guild is None:
-        return
-
-    if ctx.guild.id != GUILD_ID:
-        return
-
-    if not member_is_verification_staff(ctx.author):
-        await ctx.reply(
-            "This diagnostic command is restricted "
-            "to A&T Management.",
-            mention_author=False,
-        )
-        return
-
-    # ------------------------------------------
-    # VALIDATE USER ID
-    # ------------------------------------------
-
-    if trucksbook_user_id is None:
-        await ctx.reply(
-            "Please provide a TrucksBook User ID.\n\n"
-            "Example: `!tbtest 553238`",
-            mention_author=False,
-        )
-        return
-
-    trucksbook_user_id = trucksbook_user_id.strip()
-
-    if not trucksbook_user_id.isdigit():
-        await ctx.reply(
-            "The TrucksBook User ID must contain "
-            "numbers only.",
-            mention_author=False,
-        )
-        return
-
-    numeric_id = int(trucksbook_user_id)
-
-    if numeric_id <= 0:
-        await ctx.reply(
-            "That is not a valid TrucksBook User ID.",
-            mention_author=False,
-        )
-        return
-
-    # ------------------------------------------
-    # REQUEST PUBLIC TRUCKSBOOK PROFILE
-    # ------------------------------------------
-
-    profile_url = (
-        "https://trucksbook.eu/profile/"
-        f"{numeric_id}"
-    )
-
-    await ctx.reply(
-        (
-            "🔎 Testing TrucksBook profile "
-            f"`{numeric_id}`...\n"
-            "No A&T driver data will be changed."
-        ),
-        mention_author=False,
-    )
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "(Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 "
-            "(KHTML, like Gecko) "
-            "Chrome/120.0 Safari/537.36"
-        ),
-        "Accept": (
-            "text/html,application/xhtml+xml,"
-            "application/xml;q=0.9,*/*;q=0.8"
-        ),
-        "Accept-Language": "en-GB,en;q=0.9",
-    }
-
-    timeout = aiohttp.ClientTimeout(
-        total=20
-    )
-
-    try:
-        async with aiohttp.ClientSession(
-            timeout=timeout,
-            headers=headers,
-        ) as session:
-
-            async with session.get(
-                profile_url,
-                allow_redirects=True,
-            ) as response:
-
-                status_code = response.status
-                final_url = str(response.url)
-
-                html = await response.text(
-                    errors="replace"
-                )
-
-    except Exception as error:
-        print("--------------------------------")
-        print("TRUCKSBOOK PROFILE TEST FAILED")
-        print(f"User ID: {numeric_id}")
-        print(f"Error: {error}")
-        print("--------------------------------")
-
-        await ctx.reply(
-            (
-                "❌ TrucksBook request failed.\n\n"
-                f"**Error:** `{type(error).__name__}`\n\n"
-                "Check the Railway logs for the "
-                "full diagnostic result."
-            ),
-            mention_author=False,
-        )
-        return
-
-    # ------------------------------------------
-    # PARSE PAGE
-    # ------------------------------------------
-
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
-
-    page_title = ""
-
-    if soup.title:
-        page_title = soup.title.get_text(
-            " ",
-            strip=True,
-        )
-
-    page_text = soup.get_text(
-        "\n",
-        strip=True,
-    )
-
-    # Keep diagnostic output short enough
-    # for Discord.
-    preview = page_text[:1500]
-
-    if not preview:
-        preview = "[No readable page text detected]"
-
-    # ------------------------------------------
-    # RAILWAY DIAGNOSTIC OUTPUT
-    # ------------------------------------------
-
-    print("--------------------------------")
-    print("TRUCKSBOOK PROFILE TEST")
-    print(f"Requested User ID: {numeric_id}")
-    print(f"HTTP Status: {status_code}")
-    print(f"Final URL: {final_url}")
-    print(f"HTML Length: {len(html)}")
-    print(f"Page Title: {page_title}")
-    print("PAGE TEXT PREVIEW:")
-    print(preview)
-    print("--------------------------------")
-
-    # ------------------------------------------
-    # DISCORD RESULT
-    # ------------------------------------------
-
-    embed = discord.Embed(
-        title="🧪 TrucksBook Profile Test",
-        colour=(
-            discord.Colour.green()
-            if status_code == 200
-            else discord.Colour.orange()
-        ),
-    )
-
-    embed.add_field(
-        name="Requested User ID",
-        value=f"`{numeric_id}`",
-        inline=False,
-    )
-
-    embed.add_field(
-        name="HTTP Status",
-        value=f"`{status_code}`",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="HTML Received",
-        value=f"`{len(html):,} characters`",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Page Title",
-        value=(
-            page_title[:1000]
-            if page_title
-            else "[None detected]"
-        ),
-        inline=False,
-    )
-
-    embed.add_field(
-        name="Detected Page Text",
-        value=(
-            f"```text\n{preview[:900]}\n```"
-        ),
-        inline=False,
-    )
-
-    embed.set_footer(
-        text=(
-            "READ-ONLY TEST • "
-            "No A&T driver data was modified"
-        )
-    )
-
-    await ctx.send(
-        embed=embed
-    )
 
 
 @trucksbook_profile_test.error
