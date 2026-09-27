@@ -645,10 +645,8 @@ def build_progression_milestone_embed(
     trucksbook_name,
     milestone,
     real_miles,
-    *,
-    is_test=False,
 ):
-    """Build the shared real/test milestone announcement embed."""
+    """Build a real milestone announcement embed."""
     milestone_miles = milestone["miles"]
     milestone_rank = milestone["rank"]
     next_role = get_next_progression_role(real_miles)
@@ -658,20 +656,9 @@ def build_progression_milestone_embed(
         else f"<@{discord_user_id}>"
     )
 
-    title_prefix = "🧪 TEST — " if is_test else ""
-    description_prefix = (
-        "**TEST ANNOUNCEMENT — NO DRIVER DATA HAS BEEN CHANGED**\n\n"
-        if is_test
-        else ""
-    )
-
     embed = discord.Embed(
-        title=(
-            f"{title_prefix}🏆 A&T TRANSPORT LTD — "
-            "MILESTONE ACHIEVED"
-        ),
+        title="🏆 A&T TRANSPORT LTD — MILESTONE ACHIEVED",
         description=(
-            f"{description_prefix}"
             f"Congratulations {driver_display}!\n\n"
             f"💎 **{milestone_miles:,} REAL MILES**\n"
             "A new A&T progression milestone has been reached."
@@ -723,12 +710,8 @@ def build_progression_milestone_embed(
             inline=True,
         )
 
-    footer_prefix = "TEST ONLY • " if is_test else ""
     embed.set_footer(
-        text=(
-            f"{footer_prefix}A&T Transport LTD • "
-            "Driven Beyond Horizons"
-        )
+        text="A&T Transport LTD • Driven Beyond Horizons"
     )
     return embed
 
@@ -1694,139 +1677,6 @@ def member_is_verification_staff(member):
     return any(
         role.id in VERIFICATION_STAFF_ROLE_IDS
         for role in member.roles
-    )
-
-
-@bot.command(name="milestonetest")
-async def milestone_test(ctx):
-    """Send a staff-only, read-only milestone announcement test."""
-    if ctx.guild is None:
-        await ctx.reply(
-            "This command can only be used inside the A&T server.",
-            mention_author=False,
-        )
-        return
-
-    if ctx.guild.id != GUILD_ID:
-        return
-
-    if not member_is_verification_staff(ctx.author):
-        await ctx.reply(
-            (
-                "❌ Only authorised A&T verification/management staff "
-                "can run the milestone announcement test."
-            ),
-            mention_author=False,
-        )
-        return
-
-    if MILESTONE_ANNOUNCEMENT_CHANNEL_ID is None:
-        await ctx.reply(
-            (
-                "❌ The milestone test could not run because "
-                "`MILESTONE_ANNOUNCEMENT_CHANNEL_ID` is missing or invalid."
-            ),
-            mention_author=False,
-        )
-        return
-
-    channel = bot.get_channel(MILESTONE_ANNOUNCEMENT_CHANNEL_ID)
-
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(
-                MILESTONE_ANNOUNCEMENT_CHANNEL_ID
-            )
-        except discord.NotFound:
-            await ctx.reply(
-                (
-                    "❌ The configured milestone announcement channel "
-                    "does not exist or is no longer available."
-                ),
-                mention_author=False,
-            )
-            return
-        except discord.Forbidden:
-            await ctx.reply(
-                (
-                    "❌ I cannot access the configured milestone "
-                    "announcement channel. Please check my View Channel "
-                    "permission."
-                ),
-                mention_author=False,
-            )
-            return
-        except discord.HTTPException as error:
-            print(f"MILESTONE TEST CHANNEL ERROR: {error}")
-            await ctx.reply(
-                (
-                    "❌ Discord could not load the milestone announcement "
-                    "channel. Please try again shortly."
-                ),
-                mention_author=False,
-            )
-            return
-
-    if getattr(channel, "guild", None) != ctx.guild:
-        await ctx.reply(
-            (
-                "❌ The configured milestone announcement channel is not "
-                "inside the A&T server."
-            ),
-            mention_author=False,
-        )
-        return
-
-    test_milestone = {
-        "miles": 35_000,
-        "rank": "A&T Veteran",
-    }
-    embed = build_progression_milestone_embed(
-        ctx.author,
-        ctx.author.id,
-        "TEST — Staff Preview",
-        test_milestone,
-        35_000,
-        is_test=True,
-    )
-
-    try:
-        await channel.send(
-            embed=embed,
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
-    except discord.Forbidden:
-        await ctx.reply(
-            (
-                "❌ I could not send the test announcement. Please check "
-                "my View Channel, Send Messages, and Embed Links permissions "
-                f"in {channel.mention}."
-            ),
-            mention_author=False,
-        )
-        return
-    except discord.HTTPException as error:
-        print(f"MILESTONE TEST SEND ERROR: {error}")
-        await ctx.reply(
-            (
-                "❌ Discord rejected the test announcement. No driver or "
-                "milestone data was changed. Please try again shortly."
-            ),
-            mention_author=False,
-        )
-        return
-
-    print(
-        "MILESTONE TEST SENT: "
-        f"{ctx.author} sent a read-only test to channel {channel.id}."
-    )
-    await ctx.reply(
-        (
-            f"✅ Test milestone announcement sent successfully to "
-            f"{channel.mention}. No mileage, roles, jobs, driver links, "
-            "verification data, or milestone records were changed."
-        ),
-        mention_author=False,
     )
 
 
