@@ -16,6 +16,53 @@ GUILD_ID = int(os.getenv("GUILD_ID"))
 
 
 # --------------------------------------------------
+# ONBOARDING CONFIGURATION
+# --------------------------------------------------
+
+ONBOARDING_CHANNEL_ID = int(
+    os.getenv(
+        "ONBOARDING_CHANNEL_ID",
+        "1553652697184473210",
+    )
+)
+
+VERIFICATION_CATEGORY_ID = int(
+    os.getenv(
+        "VERIFICATION_CATEGORY_ID",
+        "1553650713874407504",
+    )
+)
+
+DRIVER_RECORDS_CATEGORY_ID = int(
+    os.getenv(
+        "DRIVER_RECORDS_CATEGORY_ID",
+        "1553650853393727558",
+    )
+)
+
+VERIFICATION_LOG_CHANNEL_ID = int(
+    os.getenv(
+        "VERIFICATION_LOG_CHANNEL_ID",
+        "1553650941105020949",
+    )
+)
+
+VERIFICATION_STAFF_ROLE_IDS = {
+    int(role_id.strip())
+    for role_id in os.getenv(
+        "VERIFICATION_STAFF_ROLE_IDS",
+        (
+            "1493662151473369280,"
+            "1494054587055870012,"
+            "1542938047455432734,"
+            "1553651916280561735"
+        ),
+    ).split(",")
+    if role_id.strip()
+}
+
+
+# --------------------------------------------------
 # A&T PROGRESSION ROLES
 # --------------------------------------------------
 
@@ -110,6 +157,11 @@ async def setup_database():
     )
 
     async with pool.acquire() as connection:
+
+        # ------------------------------------------
+        # DRIVER PROGRESSION
+        # ------------------------------------------
+
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS driver_progress (
@@ -120,6 +172,10 @@ async def setup_database():
             );
             """
         )
+
+        # ------------------------------------------
+        # PROCESSED TRUCKSBOOK JOBS
+        # ------------------------------------------
 
         await connection.execute(
             """
@@ -134,6 +190,10 @@ async def setup_database():
             """
         )
 
+        # ------------------------------------------
+        # DISCORD / TRUCKSBOOK DRIVER LINKS
+        # ------------------------------------------
+
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS driver_links (
@@ -145,10 +205,55 @@ async def setup_database():
             """
         )
 
+        # ------------------------------------------
+        # DRIVER ONBOARDING / VERIFICATION
+        # ------------------------------------------
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS driver_verifications (
+                discord_user_id BIGINT PRIMARY KEY,
+                verification_channel_id BIGINT UNIQUE,
+                trucksbook_name TEXT,
+                trucksbook_user_id BIGINT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                confirmed_at TIMESTAMPTZ,
+                completed_at TIMESTAMPTZ
+            );
+            """
+        )
+
+        # ------------------------------------------
+        # ONBOARDING INDEXES
+        # ------------------------------------------
+
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_driver_verifications_status
+            ON driver_verifications(status);
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_driver_verifications_trucksbook_user
+            ON driver_verifications(trucksbook_user_id)
+            WHERE trucksbook_user_id IS NOT NULL
+              AND status IN (
+                  'pending',
+                  'confirmed'
+              );
+            """
+        )
+
     db_pool = pool
 
     print("POSTGRESQL CONNECTED")
     print("Database tables ready.")
+    print("Driver onboarding tables ready.")
 
 
 # --------------------------------------------------
@@ -327,6 +432,81 @@ async def record_real_job(
                 "status": "added",
                 "real_miles": int(real_miles),
             }
+
+
+# --------------------------------------------------
+# ONBOARDING DATABASE HELPERS
+# --------------------------------------------------
+
+async def get_verification_by_user(
+    discord_user_id,
+):
+    if db_pool is None:
+        return None
+
+    async with db_pool.acquire() as connection:
+        return await connection.fetchrow(
+            """
+            SELECT
+                discord_user_id,
+                verification_channel_id,
+                trucksbook_name,
+                trucksbook_user_id,
+                status,
+                created_at,
+                confirmed_at,
+                completed_at
+            FROM driver_verifications
+            WHERE discord_user_id = $1;
+            """,
+            discord_user_id,
+        )
+
+
+async def get_verification_by_channel(
+    channel_id,
+):
+    if db_pool is None:
+        return None
+
+    async with db_pool.acquire() as connection:
+        return await connection.fetchrow(
+            """
+            SELECT
+                discord_user_id,
+                verification_channel_id,
+                trucksbook_name,
+                trucksbook_user_id,
+                status,
+                created_at,
+                confirmed_at,
+                completed_at
+            FROM driver_verifications
+            WHERE verification_channel_id = $1;
+            """,
+            channel_id,
+        )
+
+
+async def driver_already_linked(
+    discord_user_id,
+):
+    if db_pool is None:
+        return False
+
+    async with db_pool.acquire() as connection:
+        existing = await connection.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM driver_links
+                WHERE discord_user_id = $1
+            );
+            """,
+            discord_user_id,
+        )
+
+    return bool(existing)
 
 
 # --------------------------------------------------
@@ -530,6 +710,94 @@ async def sync_all_driver_roles(
 
 
 # --------------------------------------------------
+# ONBOARDING CONFIGURATION CHECK
+# --------------------------------------------------
+
+def check_onboarding_configuration(
+    guild,
+):
+    print("--------------------------------")
+    print("Checking A&T onboarding configuration...")
+
+    onboarding_channel = guild.get_channel(
+        ONBOARDING_CHANNEL_ID
+    )
+
+    verification_category = guild.get_channel(
+        VERIFICATION_CATEGORY_ID
+    )
+
+    records_category = guild.get_channel(
+        DRIVER_RECORDS_CATEGORY_ID
+    )
+
+    log_channel = guild.get_channel(
+        VERIFICATION_LOG_CHANNEL_ID
+    )
+
+    if onboarding_channel:
+        print(
+            "OK: Driver onboarding channel found."
+        )
+    else:
+        print(
+            "ERROR: Driver onboarding channel "
+            "could not be found."
+        )
+
+    if verification_category:
+        print(
+            "OK: Driver verification category found."
+        )
+    else:
+        print(
+            "ERROR: Driver verification category "
+            "could not be found."
+        )
+
+    if records_category:
+        print(
+            "OK: Driver records category found."
+        )
+    else:
+        print(
+            "ERROR: Driver records category "
+            "could not be found."
+        )
+
+    if log_channel:
+        print(
+            "OK: Verification log channel found."
+        )
+    else:
+        print(
+            "ERROR: Verification log channel "
+            "could not be found."
+        )
+
+    for role_id in VERIFICATION_STAFF_ROLE_IDS:
+        role = guild.get_role(
+            role_id
+        )
+
+        if role:
+            print(
+                f"OK: Verification staff role: "
+                f"{role.name}"
+            )
+        else:
+            print(
+                "ERROR: Verification staff role "
+                f"{role_id} could not be found."
+            )
+
+    print(
+        "A&T onboarding configuration check complete."
+    )
+    print("--------------------------------")
+
+
+# --------------------------------------------------
 # BOT STARTUP
 # --------------------------------------------------
 
@@ -607,6 +875,10 @@ async def on_ready():
             print(
                 "Automatic role sync skipped."
             )
+
+        check_onboarding_configuration(
+            guild
+        )
 
     try:
         synced = await bot.tree.sync()
