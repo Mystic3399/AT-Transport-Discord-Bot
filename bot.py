@@ -310,6 +310,34 @@ def get_progression_role(real_miles):
     return target
 
 
+def get_next_progression_role(real_miles):
+    """Return the next configured rank, or None at maximum rank."""
+    for progression_role in PROGRESSION_ROLES:
+        if real_miles < progression_role[0]:
+            return progression_role
+
+    return None
+
+
+def build_progress_bar(real_miles, target_miles, width=20):
+    """Build a fixed-width bar showing absolute progress to a target."""
+    if target_miles <= 0:
+        percentage = 100.0
+    else:
+        percentage = min(
+            max(real_miles / target_miles * 100, 0.0),
+            100.0,
+        )
+
+    filled = round(width * percentage / 100)
+    bar = (
+        "█" * filled
+        + "░" * (width - filled)
+    )
+
+    return bar, percentage
+
+
 # --------------------------------------------------
 # DRIVER DATABASE HELPERS
 # --------------------------------------------------
@@ -1740,6 +1768,269 @@ async def cancel_verification_record(
         )
 
     return result != "UPDATE 0"
+
+
+# --------------------------------------------------
+# A&T DRIVER PROFILE
+# --------------------------------------------------
+
+@bot.command(
+    name="profile"
+)
+async def driver_profile(
+    ctx,
+    member: discord.Member = None,
+):
+    """Display a linked driver's read-only A&T progression profile."""
+    if ctx.guild is None:
+        await ctx.reply(
+            (
+                "The A&T driver profile command can "
+                "only be used inside the server."
+            ),
+            mention_author=False,
+        )
+        return
+
+    if ctx.guild.id != GUILD_ID:
+        return
+
+    target_member = member or ctx.author
+
+    if db_pool is None:
+        await ctx.reply(
+            (
+                "❌ The A&T driver database is "
+                "currently unavailable. Please try "
+                "again shortly."
+            ),
+            mention_author=False,
+        )
+        return
+
+    try:
+        async with db_pool.acquire() as connection:
+            profile = await connection.fetchrow(
+                """
+                SELECT
+                    links.trucksbook_name,
+                    COALESCE(progress.real_miles, 0)
+                        AS real_miles
+                FROM driver_links AS links
+                LEFT JOIN driver_progress AS progress
+                    ON progress.discord_user_id =
+                        links.discord_user_id
+                WHERE links.discord_user_id = $1;
+                """,
+                target_member.id,
+            )
+
+    except Exception as error:
+        print(
+            "PROFILE DATABASE ERROR: "
+            f"{error}"
+        )
+
+        await ctx.reply(
+            (
+                "❌ The A&T driver database could "
+                "not be reached. Please try again "
+                "shortly."
+            ),
+            mention_author=False,
+        )
+        return
+
+    if profile is None:
+        if target_member.id == ctx.author.id:
+            message = (
+                "❌ Your Discord account is not "
+                "linked to an A&T TrucksBook "
+                "driver profile. Please complete "
+                "driver verification first."
+            )
+        else:
+            message = (
+                f"❌ {target_member.mention} is not "
+                "linked to an A&T TrucksBook "
+                "driver profile."
+            )
+
+        await ctx.reply(
+            message,
+            mention_author=False,
+        )
+        return
+
+    trucksbook_name = profile[
+        "trucksbook_name"
+    ]
+    real_miles = max(
+        int(profile["real_miles"]),
+        0,
+    )
+
+    (
+        _,
+        _,
+        current_rank_name,
+    ) = get_progression_role(
+        real_miles
+    )
+
+    next_role = get_next_progression_role(
+        real_miles
+    )
+
+    embed = discord.Embed(
+        title=(
+            "🌌 A&T TRANSPORT LTD — "
+            "DRIVER PROFILE"
+        ),
+        description=(
+            f"Progression record for "
+            f"{target_member.mention}"
+        ),
+        colour=discord.Colour.from_rgb(
+            31,
+            78,
+            121,
+        ),
+    )
+
+    embed.set_thumbnail(
+        url=target_member.display_avatar.url
+    )
+
+    embed.add_field(
+        name="Discord Driver",
+        value=target_member.mention,
+        inline=True,
+    )
+
+    embed.add_field(
+        name="TrucksBook Driver",
+        value=f"`{trucksbook_name}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Current Progression Rank",
+        value=f"🏅 **{current_rank_name}**",
+        inline=False,
+    )
+
+    embed.add_field(
+        name="Real Miles",
+        value=f"🚛 **{real_miles:,}**",
+        inline=True,
+    )
+
+    if next_role is None:
+        bar, _ = build_progress_bar(
+            real_miles,
+            PROGRESSION_ROLES[-1][0],
+        )
+
+        embed.add_field(
+            name="Progression Status",
+            value=(
+                "🌌 **Beyond Horizons achieved**\n"
+                f"`{bar}` **100%**\n"
+                "Maximum A&T progression rank reached."
+            ),
+            inline=False,
+        )
+
+        embed.add_field(
+            name="Miles Remaining",
+            value="**0 — maximum rank achieved**",
+            inline=False,
+        )
+
+    else:
+        (
+            next_required_miles,
+            _,
+            next_rank_name,
+        ) = next_role
+
+        miles_remaining = max(
+            next_required_miles - real_miles,
+            0,
+        )
+
+        bar, percentage = build_progress_bar(
+            real_miles,
+            next_required_miles,
+        )
+
+        embed.add_field(
+            name="Next Progression Rank",
+            value=f"🌠 **{next_rank_name}**",
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Miles Remaining",
+            value=f"**{miles_remaining:,}**",
+            inline=True,
+        )
+
+        embed.add_field(
+            name="Progress",
+            value=(
+                f"`{bar}` **{percentage:.0f}%**\n"
+                f"**{real_miles:,} / "
+                f"{next_required_miles:,} Real miles**"
+            ),
+            inline=False,
+        )
+
+    embed.set_footer(
+        text=(
+            "A&T Transport LTD • "
+            "Driven Beyond Horizons"
+        )
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+
+@driver_profile.error
+async def driver_profile_error(
+    ctx,
+    error,
+):
+    if isinstance(
+        error,
+        commands.MemberNotFound,
+    ):
+        await ctx.reply(
+            (
+                "❌ I could not find that Discord "
+                "member. Mention a current server "
+                "member, for example: "
+                "`!profile @Driver`"
+            ),
+            mention_author=False,
+        )
+        return
+
+    print(
+        "PROFILE COMMAND ERROR: "
+        f"{error}"
+    )
+
+    await ctx.reply(
+        (
+            "❌ I could not display that driver "
+            "profile. Please try again shortly."
+        ),
+        mention_author=False,
+    )
 
 @bot.command(
     name="verify"
