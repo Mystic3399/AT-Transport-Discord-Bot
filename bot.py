@@ -1,5 +1,6 @@
 import os
 
+import asyncpg
 import discord
 from discord.ext import commands
 
@@ -9,8 +10,8 @@ from discord.ext import commands
 # --------------------------------------------------
 
 TOKEN = os.getenv("DISCORD_TOKEN")
+DATABASE_URL = os.getenv("DATABASE_URL")
 GUILD_ID = int(os.getenv("GUILD_ID"))
-
 
 # --------------------------------------------------
 # A&T MILEAGE PROGRESSION ROLES
@@ -80,6 +81,56 @@ DRIVER_MAPPINGS = {
     ),
 }
 
+# --------------------------------------------------
+# POSTGRESQL DATABASE
+# --------------------------------------------------
+
+db_pool = None
+
+
+async def setup_database():
+    global db_pool
+
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL has not been configured."
+        )
+
+    print("Connecting to A&T PostgreSQL database...")
+
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=5,
+    )
+
+    async with db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS driver_progress (
+                discord_user_id BIGINT PRIMARY KEY,
+                trucksbook_name TEXT NOT NULL UNIQUE,
+                real_miles BIGINT NOT NULL DEFAULT 0,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS processed_jobs (
+                job_id TEXT PRIMARY KEY,
+                discord_user_id BIGINT NOT NULL,
+                trucksbook_name TEXT NOT NULL,
+                accepted_distance INTEGER NOT NULL,
+                statistics TEXT NOT NULL,
+                processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+    print("POSTGRESQL CONNECTED")
+    print("Database tables ready.")
 
 # --------------------------------------------------
 # DISCORD INTENTS
@@ -101,6 +152,14 @@ bot = commands.Bot(
 
 @bot.event
 async def on_ready():
+        global db_pool
+
+    if db_pool is None:
+        try:
+            await setup_database()
+        except Exception as error:
+            print(f"DATABASE ERROR: {error}")
+            
     print("--------------------------------")
     print("A&T Transport LTD Bot")
     print(f"Logged in as: {bot.user}")
