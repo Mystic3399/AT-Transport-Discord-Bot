@@ -32,16 +32,6 @@ async def on_ready():
         print(f"Slash command sync failed: {error}")
 
 
-@bot.tree.command(
-    name="at-ping",
-    description="Check the status of the A&T Transport LTD bot."
-)
-async def at_ping(interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "🚛 **A&T Transport LTD Bot is online!**\n"
-        "🌌 **Driven Beyond Horizons.**",
-        ephemeral=True
-    )
 
 
 if not TOKEN:
