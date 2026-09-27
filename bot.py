@@ -2733,6 +2733,510 @@ async def submit_trucksbook(
     print("STATUS: Awaiting !confirm")
     print("--------------------------------")
 
+@bot.command(
+    name="confirm"
+)
+async def confirm_verification(
+    ctx,
+):
+    if ctx.guild is None:
+        return
+
+    if ctx.guild.id != GUILD_ID:
+        return
+
+    if db_pool is None:
+        await ctx.reply(
+            (
+                "❌ The A&T verification database is "
+                "currently unavailable.\n\n"
+                "Please try again shortly."
+            ),
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # FIND VERIFICATION
+    # ------------------------------------------
+
+    verification = (
+        await get_verification_by_channel(
+            ctx.channel.id
+        )
+    )
+
+    if verification is None:
+        await ctx.reply(
+            (
+                "This command can only be used "
+                "inside an active A&T driver "
+                "verification channel."
+            ),
+            mention_author=False,
+        )
+        return
+
+    applicant_id = int(
+        verification["discord_user_id"]
+    )
+
+    # ------------------------------------------
+    # APPLICANT MUST CONFIRM THEMSELVES
+    # ------------------------------------------
+
+    if ctx.author.id != applicant_id:
+        await ctx.reply(
+            (
+                "Only the applicant can complete "
+                "their own driver verification."
+            ),
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # REQUIRE VERIFIED PROFILE
+    # ------------------------------------------
+
+    if verification["status"] != "confirmed":
+        await ctx.reply(
+            (
+                "Your TrucksBook profile has not "
+                "been verified yet.\n\n"
+                "Please submit your TrucksBook "
+                "User ID first using:\n"
+                "`!trucksbook YOUR_ID`"
+            ),
+            mention_author=False,
+        )
+        return
+
+    trucksbook_name = verification[
+        "trucksbook_name"
+    ]
+
+    trucksbook_user_id = verification[
+        "trucksbook_user_id"
+    ]
+
+    if (
+        not trucksbook_name
+        or trucksbook_user_id is None
+    ):
+        await ctx.reply(
+            (
+                "❌ Your verification record is "
+                "missing TrucksBook information.\n\n"
+                "Please contact A&T Management."
+            ),
+            mention_author=False,
+        )
+        return
+
+    trucksbook_user_id = int(
+        trucksbook_user_id
+    )
+
+    # ------------------------------------------
+    # NORMALISE DRIVER NAME
+    # ------------------------------------------
+    #
+    # TrucksBook profiles can display:
+    # "A&T Mystical Custom"
+    #
+    # while the job-delivery webhook can use:
+    # "Mystical Custom".
+    #
+    # Store the webhook-compatible name so
+    # automatic mileage matching keeps working.
+    # ------------------------------------------
+
+    link_name = trucksbook_name.strip()
+
+    if link_name.lower().startswith(
+        "a&t "
+    ):
+        link_name = link_name[4:].strip()
+
+    if not link_name:
+        link_name = trucksbook_name.strip()
+
+    # ------------------------------------------
+    # CREATE PERMANENT DRIVER LINK
+    # ------------------------------------------
+
+    try:
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+
+                # ----------------------------------
+                # CHECK DISCORD ACCOUNT
+                # ----------------------------------
+
+                existing_discord = (
+                    await connection.fetchrow(
+                        """
+                        SELECT
+                            trucksbook_name,
+                            trucksbook_user_id
+                        FROM driver_links
+                        WHERE discord_user_id = $1;
+                        """,
+                        applicant_id,
+                    )
+                )
+
+                if existing_discord is not None:
+                    await ctx.reply(
+                        (
+                            "❌ Your Discord account "
+                            "is already linked to an "
+                            "A&T TrucksBook profile.\n\n"
+                            "Please contact A&T "
+                            "Management if you believe "
+                            "this is incorrect."
+                        ),
+                        mention_author=False,
+                    )
+                    return
+
+                # ----------------------------------
+                # CHECK TRUCKSBOOK USER ID
+                # ----------------------------------
+
+                existing_tb_id = (
+                    await connection.fetchval(
+                        """
+                        SELECT discord_user_id
+                        FROM driver_links
+                        WHERE trucksbook_user_id = $1;
+                        """,
+                        trucksbook_user_id,
+                    )
+                )
+
+                if existing_tb_id is not None:
+                    await ctx.reply(
+                        (
+                            "❌ This TrucksBook account "
+                            "is already linked to "
+                            "another Discord account.\n\n"
+                            "Please contact A&T "
+                            "Management."
+                        ),
+                        mention_author=False,
+                    )
+                    return
+
+                # ----------------------------------
+                # CHECK DRIVER NAME
+                # ----------------------------------
+
+                existing_name = (
+                    await connection.fetchval(
+                        """
+                        SELECT discord_user_id
+                        FROM driver_links
+                        WHERE LOWER(trucksbook_name)
+                            = LOWER($1);
+                        """,
+                        link_name,
+                    )
+                )
+
+                if existing_name is not None:
+                    await ctx.reply(
+                        (
+                            "❌ This TrucksBook driver "
+                            "is already linked to "
+                            "another Discord account.\n\n"
+                            "Please contact A&T "
+                            "Management."
+                        ),
+                        mention_author=False,
+                    )
+                    return
+
+                # ----------------------------------
+                # INSERT PERMANENT LINK
+                # ----------------------------------
+
+                await connection.execute(
+                    """
+                    INSERT INTO driver_links (
+                        trucksbook_name,
+                        discord_user_id,
+                        trucksbook_user_id,
+                        linked_at
+                    )
+                    VALUES (
+                        $1,
+                        $2,
+                        $3,
+                        NOW()
+                    );
+                    """,
+                    link_name,
+                    applicant_id,
+                    trucksbook_user_id,
+                )
+
+                # ----------------------------------
+                # INITIALISE DRIVER PROGRESSION
+                # ----------------------------------
+
+                await connection.execute(
+                    """
+                    INSERT INTO driver_progress (
+                        discord_user_id,
+                        trucksbook_name,
+                        real_miles,
+                        updated_at
+                    )
+                    VALUES (
+                        $1,
+                        $2,
+                        0,
+                        NOW()
+                    )
+                    ON CONFLICT (discord_user_id)
+                    DO NOTHING;
+                    """,
+                    applicant_id,
+                    link_name,
+                )
+
+                # ----------------------------------
+                # COMPLETE VERIFICATION
+                # ----------------------------------
+
+                update_result = (
+                    await connection.execute(
+                        """
+                        UPDATE driver_verifications
+                        SET
+                            status = 'completed',
+                            completed_at = NOW()
+                        WHERE discord_user_id = $1
+                          AND verification_channel_id = $2
+                          AND status = 'confirmed';
+                        """,
+                        applicant_id,
+                        ctx.channel.id,
+                    )
+                )
+
+                if update_result == "UPDATE 0":
+                    raise RuntimeError(
+                        "Verification record changed "
+                        "before completion."
+                    )
+
+    except asyncpg.UniqueViolationError:
+        await ctx.reply(
+            (
+                "❌ This Discord or TrucksBook "
+                "account has already been linked.\n\n"
+                "Please contact A&T Management."
+            ),
+            mention_author=False,
+        )
+        return
+
+    except Exception as error:
+        print(
+            "VERIFICATION CONFIRM ERROR: "
+            f"{error}"
+        )
+
+        await ctx.reply(
+            (
+                "❌ Your verification could not be "
+                "completed because of a database "
+                "error.\n\n"
+                "No duplicate link will be created. "
+                "Please contact A&T Management."
+            ),
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # ASSIGN NEW DRIVER PROGRESSION ROLE
+    # ------------------------------------------
+
+    role_result = None
+
+    try:
+        role_result = (
+            await sync_member_progression_role(
+                ctx.guild,
+                applicant_id,
+                0,
+            )
+        )
+
+    except discord.Forbidden:
+        print(
+            "CONFIRM ROLE ERROR: "
+            "Bot cannot manage applicant roles."
+        )
+
+    except discord.HTTPException as error:
+        print(
+            "CONFIRM ROLE ERROR: "
+            f"{error}"
+        )
+
+    # ------------------------------------------
+    # SUCCESS MESSAGE
+    # ------------------------------------------
+
+    embed = discord.Embed(
+        title="🎉 A&T DRIVER VERIFICATION COMPLETE",
+        description=(
+            f"{ctx.author.mention}\n\n"
+            "Your Discord account has now been "
+            "successfully linked to your verified "
+            "A&T TrucksBook driver profile.\n\n"
+            "Welcome to **A&T Transport LTD**."
+        ),
+        colour=discord.Colour.green(),
+    )
+
+    embed.add_field(
+        name="TrucksBook Driver",
+        value=f"`{trucksbook_name}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="TrucksBook User ID",
+        value=f"`{trucksbook_user_id}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Mileage",
+        value="`0 Real miles`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Progression",
+        value="🚛 **A&T New Driver**",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Mileage Tracking",
+        value=(
+            "Your qualifying **Real** TrucksBook "
+            "jobs can now be added automatically "
+            "to your A&T progression."
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(
+        text=(
+            "A&T Transport LTD • "
+            "Driven Beyond Horizons"
+        )
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+    # ------------------------------------------
+    # PERMANENT MANAGEMENT LOG
+    # ------------------------------------------
+
+    role_status = "Unknown"
+
+    if role_result:
+        role_status = (
+            role_result.get("role_name")
+            or role_result.get("status")
+            or "Unknown"
+        )
+
+    await log_verification(
+        ctx.guild,
+        "🎉 Driver Verification Completed",
+        (
+            f"**Driver:** {ctx.author.mention}\n"
+            f"**Discord ID:** `{applicant_id}`\n"
+            f"**TrucksBook Profile:** "
+            f"`{trucksbook_name}`\n"
+            f"**Webhook Driver Name:** "
+            f"`{link_name}`\n"
+            f"**TrucksBook ID:** "
+            f"`{trucksbook_user_id}`\n"
+            "**Starting Mileage:** `0 Real miles`\n"
+            f"**Progression Role:** "
+            f"`{role_status}`\n"
+            "**Status:** Completed"
+        ),
+    )
+
+    print("--------------------------------")
+    print("A&T DRIVER VERIFICATION COMPLETE")
+    print(f"Discord User ID: {applicant_id}")
+    print(
+        f"TrucksBook Profile: "
+        f"{trucksbook_name}"
+    )
+    print(
+        f"Webhook Driver Name: "
+        f"{link_name}"
+    )
+    print(
+        f"TrucksBook User ID: "
+        f"{trucksbook_user_id}"
+    )
+    print("Starting Mileage: 0")
+    print("--------------------------------")
+
+    # ------------------------------------------
+    # CLOSE TEMPORARY CHANNEL
+    # ------------------------------------------
+
+    await ctx.send(
+        (
+            "🔒 Verification complete.\n"
+            "This private channel will close "
+            "automatically in **30 seconds**."
+        )
+    )
+
+    await discord.utils.sleep_until(
+        discord.utils.utcnow()
+        + __import__("datetime").timedelta(
+            seconds=30
+        )
+    )
+
+    try:
+        await ctx.channel.delete(
+            reason=(
+                "A&T driver verification completed"
+            )
+        )
+
+    except discord.Forbidden:
+        print(
+            "VERIFICATION CHANNEL DELETE ERROR: "
+            "Missing Manage Channels permission."
+        )
+
+    except discord.HTTPException as error:
+        print(
+            "VERIFICATION CHANNEL DELETE ERROR: "
+            f"{error}"
+        )
 
 @bot.command(
     name="cancel"
