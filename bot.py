@@ -1282,6 +1282,971 @@ async def on_message(message):
         message
     )
 
+# --------------------------------------------------
+# DRIVER ONBOARDING SYSTEM
+# --------------------------------------------------
+
+def member_is_verification_staff(member):
+    return any(
+        role.id in VERIFICATION_STAFF_ROLE_IDS
+        for role in member.roles
+    )
+
+
+def safe_channel_name(member):
+    name = member.display_name.lower()
+
+    name = re.sub(
+        r"[^a-z0-9-]+",
+        "-",
+        name,
+    )
+
+    name = re.sub(
+        r"-+",
+        "-",
+        name,
+    ).strip("-")
+
+    if not name:
+        name = str(member.id)
+
+    return f"verify-{name[:70]}"
+
+
+async def log_verification(
+    guild,
+    title,
+    description,
+):
+    channel = guild.get_channel(
+        VERIFICATION_LOG_CHANNEL_ID
+    )
+
+    if channel is None:
+        print(
+            "VERIFICATION LOG ERROR: "
+            "Log channel not found."
+        )
+        return
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        colour=discord.Colour.blue(),
+    )
+
+    try:
+        await channel.send(
+            embed=embed
+        )
+    except discord.HTTPException as error:
+        print(
+            "VERIFICATION LOG ERROR: "
+            f"{error}"
+        )
+
+
+async def save_new_verification(
+    discord_user_id,
+    channel_id,
+):
+    if db_pool is None:
+        return False
+
+    async with db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO driver_verifications (
+                discord_user_id,
+                verification_channel_id,
+                status,
+                created_at,
+                confirmed_at,
+                completed_at
+            )
+            VALUES (
+                $1,
+                $2,
+                'pending',
+                NOW(),
+                NULL,
+                NULL
+            )
+            ON CONFLICT (discord_user_id)
+            DO UPDATE SET
+                verification_channel_id =
+                    EXCLUDED.verification_channel_id,
+                trucksbook_name = NULL,
+                trucksbook_user_id = NULL,
+                status = 'pending',
+                created_at = NOW(),
+                confirmed_at = NULL,
+                completed_at = NULL;
+            """,
+            discord_user_id,
+            channel_id,
+        )
+
+    return True
+
+
+async def save_trucksbook_id(
+    discord_user_id,
+    trucksbook_user_id,
+):
+    if db_pool is None:
+        return False
+
+    async with db_pool.acquire() as connection:
+
+        already_linked = await connection.fetchval(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM driver_links
+                WHERE trucksbook_user_id = $1
+            );
+            """,
+            trucksbook_user_id,
+        )
+
+        if already_linked:
+            return "already_linked"
+
+        pending_owner = await connection.fetchval(
+            """
+            SELECT discord_user_id
+            FROM driver_verifications
+            WHERE trucksbook_user_id = $1
+              AND discord_user_id != $2
+              AND status IN (
+                  'pending',
+                  'confirmed'
+              );
+            """,
+            trucksbook_user_id,
+            discord_user_id,
+        )
+
+        if pending_owner:
+            return "already_pending"
+
+        result = await connection.execute(
+            """
+            UPDATE driver_verifications
+            SET
+                trucksbook_user_id = $1
+            WHERE discord_user_id = $2
+              AND status = 'pending';
+            """,
+            trucksbook_user_id,
+            discord_user_id,
+        )
+
+    if result == "UPDATE 0":
+        return False
+
+    return True
+
+
+async def cancel_verification_record(
+    discord_user_id,
+):
+    if db_pool is None:
+        return False
+
+    async with db_pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            UPDATE driver_verifications
+            SET
+                status = 'cancelled',
+                completed_at = NOW()
+            WHERE discord_user_id = $1
+              AND status IN (
+                  'pending',
+                  'confirmed'
+              );
+            """,
+            discord_user_id,
+        )
+
+    return result != "UPDATE 0"
+
+
+@bot.command(
+    name="verify"
+)
+async def verify_driver(ctx):
+    # Command must be used in the permanent
+    # driver onboarding channel.
+
+    if ctx.guild is None:
+        return
+
+    if ctx.guild.id != GUILD_ID:
+        return
+
+    if ctx.channel.id != ONBOARDING_CHANNEL_ID:
+        await ctx.reply(
+            "Please use the A&T driver onboarding "
+            "channel to start verification.",
+            mention_author=False,
+        )
+        return
+
+    member = ctx.author
+
+    if member.bot:
+        return
+
+    if db_pool is None:
+        await ctx.reply(
+            "The A&T verification database is "
+            "currently unavailable. Please try "
+            "again shortly.",
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # CHECK FOR EXISTING DRIVER LINK
+    # ------------------------------------------
+
+    if await driver_already_linked(
+        member.id
+    ):
+        await ctx.reply(
+            (
+                f"{member.mention}, your Discord "
+                "account is already linked to an "
+                "A&T TrucksBook driver profile."
+            ),
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # CHECK EXISTING VERIFICATION
+    # ------------------------------------------
+
+    existing = await get_verification_by_user(
+        member.id
+    )
+
+    if (
+        existing
+        and existing["status"]
+        in (
+            "pending",
+            "confirmed",
+        )
+    ):
+        existing_channel_id = (
+            existing[
+                "verification_channel_id"
+            ]
+        )
+
+        if existing_channel_id:
+            existing_channel = (
+                ctx.guild.get_channel(
+                    int(existing_channel_id)
+                )
+            )
+
+            if existing_channel:
+                await ctx.reply(
+                    (
+                        f"{member.mention}, you already "
+                        "have an active verification: "
+                        f"{existing_channel.mention}"
+                    ),
+                    mention_author=False,
+                )
+                return
+
+        # Stale database record.
+        # If its old channel no longer exists,
+        # allow a fresh verification channel.
+
+    # ------------------------------------------
+    # FIND VERIFICATION CATEGORY
+    # ------------------------------------------
+
+    category = ctx.guild.get_channel(
+        VERIFICATION_CATEGORY_ID
+    )
+
+    if not isinstance(
+        category,
+        discord.CategoryChannel,
+    ):
+        await ctx.reply(
+            (
+                "A&T verification is not currently "
+                "available because the verification "
+                "category could not be found."
+            ),
+            mention_author=False,
+        )
+
+        print(
+            "ONBOARDING ERROR: "
+            "Verification category unavailable."
+        )
+        return
+
+    # ------------------------------------------
+    # PRIVATE CHANNEL PERMISSIONS
+    # ------------------------------------------
+
+    overwrites = {
+        ctx.guild.default_role:
+            discord.PermissionOverwrite(
+                view_channel=False
+            ),
+
+        member:
+            discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                embed_links=True,
+                attach_files=True,
+            ),
+
+        ctx.guild.me:
+            discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_channels=True,
+                manage_messages=True,
+                embed_links=True,
+            ),
+    }
+
+    for role_id in (
+        VERIFICATION_STAFF_ROLE_IDS
+    ):
+        role = ctx.guild.get_role(
+            role_id
+        )
+
+        if role is not None:
+            overwrites[role] = (
+                discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    manage_messages=True,
+                    embed_links=True,
+                )
+            )
+
+    # ------------------------------------------
+    # CREATE PRIVATE CHANNEL
+    # ------------------------------------------
+
+    try:
+        verification_channel = (
+            await ctx.guild.create_text_channel(
+                name=safe_channel_name(
+                    member
+                ),
+                category=category,
+                overwrites=overwrites,
+                reason=(
+                    "A&T Transport driver "
+                    "verification started"
+                ),
+            )
+        )
+
+    except discord.Forbidden:
+        await ctx.reply(
+            (
+                "I could not create your private "
+                "verification channel. A&T "
+                "Management has been notified."
+            ),
+            mention_author=False,
+        )
+
+        print(
+            "ONBOARDING ERROR: "
+            "Bot cannot create verification channels."
+        )
+        return
+
+    except discord.HTTPException as error:
+        await ctx.reply(
+            (
+                "Discord could not create your "
+                "verification channel. Please try "
+                "again shortly."
+            ),
+            mention_author=False,
+        )
+
+        print(
+            "ONBOARDING CHANNEL ERROR: "
+            f"{error}"
+        )
+        return
+
+    # ------------------------------------------
+    # SAVE APPLICATION
+    # ------------------------------------------
+
+    try:
+        saved = await save_new_verification(
+            member.id,
+            verification_channel.id,
+        )
+
+    except Exception as error:
+        print(
+            "ONBOARDING DATABASE ERROR: "
+            f"{error}"
+        )
+
+        try:
+            await verification_channel.delete(
+                reason=(
+                    "A&T verification database "
+                    "save failed"
+                )
+            )
+        except discord.HTTPException:
+            pass
+
+        await ctx.reply(
+            (
+                "Your verification could not be "
+                "started because of a database "
+                "error. Please try again shortly."
+            ),
+            mention_author=False,
+        )
+        return
+
+    if not saved:
+        try:
+            await verification_channel.delete(
+                reason=(
+                    "A&T verification database "
+                    "unavailable"
+                )
+            )
+        except discord.HTTPException:
+            pass
+
+        await ctx.reply(
+            (
+                "The A&T verification database "
+                "is currently unavailable."
+            ),
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # PRIVATE WELCOME MESSAGE
+    # ------------------------------------------
+
+    embed = discord.Embed(
+        title=(
+            "🚛 A&T TRANSPORT LTD — "
+            "DRIVER VERIFICATION"
+        ),
+        description=(
+            f"Welcome {member.mention}.\n\n"
+            "This private channel has been created "
+            "to link your Discord account with your "
+            "TrucksBook driver profile.\n\n"
+            "**Step 1 — Find your TrucksBook User ID**\n"
+            "Open your TrucksBook profile. Your User "
+            "ID is the number at the end of your "
+            "profile URL.\n\n"
+            "Example:\n"
+            "`trucksbook.eu/profile/123456`\n\n"
+            "The User ID in this example is "
+            "`123456`.\n\n"
+            "**Step 2 — Submit the ID**\n"
+            "Type:\n"
+            "`!trucksbook 123456`\n\n"
+            "Replace `123456` with your own "
+            "TrucksBook User ID.\n\n"
+            "After submission, the account will "
+            "move to the verification stage.\n\n"
+            "If you started this by mistake, type:\n"
+            "`!cancel`\n\n"
+            "🔒 **This channel is private.** "
+            "Only you and authorised A&T "
+            "Management can see it."
+        ),
+        colour=discord.Colour.blue(),
+    )
+
+    embed.set_footer(
+        text=(
+            "A&T Transport LTD • "
+            "Driven Beyond Horizons"
+        )
+    )
+
+    await verification_channel.send(
+        content=member.mention,
+        embed=embed,
+    )
+
+    await ctx.reply(
+        (
+            f"{member.mention}, your private "
+            "verification channel has been created: "
+            f"{verification_channel.mention}"
+        ),
+        mention_author=False,
+    )
+
+    await log_verification(
+        ctx.guild,
+        "🔐 Driver Verification Started",
+        (
+            f"**Driver:** {member.mention}\n"
+            f"**Discord ID:** `{member.id}`\n"
+            f"**Channel:** "
+            f"{verification_channel.mention}\n"
+            "**Status:** Pending TrucksBook ID"
+        ),
+    )
+
+    print("--------------------------------")
+    print("A&T DRIVER VERIFICATION STARTED")
+    print(
+        f"Discord User: {member} "
+        f"({member.id})"
+    )
+    print(
+        "Verification Channel: "
+        f"{verification_channel.id}"
+    )
+    print("--------------------------------")
+
+
+@bot.command(
+    name="trucksbook"
+)
+async def submit_trucksbook(
+    ctx,
+    trucksbook_user_id: str = None,
+):
+    if ctx.guild is None:
+        return
+
+    if ctx.guild.id != GUILD_ID:
+        return
+
+    verification = (
+        await get_verification_by_channel(
+            ctx.channel.id
+        )
+    )
+
+    if verification is None:
+        await ctx.reply(
+            (
+                "This command can only be used "
+                "inside your private A&T driver "
+                "verification channel."
+            ),
+            mention_author=False,
+        )
+        return
+
+    applicant_id = int(
+        verification["discord_user_id"]
+    )
+
+    if (
+        ctx.author.id != applicant_id
+        and not member_is_verification_staff(
+            ctx.author
+        )
+    ):
+        await ctx.reply(
+            (
+                "Only the applicant or authorised "
+                "A&T Management can submit the "
+                "TrucksBook ID for this application."
+            ),
+            mention_author=False,
+        )
+        return
+
+    if (
+        verification["status"]
+        != "pending"
+    ):
+        await ctx.reply(
+            (
+                "This verification is no longer "
+                "waiting for a TrucksBook ID."
+            ),
+            mention_author=False,
+        )
+        return
+
+    if trucksbook_user_id is None:
+        await ctx.reply(
+            (
+                "Please include your TrucksBook "
+                "User ID.\n\n"
+                "Example:\n"
+                "`!trucksbook 123456`"
+            ),
+            mention_author=False,
+        )
+        return
+
+    trucksbook_user_id = (
+        trucksbook_user_id.strip()
+    )
+
+    if not trucksbook_user_id.isdigit():
+        await ctx.reply(
+            (
+                "That does not look like a valid "
+                "TrucksBook User ID.\n\n"
+                "Please enter numbers only.\n"
+                "Example: `!trucksbook 123456`"
+            ),
+            mention_author=False,
+        )
+        return
+
+    numeric_id = int(
+        trucksbook_user_id
+    )
+
+    if numeric_id <= 0:
+        await ctx.reply(
+            (
+                "That does not look like a valid "
+                "TrucksBook User ID."
+            ),
+            mention_author=False,
+        )
+        return
+
+    try:
+        result = await save_trucksbook_id(
+            applicant_id,
+            numeric_id,
+        )
+
+    except Exception as error:
+        print(
+            "TRUCKSBOOK ID DATABASE ERROR: "
+            f"{error}"
+        )
+
+        await ctx.reply(
+            (
+                "There was a database error while "
+                "saving the TrucksBook ID. Please "
+                "try again shortly."
+            ),
+            mention_author=False,
+        )
+        return
+
+    if result == "already_linked":
+        await ctx.reply(
+            (
+                "❌ That TrucksBook User ID is "
+                "already linked to another A&T "
+                "driver account.\n\n"
+                "If you believe this is incorrect, "
+                "please ask A&T Management to "
+                "review it."
+            ),
+            mention_author=False,
+        )
+
+        await log_verification(
+            ctx.guild,
+            "⚠️ Duplicate TrucksBook ID Attempt",
+            (
+                f"**Applicant Discord ID:** "
+                f"`{applicant_id}`\n"
+                f"**Submitted TrucksBook ID:** "
+                f"`{numeric_id}`\n"
+                f"**Channel:** {ctx.channel.mention}\n"
+                "**Result:** ID already linked"
+            ),
+        )
+        return
+
+    if result == "already_pending":
+        await ctx.reply(
+            (
+                "❌ That TrucksBook User ID is "
+                "already being used in another "
+                "active verification.\n\n"
+                "Please contact A&T Management "
+                "if you believe this is an error."
+            ),
+            mention_author=False,
+        )
+
+        await log_verification(
+            ctx.guild,
+            "⚠️ Duplicate Verification Attempt",
+            (
+                f"**Applicant Discord ID:** "
+                f"`{applicant_id}`\n"
+                f"**Submitted TrucksBook ID:** "
+                f"`{numeric_id}`\n"
+                f"**Channel:** {ctx.channel.mention}\n"
+                "**Result:** ID already pending"
+            ),
+        )
+        return
+
+    if result is not True:
+        await ctx.reply(
+            (
+                "I could not save that TrucksBook "
+                "ID. Please try again."
+            ),
+            mention_author=False,
+        )
+        return
+
+    embed = discord.Embed(
+        title=(
+            "🔎 TRUCKSBOOK ID RECEIVED"
+        ),
+        description=(
+            f"**TrucksBook User ID:** "
+            f"`{numeric_id}`\n\n"
+            "Your ID has been saved successfully.\n\n"
+            "⚠️ **Your Discord account has NOT "
+            "been linked yet.**\n\n"
+            "The next verification stage will "
+            "check this ID against the TrucksBook "
+            "profile and confirm that the account "
+            "belongs to an A&T Transport LTD "
+            "driver.\n\n"
+            "Once that check is enabled, you will "
+            "be shown the profile details and "
+            "asked to confirm them before any "
+            "driver link is created."
+        ),
+        colour=discord.Colour.gold(),
+    )
+
+    embed.set_footer(
+        text=(
+            "A&T Transport LTD • "
+            "Verification Pending"
+        )
+    )
+
+    await ctx.reply(
+        embed=embed,
+        mention_author=False,
+    )
+
+    await log_verification(
+        ctx.guild,
+        "🔎 TrucksBook ID Submitted",
+        (
+            f"**Applicant:** <@{applicant_id}>\n"
+            f"**Discord ID:** `{applicant_id}`\n"
+            f"**TrucksBook ID:** `{numeric_id}`\n"
+            f"**Channel:** {ctx.channel.mention}\n"
+            "**Status:** Awaiting profile verification"
+        ),
+    )
+
+    print("--------------------------------")
+    print("TRUCKSBOOK ID SUBMITTED")
+    print(
+        f"Discord User ID: {applicant_id}"
+    )
+    print(
+        f"TrucksBook User ID: {numeric_id}"
+    )
+    print("--------------------------------")
+
+
+@bot.command(
+    name="cancel"
+)
+async def cancel_verification(
+    ctx,
+):
+    if ctx.guild is None:
+        return
+
+    if ctx.guild.id != GUILD_ID:
+        return
+
+    verification = (
+        await get_verification_by_channel(
+            ctx.channel.id
+        )
+    )
+
+    if verification is None:
+        return
+
+    applicant_id = int(
+        verification["discord_user_id"]
+    )
+
+    if (
+        ctx.author.id != applicant_id
+        and not member_is_verification_staff(
+            ctx.author
+        )
+    ):
+        await ctx.reply(
+            (
+                "Only the applicant or authorised "
+                "A&T Management can cancel this "
+                "verification."
+            ),
+            mention_author=False,
+        )
+        return
+
+    applicant = ctx.guild.get_member(
+        applicant_id
+    )
+
+    applicant_text = (
+        applicant.mention
+        if applicant
+        else f"<@{applicant_id}>"
+    )
+
+    await cancel_verification_record(
+        applicant_id
+    )
+
+    await log_verification(
+        ctx.guild,
+        "❌ Driver Verification Cancelled",
+        (
+            f"**Driver:** {applicant_text}\n"
+            f"**Discord ID:** `{applicant_id}`\n"
+            f"**Cancelled By:** "
+            f"{ctx.author.mention}\n"
+            f"**Channel:** `#{ctx.channel.name}`"
+        ),
+    )
+
+    embed = discord.Embed(
+        title=(
+            "❌ VERIFICATION CANCELLED"
+        ),
+        description=(
+            "This A&T driver verification has "
+            "been cancelled.\n\n"
+            "This private channel will now be "
+            "removed."
+        ),
+        colour=discord.Colour.red(),
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+    print("--------------------------------")
+    print("A&T DRIVER VERIFICATION CANCELLED")
+    print(
+        f"Discord User ID: {applicant_id}"
+    )
+    print(
+        f"Cancelled By: {ctx.author}"
+    )
+    print("--------------------------------")
+
+    # Give Discord a moment to display the
+    # cancellation message before deletion.
+    import asyncio
+
+    await asyncio.sleep(5)
+
+    try:
+        await ctx.channel.delete(
+            reason=(
+                "A&T driver verification cancelled"
+            )
+        )
+    except discord.Forbidden:
+        print(
+            "ONBOARDING ERROR: "
+            "Bot cannot delete verification channel."
+        )
+    except discord.HTTPException as error:
+        print(
+            "ONBOARDING DELETE ERROR: "
+            f"{error}"
+        )
+
+
+# --------------------------------------------------
+# ONBOARDING COMMAND ERROR HANDLING
+# --------------------------------------------------
+
+@verify_driver.error
+async def verify_driver_error(
+    ctx,
+    error,
+):
+    print(
+        "VERIFY COMMAND ERROR: "
+        f"{error}"
+    )
+
+
+@submit_trucksbook.error
+async def submit_trucksbook_error(
+    ctx,
+    error,
+):
+    print(
+        "TRUCKSBOOK COMMAND ERROR: "
+        f"{error}"
+    )
+
+    await ctx.reply(
+        (
+            "I couldn't process that TrucksBook "
+            "ID. Please use:\n"
+            "`!trucksbook 123456`"
+        ),
+        mention_author=False,
+    )
+
+
+@cancel_verification.error
+async def cancel_verification_error(
+    ctx,
+    error,
+):
+    print(
+        "CANCEL COMMAND ERROR: "
+        f"{error}"
+    )
 
 # --------------------------------------------------
 # START BOT
