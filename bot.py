@@ -2217,6 +2217,10 @@ async def submit_trucksbook(
     if ctx.guild.id != GUILD_ID:
         return
 
+    # ------------------------------------------
+    # FIND VERIFICATION
+    # ------------------------------------------
+
     verification = (
         await get_verification_by_channel(
             ctx.channel.id
@@ -2238,6 +2242,10 @@ async def submit_trucksbook(
         verification["discord_user_id"]
     )
 
+    # ------------------------------------------
+    # CHECK USER PERMISSION
+    # ------------------------------------------
+
     if (
         ctx.author.id != applicant_id
         and not member_is_verification_staff(
@@ -2254,10 +2262,11 @@ async def submit_trucksbook(
         )
         return
 
-    if (
-        verification["status"]
-        != "pending"
-    ):
+    # ------------------------------------------
+    # CHECK VERIFICATION STATUS
+    # ------------------------------------------
+
+    if verification["status"] != "pending":
         await ctx.reply(
             (
                 "This verification is no longer "
@@ -2310,7 +2319,158 @@ async def submit_trucksbook(
         return
 
     # ------------------------------------------
-    # SAVE TRUCKSBOOK USER ID
+    # CHECK TRUCKSBOOK PROFILE
+    # ------------------------------------------
+
+    checking_message = await ctx.reply(
+        (
+            "🔎 Checking TrucksBook profile "
+            f"`{numeric_id}`...\n\n"
+            "Please wait while A&T verifies "
+            "the driver account."
+        ),
+        mention_author=False,
+    )
+
+    try:
+        profile = await fetch_trucksbook_profile(
+            numeric_id
+        )
+
+    except Exception as error:
+        print(
+            "TRUCKSBOOK PROFILE ERROR: "
+            f"{error}"
+        )
+
+        await checking_message.edit(
+            content=(
+                "❌ An unexpected error occurred "
+                "while checking TrucksBook.\n\n"
+                "Please try again shortly."
+            )
+        )
+        return
+
+    # ------------------------------------------
+    # PROFILE LOOKUP FAILED
+    # ------------------------------------------
+
+    if not profile.get("success"):
+        reason = profile.get(
+            "reason",
+            "unknown_error",
+        )
+
+        if reason == "request_failed":
+            message = (
+                "❌ TrucksBook could not be reached "
+                "at the moment.\n\n"
+                "Please try again shortly."
+            )
+
+        elif reason == "http_error":
+            status_code = profile.get(
+                "status_code",
+                "Unknown",
+            )
+
+            message = (
+                "❌ TrucksBook returned an unexpected "
+                "response.\n\n"
+                f"HTTP Status: `{status_code}`\n\n"
+                "Please try again shortly."
+            )
+
+        elif reason == "profile_not_found":
+            message = (
+                "❌ A TrucksBook profile could not "
+                "be verified using that User ID.\n\n"
+                "Please check the ID and try again."
+            )
+
+        else:
+            message = (
+                "❌ That TrucksBook profile could "
+                "not be verified."
+            )
+
+        await checking_message.edit(
+            content=message
+        )
+
+        await log_verification(
+            ctx.guild,
+            "❌ TrucksBook Profile Check Failed",
+            (
+                f"**Applicant:** <@{applicant_id}>\n"
+                f"**Discord ID:** `{applicant_id}`\n"
+                f"**Submitted TrucksBook ID:** "
+                f"`{numeric_id}`\n"
+                f"**Channel:** "
+                f"{ctx.channel.mention}\n"
+                f"**Reason:** `{reason}`"
+            ),
+        )
+        return
+
+    # ------------------------------------------
+    # EXTRACT VERIFIED PROFILE
+    # ------------------------------------------
+
+    profile_name = profile.get(
+        "trucksbook_name"
+    )
+
+    company_name = profile.get(
+        "company_name"
+    )
+
+    company_position = profile.get(
+        "company_position"
+    )
+
+    belongs_to_at = profile.get(
+        "belongs_to_at",
+        False,
+    )
+
+    # ------------------------------------------
+    # REQUIRE A&T MEMBERSHIP
+    # ------------------------------------------
+
+    if not belongs_to_at:
+        await checking_message.edit(
+            content=(
+                "❌ **A&T membership could not be "
+                "verified.**\n\n"
+                "The TrucksBook profile was found, "
+                "but it is not currently listed with "
+                "**A & T Transport LTD**.\n\n"
+                "If you believe this is incorrect, "
+                "please contact A&T Management."
+            )
+        )
+
+        await log_verification(
+            ctx.guild,
+            "❌ A&T Membership Verification Failed",
+            (
+                f"**Applicant:** <@{applicant_id}>\n"
+                f"**Discord ID:** `{applicant_id}`\n"
+                f"**TrucksBook ID:** `{numeric_id}`\n"
+                f"**Detected Driver:** "
+                f"`{profile_name or 'Unknown'}`\n"
+                f"**Detected Company:** "
+                f"`{company_name or 'None'}`\n"
+                f"**Channel:** "
+                f"{ctx.channel.mention}"
+            ),
+        )
+        return
+
+    # ------------------------------------------
+    # SAVE VERIFIED TRUCKSBOOK ID
     # ------------------------------------------
 
     try:
@@ -2325,134 +2485,252 @@ async def submit_trucksbook(
             f"{error}"
         )
 
-        await ctx.reply(
-            (
-                "There was a database error while "
-                "saving the TrucksBook ID. Please "
-                "try again shortly."
-            ),
-            mention_author=False,
+        await checking_message.edit(
+            content=(
+                "❌ There was a database error while "
+                "saving the verified TrucksBook "
+                "account.\n\n"
+                "Please try again shortly."
+            )
         )
         return
 
+    # ------------------------------------------
+    # DUPLICATE LINK PROTECTION
+    # ------------------------------------------
+
     if result == "already_linked":
-        await ctx.reply(
-            (
+        await checking_message.edit(
+            content=(
                 "❌ That TrucksBook User ID is "
                 "already linked to another A&T "
-                "driver account.\n\n"
-                "If you believe this is incorrect, "
-                "please ask A&T Management to "
-                "review it."
-            ),
-            mention_author=False,
+                "Discord account.\n\n"
+                "Please contact A&T Management "
+                "if you believe this is incorrect."
+            )
         )
 
         await log_verification(
             ctx.guild,
             "⚠️ Duplicate TrucksBook ID Attempt",
             (
-                f"**Applicant Discord ID:** "
-                f"`{applicant_id}`\n"
-                f"**Submitted TrucksBook ID:** "
-                f"`{numeric_id}`\n"
-                f"**Channel:** {ctx.channel.mention}\n"
-                "**Result:** ID already linked"
+                f"**Applicant:** <@{applicant_id}>\n"
+                f"**Discord ID:** `{applicant_id}`\n"
+                f"**TrucksBook ID:** `{numeric_id}`\n"
+                f"**Channel:** "
+                f"{ctx.channel.mention}\n"
+                "**Result:** Already linked"
             ),
         )
         return
 
     if result == "already_pending":
-        await ctx.reply(
-            (
+        await checking_message.edit(
+            content=(
                 "❌ That TrucksBook User ID is "
                 "already being used in another "
                 "active verification.\n\n"
                 "Please contact A&T Management "
-                "if you believe this is an error."
-            ),
-            mention_author=False,
+                "if you believe this is incorrect."
+            )
         )
 
         await log_verification(
             ctx.guild,
             "⚠️ Duplicate Verification Attempt",
             (
-                f"**Applicant Discord ID:** "
-                f"`{applicant_id}`\n"
-                f"**Submitted TrucksBook ID:** "
-                f"`{numeric_id}`\n"
-                f"**Channel:** {ctx.channel.mention}\n"
-                "**Result:** ID already pending"
+                f"**Applicant:** <@{applicant_id}>\n"
+                f"**Discord ID:** `{applicant_id}`\n"
+                f"**TrucksBook ID:** `{numeric_id}`\n"
+                f"**Channel:** "
+                f"{ctx.channel.mention}\n"
+                "**Result:** Already pending"
             ),
         )
         return
 
     if result is not True:
-        await ctx.reply(
-            (
-                "I could not save that TrucksBook "
-                "ID. Please try again."
-            ),
-            mention_author=False,
+        await checking_message.edit(
+            content=(
+                "❌ The verified TrucksBook ID "
+                "could not be saved.\n\n"
+                "Please try again."
+            )
         )
         return
 
+    # ------------------------------------------
+    # SAVE VERIFIED PROFILE NAME + STATUS
+    # ------------------------------------------
+
+    try:
+        async with db_pool.acquire() as connection:
+            update_result = await connection.execute(
+                """
+                UPDATE driver_verifications
+                SET
+                    trucksbook_name = $1,
+                    status = 'confirmed',
+                    confirmed_at = NOW()
+                WHERE discord_user_id = $2
+                  AND trucksbook_user_id = $3
+                  AND status = 'pending';
+                """,
+                profile_name,
+                applicant_id,
+                numeric_id,
+            )
+
+    except Exception as error:
+        print(
+            "TRUCKSBOOK VERIFICATION DATABASE ERROR: "
+            f"{error}"
+        )
+
+        await checking_message.edit(
+            content=(
+                "❌ The TrucksBook profile was "
+                "verified, but its verification "
+                "record could not be updated.\n\n"
+                "Please contact A&T Management."
+            )
+        )
+        return
+
+    if update_result == "UPDATE 0":
+        await checking_message.edit(
+            content=(
+                "❌ The verification record changed "
+                "before the profile could be saved.\n\n"
+                "Please contact A&T Management."
+            )
+        )
+        return
+
+    # ------------------------------------------
+    # REMOVE CHECKING MESSAGE
+    # ------------------------------------------
+
+    try:
+        await checking_message.delete()
+    except discord.HTTPException:
+        pass
+
+    # ------------------------------------------
+    # SHOW DRIVER CONFIRMATION
+    # ------------------------------------------
+
+    applicant = ctx.guild.get_member(
+        applicant_id
+    )
+
+    applicant_text = (
+        applicant.mention
+        if applicant
+        else f"<@{applicant_id}>"
+    )
+
     embed = discord.Embed(
-        title=(
-            "🔎 TRUCKSBOOK ID RECEIVED"
-        ),
+        title="✅ TRUCKSBOOK PROFILE VERIFIED",
         description=(
-            f"**TrucksBook User ID:** "
-            f"`{numeric_id}`\n\n"
-            "Your ID has been saved successfully.\n\n"
-            "⚠️ **Your Discord account has NOT "
-            "been linked yet.**\n\n"
-            "The next verification stage will "
-            "check this ID against the TrucksBook "
-            "profile and confirm that the account "
-            "belongs to an A&T Transport LTD "
-            "driver.\n\n"
-            "Once that check is enabled, you will "
-            "be shown the profile details and "
-            "asked to confirm them before any "
-            "driver link is created."
+            f"{applicant_text}\n\n"
+            "Your TrucksBook profile has been "
+            "successfully verified with "
+            "**A & T Transport LTD**.\n\n"
+            "Please check the information below "
+            "before continuing."
         ),
-        colour=discord.Colour.gold(),
+        colour=discord.Colour.green(),
+    )
+
+    embed.add_field(
+        name="TrucksBook User ID",
+        value=f"`{numeric_id}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Driver",
+        value=f"`{profile_name or 'Unknown'}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="A&T Member",
+        value="✅ Yes",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Company",
+        value=f"`{company_name or 'Unknown'}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Company Position",
+        value=f"`{company_position or 'Not listed'}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Verification",
+        value="✅ Automatically verified",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Final Confirmation",
+        value=(
+            "If these details are correct, type:\n"
+            "**`!confirm`**\n\n"
+            "Your Discord account will **not** be "
+            "permanently linked until you confirm."
+        ),
+        inline=False,
     )
 
     embed.set_footer(
         text=(
             "A&T Transport LTD • "
-            "Verification Pending"
+            "Driven Beyond Horizons"
         )
     )
 
-    await ctx.reply(
-        embed=embed,
-        mention_author=False,
+    await ctx.send(
+        embed=embed
     )
+
+    # ------------------------------------------
+    # PERMANENT MANAGEMENT LOG
+    # ------------------------------------------
 
     await log_verification(
         ctx.guild,
-        "🔎 TrucksBook ID Submitted",
+        "✅ TrucksBook Profile Verified",
         (
-            f"**Applicant:** <@{applicant_id}>\n"
+            f"**Applicant:** {applicant_text}\n"
             f"**Discord ID:** `{applicant_id}`\n"
             f"**TrucksBook ID:** `{numeric_id}`\n"
+            f"**Driver:** "
+            f"`{profile_name or 'Unknown'}`\n"
+            f"**Company:** "
+            f"`{company_name or 'Unknown'}`\n"
+            f"**Position:** "
+            f"`{company_position or 'Not listed'}`\n"
             f"**Channel:** {ctx.channel.mention}\n"
-            "**Status:** Awaiting profile verification"
+            "**Status:** Awaiting driver confirmation"
         ),
     )
 
     print("--------------------------------")
-    print("TRUCKSBOOK ID SUBMITTED")
-    print(
-        f"Discord User ID: {applicant_id}"
-    )
-    print(
-        f"TrucksBook User ID: {numeric_id}"
-    )
+    print("TRUCKSBOOK PROFILE VERIFIED")
+    print(f"Discord User ID: {applicant_id}")
+    print(f"TrucksBook User ID: {numeric_id}")
+    print(f"Driver: {profile_name}")
+    print(f"Company: {company_name}")
+    print(f"Position: {company_position}")
+    print("STATUS: Awaiting !confirm")
     print("--------------------------------")
 
 
