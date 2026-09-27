@@ -1474,6 +1474,140 @@ async def cancel_verification_record(
 
     return result != "UPDATE 0"
 
+@bot.command(name="verifytest")
+async def verify_test(ctx):
+    if ctx.guild is None:
+        return
+
+    if ctx.guild.id != GUILD_ID:
+        return
+
+    # Management-only protection
+    if not member_is_verification_staff(ctx.author):
+        await ctx.reply(
+            "This test command is restricted to A&T Management.",
+            mention_author=False,
+        )
+        return
+
+    category = ctx.guild.get_channel(
+        VERIFICATION_CATEGORY_ID
+    )
+
+    if not isinstance(
+        category,
+        discord.CategoryChannel,
+    ):
+        await ctx.reply(
+            "The A&T verification category could not be found.",
+            mention_author=False,
+        )
+        return
+
+    member = ctx.author
+
+    overwrites = {
+        ctx.guild.default_role:
+            discord.PermissionOverwrite(
+                view_channel=False
+            ),
+
+        member:
+            discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+            ),
+
+        ctx.guild.me:
+            discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                read_message_history=True,
+                manage_channels=True,
+                manage_messages=True,
+            ),
+    }
+
+    for role_id in VERIFICATION_STAFF_ROLE_IDS:
+        role = ctx.guild.get_role(role_id)
+
+        if role is not None:
+            overwrites[role] = (
+                discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    read_message_history=True,
+                    manage_messages=True,
+                )
+            )
+
+    try:
+        channel = await ctx.guild.create_text_channel(
+            name=f"test-verify-{member.id}",
+            category=category,
+            overwrites=overwrites,
+            reason="A&T onboarding system test",
+        )
+
+    except discord.Forbidden:
+        await ctx.reply(
+            "TEST FAILED: The bot does not have permission to create channels.",
+            mention_author=False,
+        )
+        return
+
+    except discord.HTTPException as error:
+        await ctx.reply(
+            f"TEST FAILED: Discord returned an error: `{error}`",
+            mention_author=False,
+        )
+        return
+
+    embed = discord.Embed(
+        title="🧪 A&T DRIVER VERIFICATION TEST",
+        description=(
+            f"{member.mention}\n\n"
+            "The private driver-verification channel was "
+            "created successfully.\n\n"
+            "### Permission Test\n"
+            "This channel should only be visible to:\n"
+            "• You\n"
+            "• Owners\n"
+            "• Admin\n"
+            "• Management\n"
+            "• Recruitment Manager\n"
+            "• A&T Transport Bot\n\n"
+            "No TrucksBook account, mileage, progression "
+            "role or driver link has been changed.\n\n"
+            "**TEST MODE — SAFE TO DELETE**"
+        ),
+        colour=discord.Colour.green(),
+    )
+
+    embed.set_footer(
+        text="A&T Transport LTD • Onboarding Test Mode"
+    )
+
+    await channel.send(
+        content=member.mention,
+        embed=embed,
+    )
+
+    await ctx.reply(
+        (
+            "✅ Verification channel test successful: "
+            f"{channel.mention}"
+        ),
+        mention_author=False,
+    )
+
+    print("--------------------------------")
+    print("A&T VERIFICATION TEST")
+    print(f"Tester: {member} ({member.id})")
+    print(f"Test Channel: {channel.id}")
+    print("NO DRIVER DATA WAS MODIFIED")
+    print("--------------------------------")
 
 @bot.command(
     name="verify"
