@@ -152,19 +152,17 @@ bot = commands.Bot(
 
 @bot.event
 async def on_ready():
-        global db_pool
+    global db_pool
 
     if db_pool is None:
         try:
             await setup_database()
         except Exception as error:
             print(f"DATABASE ERROR: {error}")
-            
+
     print("--------------------------------")
     print("A&T Transport LTD Bot")
     print(f"Logged in as: {bot.user}")
-    print(f"Bot ID: {bot.user.id}")
-    print("--------------------------------")
 
     guild = bot.get_guild(GUILD_ID)
 
