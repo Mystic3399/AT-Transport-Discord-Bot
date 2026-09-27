@@ -62,7 +62,49 @@ async def on_ready():
     except Exception as error:
         print(f"Slash command sync failed: {error}")
 
+@bot.event
+async def on_message(message):
+    # Only inspect webhook messages
+    if message.webhook_id is None:
+        await bot.process_commands(message)
+        return
 
+    # Only inspect TrucksBook webhook embeds
+    if not message.embeds:
+        await bot.process_commands(message)
+        return
+
+    for embed in message.embeds:
+        data = embed.to_dict()
+
+        title = data.get("title", "")
+        description = data.get("description", "")
+        author = data.get("author", {}).get("name", "")
+
+        # Ignore webhook messages that are not TrucksBook deliveries
+        combined_text = f"{title}\n{description}"
+
+        if "Job delivery #" not in combined_text:
+            continue
+
+        print("--------------------------------")
+        print("TRUCKSBOOK WEBHOOK DETECTED")
+        print(f"Driver: {author}")
+        print(f"Title: {title}")
+        print(f"Description: {description}")
+
+        # Print embed fields so we can see exactly what Discord receives
+        for field in data.get("fields", []):
+            print(
+                f"Field: {field.get('name')} = "
+                f"{field.get('value')}"
+            )
+
+        print(f"Discord Message ID: {message.id}")
+        print(f"Webhook ID: {message.webhook_id}")
+        print("--------------------------------")
+
+    await bot.process_commands(message)
 
 if not TOKEN:
     raise RuntimeError(
