@@ -184,37 +184,37 @@ else:
     print("ACTION: Job would be ignored.")
 
 print("--------------------------------")
-        # ------------------------------------------
-        # MATCH TRUCKSBOOK DRIVER TO DISCORD MEMBER
-        # ------------------------------------------
+    # --------------------------------------------------
+# MATCH TRUCKSBOOK DRIVER TO DISCORD MEMBER
+# --------------------------------------------------
 
-        discord_user_id = DRIVER_MAPPINGS.get(author)
+discord_user_id = DRIVER_MAPPINGS.get(author)
 
-        if discord_user_id:
-            guild = bot.get_guild(GUILD_ID)
+if discord_user_id:
+    guild = bot.get_guild(GUILD_ID)
 
-            member = (
-                guild.get_member(discord_user_id)
-                if guild
-                else None
-            )
+    member = (
+        guild.get_member(discord_user_id)
+        if guild
+        else None
+    )
 
-            if member:
-                print(
-                    f"MATCHED DISCORD MEMBER: {member}"
-                )
-                print(
-                    f"Discord User ID: {member.id}"
-                )
-            else:
-                print(
-                    f"WARNING: Discord member not found for {author}"
-                )
+    if member:
+        print(
+            f"MATCHED DISCORD MEMBER: {member}"
+        )
+        print(
+            f"Discord User ID: {member.id}"
+        )
+    else:
+        print(
+            f"WARNING: Discord member not found for {author}"
+        )
 
-        else:
-            print(
-                f"WARNING: No Discord mapping exists for {author}"
-            )
+else:
+    print(
+        f"WARNING: No Discord mapping exists for {author}"
+    )
 
         # ------------------------------------------
         # PRINT TRUCKSBOOK EMBED INFORMATION
