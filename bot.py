@@ -22,7 +22,9 @@ PROGRESSION_ROLES = [
     (40000, int(os.getenv("ROLE_AT_ROAD_LEGEND")), "A&T Road Legend"),
     (50000, int(os.getenv("ROLE_BEYOND_HORIZONS")), "Beyond Horizons"),
 ]
-
+DRIVER_MAPPINGS = {
+    "Mystical Custom": int(os.getenv("DRIVER_MYSTICAL_CUSTOM")),
+}
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
