@@ -2407,6 +2407,388 @@ async def trucksbook_profile_test(
 
     await ctx.reply(
         (
+            "🔎 Searching TrucksBook profile "
+            f"`{numeric_id}`...\n"
+            "No A&T driver data will be changed."
+        ),
+        mention_author=False,
+    )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-GB,en;q=0.9",
+    }
+
+    timeout = aiohttp.ClientTimeout(
+        total=20
+    )
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers,
+        ) as session:
+
+            async with session.get(
+                profile_url,
+                allow_redirects=True,
+            ) as response:
+
+                status_code = response.status
+                final_url = str(response.url)
+
+                html = await response.text(
+                    errors="replace"
+                )
+
+    except Exception as error:
+        print("--------------------------------")
+        print("TRUCKSBOOK PROFILE SEARCH FAILED")
+        print(f"User ID: {numeric_id}")
+        print(f"Error: {error}")
+        print("--------------------------------")
+
+        await ctx.reply(
+            (
+                "❌ TrucksBook request failed.\n\n"
+                f"**Error:** `{type(error).__name__}`"
+            ),
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # PARSE COMPLETE PAGE
+    # ------------------------------------------
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
+
+    page_title = ""
+
+    if soup.title:
+        page_title = soup.title.get_text(
+            " ",
+            strip=True,
+        )
+
+    # Remove page elements that are not useful
+    # for profile identification.
+    for unwanted in soup(
+        [
+            "script",
+            "style",
+            "noscript",
+        ]
+    ):
+        unwanted.decompose()
+
+    page_text = soup.get_text(
+        "\n",
+        strip=True,
+    )
+
+    lines = [
+        line.strip()
+        for line in page_text.splitlines()
+        if line.strip()
+    ]
+
+    # ------------------------------------------
+    # SEARCH COMPLETE PROFILE
+    # ------------------------------------------
+
+    search_terms = [
+        str(numeric_id),
+        "Mystical Custom",
+        "A&T Transport",
+        "company",
+        "employee",
+        "driver",
+        "User Profile",
+    ]
+
+    matched_sections = []
+
+    for index, line in enumerate(lines):
+        lower_line = line.lower()
+
+        matched_term = None
+
+        for term in search_terms:
+            if term.lower() in lower_line:
+                matched_term = term
+                break
+
+        if matched_term is None:
+            continue
+
+        start = max(
+            0,
+            index - 4,
+        )
+
+        end = min(
+            len(lines),
+            index + 8,
+        )
+
+        section = lines[
+            start:end
+        ]
+
+        section_text = "\n".join(
+            section
+        )
+
+        if section_text not in matched_sections:
+            matched_sections.append(
+                section_text
+            )
+
+    # ------------------------------------------
+    # BUILD DIAGNOSTIC RESULT
+    # ------------------------------------------
+
+    if matched_sections:
+        diagnostic_text = (
+            "\n\n--- MATCH ---\n\n".join(
+                matched_sections
+            )
+        )
+    else:
+        diagnostic_text = (
+            "No requested profile search terms "
+            "were found in the readable page text."
+        )
+
+    # Keep Discord output within safe limits.
+    discord_preview = diagnostic_text[:3000]
+
+    # Railway can show more information.
+    railway_preview = diagnostic_text[:10000]
+
+    # ------------------------------------------
+    # EXTRA DIRECT CHECKS
+    # ------------------------------------------
+
+    lower_page = page_text.lower()
+
+    mystic_found = (
+        "mystical custom"
+        in lower_page
+    )
+
+    at_transport_found = (
+        "a&t transport"
+        in lower_page
+    )
+
+    user_id_found = (
+        str(numeric_id)
+        in page_text
+    )
+
+    # ------------------------------------------
+    # RAILWAY OUTPUT
+    # ------------------------------------------
+
+    print("--------------------------------")
+    print("TRUCKSBOOK PROFILE SEARCH")
+    print(f"Requested User ID: {numeric_id}")
+    print(f"HTTP Status: {status_code}")
+    print(f"Final URL: {final_url}")
+    print(f"HTML Length: {len(html)}")
+    print(f"Page Title: {page_title}")
+    print(
+        "Requested User ID found in page: "
+        f"{user_id_found}"
+    )
+    print(
+        "Mystical Custom found: "
+        f"{mystic_found}"
+    )
+    print(
+        "A&T Transport found: "
+        f"{at_transport_found}"
+    )
+    print("PROFILE SEARCH RESULTS:")
+    print(railway_preview)
+    print("--------------------------------")
+
+    # ------------------------------------------
+    # DISCORD RESULT
+    # ------------------------------------------
+
+    embed = discord.Embed(
+        title="🔎 TrucksBook Profile Search",
+        colour=(
+            discord.Colour.green()
+            if status_code == 200
+            else discord.Colour.orange()
+        ),
+    )
+
+    embed.add_field(
+        name="Requested User ID",
+        value=f"`{numeric_id}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="HTTP Status",
+        value=f"`{status_code}`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Profile ID Detected",
+        value=(
+            "✅ Yes"
+            if user_id_found
+            else "❌ No"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Mystical Custom",
+        value=(
+            "✅ Found"
+            if mystic_found
+            else "❌ Not found"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="A&T Transport",
+        value=(
+            "✅ Found"
+            if at_transport_found
+            else "❌ Not found"
+        ),
+        inline=True,
+    )
+
+    embed.add_field(
+        name="HTML Received",
+        value=f"`{len(html):,} characters`",
+        inline=True,
+    )
+
+    embed.add_field(
+        name="Relevant Profile Text",
+        value=(
+            f"```text\n"
+            f"{discord_preview}\n"
+            f"```"
+        ),
+        inline=False,
+    )
+
+    embed.set_footer(
+        text=(
+            "READ-ONLY TEST • "
+            "No A&T driver data was modified"
+        )
+    )
+
+    await ctx.send(
+        embed=embed
+    )
+
+
+@trucksbook_profile_test.error
+async def trucksbook_profile_test_error(
+    ctx,
+    error,
+):
+    print(
+        "TRUCKSBOOK PROFILE TEST COMMAND ERROR: "
+        f"{error}"
+    )
+
+    await ctx.reply(
+        (
+            "❌ The TrucksBook diagnostic command "
+            "encountered an error.\n\n"
+            "Check the Railway deployment logs."
+        ),
+        mention_author=False,
+    )
+    # ------------------------------------------
+    # MANAGEMENT-ONLY DIAGNOSTIC COMMAND
+    # ------------------------------------------
+
+    if ctx.guild is None:
+        return
+
+    if ctx.guild.id != GUILD_ID:
+        return
+
+    if not member_is_verification_staff(ctx.author):
+        await ctx.reply(
+            "This diagnostic command is restricted "
+            "to A&T Management.",
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # VALIDATE USER ID
+    # ------------------------------------------
+
+    if trucksbook_user_id is None:
+        await ctx.reply(
+            "Please provide a TrucksBook User ID.\n\n"
+            "Example: `!tbtest 553238`",
+            mention_author=False,
+        )
+        return
+
+    trucksbook_user_id = trucksbook_user_id.strip()
+
+    if not trucksbook_user_id.isdigit():
+        await ctx.reply(
+            "The TrucksBook User ID must contain "
+            "numbers only.",
+            mention_author=False,
+        )
+        return
+
+    numeric_id = int(trucksbook_user_id)
+
+    if numeric_id <= 0:
+        await ctx.reply(
+            "That is not a valid TrucksBook User ID.",
+            mention_author=False,
+        )
+        return
+
+    # ------------------------------------------
+    # REQUEST PUBLIC TRUCKSBOOK PROFILE
+    # ------------------------------------------
+
+    profile_url = (
+        "https://trucksbook.eu/profile/"
+        f"{numeric_id}"
+    )
+
+    await ctx.reply(
+        (
             "🔎 Testing TrucksBook profile "
             f"`{numeric_id}`...\n"
             "No A&T driver data will be changed."
