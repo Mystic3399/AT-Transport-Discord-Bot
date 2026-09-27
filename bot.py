@@ -106,20 +106,20 @@ if discord_user_id:
         print(f"Discord User ID: {member.id}")
     else:
         print(f"WARNING: Discord member not found for {author}")
-else:
+        
+    else:
     print(f"WARNING: No Discord mapping exists for {author}")
 
-        # Print embed fields so we can see exactly what Discord receives
-        for field in data.get("fields", []):
-            print(
-                f"Field: {field.get('name')} = "
-                f"{field.get('value')}"
-            )
+# Print embed fields so we can see exactly what Discord receives
+for field in data.get("fields", []):
+    print(
+        f"Field: {field.get('name')} = "
+        f"{field.get('value')}"
+    )
 
-        print(f"Discord Message ID: {message.id}")
-        print(f"Webhook ID: {message.webhook_id}")
-        print("--------------------------------")
-
+print(f"Discord Message ID: {message.id}")
+print(f"Webhook ID: {message.webhook_id}")
+print("--------------------------------")
     await bot.process_commands(message)
 
 if not TOKEN:
