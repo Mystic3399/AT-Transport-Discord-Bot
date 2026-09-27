@@ -105,6 +105,7 @@ async def setup_database():
     )
 
     async with db_pool.acquire() as connection:
+        # Stores each driver's current A&T mileage total.
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS driver_progress (
@@ -116,6 +117,8 @@ async def setup_database():
             """
         )
 
+        # Stores every processed TrucksBook job.
+        # The job ID prevents the same job being counted twice.
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS processed_jobs (
@@ -125,6 +128,18 @@ async def setup_database():
                 accepted_distance INTEGER NOT NULL,
                 statistics TEXT NOT NULL,
                 processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            """
+        )
+
+        # Links a TrucksBook driver to their Discord account.
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS driver_links (
+                trucksbook_name TEXT PRIMARY KEY,
+                discord_user_id BIGINT NOT NULL UNIQUE,
+                trucksbook_user_id BIGINT UNIQUE,
+                linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             """
         )
@@ -144,7 +159,6 @@ bot = commands.Bot(
     command_prefix="!",
     intents=intents,
 )
-
 
 # --------------------------------------------------
 # BOT STARTUP
