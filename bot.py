@@ -33,13 +33,14 @@ async def on_ready():
 
 
 @bot.tree.command(
-    name="ping",
-    description="Check whether the A&T Transport LTD bot is online."
+    name="at-ping",
+    description="Check the status of the A&T Transport LTD bot."
 )
-async def ping(interaction: discord.Interaction):
+async def at_ping(interaction: discord.Interaction):
     await interaction.response.send_message(
         "🚛 **A&T Transport LTD Bot is online!**\n"
-        "🌌 Driven Beyond Horizons."
+        "🌌 **Driven Beyond Horizons.**",
+        ephemeral=True
     )
 
 
