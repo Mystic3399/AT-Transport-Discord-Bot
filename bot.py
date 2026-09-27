@@ -1392,6 +1392,237 @@ async def save_new_verification(
 
     return True
 
+async def fetch_trucksbook_profile(
+    trucksbook_user_id,
+):
+    profile_url = (
+        "https://trucksbook.eu/profile/"
+        f"{trucksbook_user_id}"
+    )
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/120.0 Safari/537.36"
+        ),
+        "Accept": (
+            "text/html,application/xhtml+xml,"
+            "application/xml;q=0.9,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-GB,en;q=0.9",
+    }
+
+    timeout = aiohttp.ClientTimeout(
+        total=20
+    )
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=timeout,
+            headers=headers,
+        ) as session:
+
+            async with session.get(
+                profile_url,
+                allow_redirects=True,
+            ) as response:
+
+                status_code = response.status
+
+                html = await response.text(
+                    errors="replace"
+                )
+
+    except Exception as error:
+        print(
+            "TRUCKSBOOK PROFILE REQUEST ERROR: "
+            f"{error}"
+        )
+
+        return {
+            "success": False,
+            "reason": "request_failed",
+        }
+
+    if status_code != 200:
+        return {
+            "success": False,
+            "reason": "http_error",
+            "status_code": status_code,
+        }
+
+    soup = BeautifulSoup(
+        html,
+        "html.parser",
+    )
+
+    for unwanted in soup(
+        [
+            "script",
+            "style",
+            "noscript",
+        ]
+    ):
+        unwanted.decompose()
+
+    page_text = soup.get_text(
+        "\n",
+        strip=True,
+    )
+
+    lines = [
+        line.strip()
+        for line in page_text.splitlines()
+        if line.strip()
+    ]
+
+    # ------------------------------------------
+    # FIND PROFILE HEADER
+    # ------------------------------------------
+
+    profile_index = None
+
+    profile_pattern = re.compile(
+        rf"User\s+Profile\s*#\s*"
+        rf"{re.escape(str(trucksbook_user_id))}",
+        re.IGNORECASE,
+    )
+
+    for index, line in enumerate(lines):
+        if profile_pattern.search(line):
+            profile_index = index
+            break
+
+    if profile_index is None:
+        return {
+            "success": False,
+            "reason": "profile_not_found",
+        }
+
+    # ------------------------------------------
+    # EXTRACT PROFILE INFORMATION
+    # ------------------------------------------
+
+    profile_lines = lines[
+        profile_index:
+        profile_index + 30
+    ]
+
+    trucksbook_name = None
+    company_name = None
+    company_position = None
+
+    # The first useful line after
+    # "User Profile #123456" is the profile name.
+    for line in profile_lines[1:]:
+        lower_line = line.lower()
+
+        if lower_line.startswith(
+            (
+                "followers",
+                "following",
+            )
+        ):
+            continue
+
+        if (
+            "a & t transport ltd"
+            in lower_line
+        ):
+            continue
+
+        trucksbook_name = line
+        break
+
+    # ------------------------------------------
+    # FIND A&T COMPANY MEMBERSHIP
+    # ------------------------------------------
+
+    for line in profile_lines:
+        if (
+            "a & t transport ltd"
+            not in line.lower()
+        ):
+            continue
+
+        company_line = line.strip()
+
+        company_match = re.match(
+            r"^(A\s*&\s*T\s+Transport\s+LTD)"
+            r"\s*-\s*(.+)$",
+            company_line,
+            re.IGNORECASE,
+        )
+
+        if company_match:
+            company_name = (
+                company_match
+                .group(1)
+                .strip()
+            )
+
+            company_position = (
+                company_match
+                .group(2)
+                .strip()
+            )
+
+        else:
+            company_name = (
+                "A & T Transport LTD"
+            )
+
+        break
+
+    belongs_to_at = (
+        company_name is not None
+        and company_name.lower()
+        == "a & t transport ltd"
+    )
+
+    # ------------------------------------------
+    # RESULT
+    # ------------------------------------------
+
+    print("--------------------------------")
+    print("TRUCKSBOOK PROFILE VERIFIED")
+    print(
+        f"Profile ID: "
+        f"{trucksbook_user_id}"
+    )
+    print(
+        f"Driver: "
+        f"{trucksbook_name}"
+    )
+    print(
+        f"Company: "
+        f"{company_name}"
+    )
+    print(
+        f"Position: "
+        f"{company_position}"
+    )
+    print(
+        f"A&T Member: "
+        f"{belongs_to_at}"
+    )
+    print("--------------------------------")
+
+    return {
+        "success": True,
+        "trucksbook_user_id": int(
+            trucksbook_user_id
+        ),
+        "trucksbook_name": trucksbook_name,
+        "company_name": company_name,
+        "company_position": company_position,
+        "belongs_to_at": belongs_to_at,
+    }
+
+
 
 async def save_trucksbook_id(
     discord_user_id,
