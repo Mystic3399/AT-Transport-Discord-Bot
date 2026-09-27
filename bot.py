@@ -1,4 +1,5 @@
 import os
+import re
 
 import asyncpg
 import discord
@@ -6,15 +7,16 @@ from discord.ext import commands
 
 
 # --------------------------------------------------
-# A&T TRANSPORT LTD - CONFIGURATION
+# CONFIGURATION
 # --------------------------------------------------
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 GUILD_ID = int(os.getenv("GUILD_ID"))
 
+
 # --------------------------------------------------
-# A&T MILEAGE PROGRESSION ROLES
+# A&T PROGRESSION ROLES
 # --------------------------------------------------
 
 PROGRESSION_ROLES = [
@@ -72,7 +74,11 @@ PROGRESSION_ROLES = [
 
 
 # --------------------------------------------------
-# TRUCKSBOOK -> DISCORD DRIVER MAPPINGS
+# TEMPORARY FALLBACK DRIVER MAPPING
+# --------------------------------------------------
+# PostgreSQL driver_links is now the primary source.
+# This mapping remains only as a fallback while the
+# live system is being tested.
 # --------------------------------------------------
 
 DRIVER_MAPPINGS = {
@@ -80,6 +86,7 @@ DRIVER_MAPPINGS = {
         os.getenv("DRIVER_MYSTICAL_CUSTOM")
     ),
 }
+
 
 # --------------------------------------------------
 # POSTGRESQL DATABASE
@@ -96,16 +103,17 @@ async def setup_database():
             "DATABASE_URL has not been configured."
         )
 
-    print("Connecting to A&T PostgreSQL database...")
+    print(
+        "Connecting to A&T PostgreSQL database..."
+    )
 
-    db_pool = await asyncpg.create_pool(
+    pool = await asyncpg.create_pool(
         DATABASE_URL,
         min_size=1,
         max_size=5,
     )
 
-    async with db_pool.acquire() as connection:
-        # Stores each driver's current A&T mileage total.
+    async with pool.acquire() as connection:
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS driver_progress (
@@ -117,8 +125,6 @@ async def setup_database():
             """
         )
 
-        # Stores every processed TrucksBook job.
-        # The job ID prevents the same job being counted twice.
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS processed_jobs (
@@ -132,7 +138,6 @@ async def setup_database():
             """
         )
 
-        # Links a TrucksBook driver to their Discord account.
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS driver_links (
@@ -144,8 +149,11 @@ async def setup_database():
             """
         )
 
+    db_pool = pool
+
     print("POSTGRESQL CONNECTED")
     print("Database tables ready.")
+
 
 # --------------------------------------------------
 # DISCORD INTENTS
@@ -160,6 +168,153 @@ bot = commands.Bot(
     intents=intents,
 )
 
+
+# --------------------------------------------------
+# HELPER FUNCTIONS
+# --------------------------------------------------
+
+def extract_integer(value):
+    if not value:
+        return None
+
+    match = re.search(
+        r"[\d,]+",
+        str(value),
+    )
+
+    if not match:
+        return None
+
+    try:
+        return int(
+            match.group(0).replace(",", "")
+        )
+    except ValueError:
+        return None
+
+
+async def find_driver_link(
+    trucksbook_name,
+):
+    if db_pool is None:
+        return None
+
+    async with db_pool.acquire() as connection:
+        discord_user_id = (
+            await connection.fetchval(
+                """
+                SELECT discord_user_id
+                FROM driver_links
+                WHERE LOWER(trucksbook_name)
+                    = LOWER($1);
+                """,
+                trucksbook_name,
+            )
+        )
+
+    if discord_user_id:
+        return int(discord_user_id)
+
+    return DRIVER_MAPPINGS.get(
+        trucksbook_name
+    )
+
+
+async def record_real_job(
+    job_id,
+    trucksbook_name,
+    discord_user_id,
+    accepted_distance,
+):
+    if db_pool is None:
+        print(
+            "DATABASE ERROR: Pool is not ready."
+        )
+        return None
+
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+
+            inserted_job_id = (
+                await connection.fetchval(
+                    """
+                    INSERT INTO processed_jobs (
+                        job_id,
+                        discord_user_id,
+                        trucksbook_name,
+                        accepted_distance,
+                        statistics
+                    )
+                    VALUES (
+                        $1,
+                        $2,
+                        $3,
+                        $4,
+                        'Real'
+                    )
+                    ON CONFLICT (job_id)
+                    DO NOTHING
+                    RETURNING job_id;
+                    """,
+                    job_id,
+                    discord_user_id,
+                    trucksbook_name,
+                    accepted_distance,
+                )
+            )
+
+            if inserted_job_id is None:
+                return {
+                    "status": "duplicate",
+                    "real_miles": None,
+                }
+
+            await connection.execute(
+                """
+                INSERT INTO driver_progress (
+                    discord_user_id,
+                    trucksbook_name,
+                    real_miles,
+                    updated_at
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    NOW()
+                )
+                ON CONFLICT (discord_user_id)
+                DO UPDATE SET
+                    trucksbook_name =
+                        EXCLUDED.trucksbook_name,
+                    real_miles =
+                        driver_progress.real_miles
+                        + EXCLUDED.real_miles,
+                    updated_at =
+                        NOW();
+                """,
+                discord_user_id,
+                trucksbook_name,
+                accepted_distance,
+            )
+
+            real_miles = (
+                await connection.fetchval(
+                    """
+                    SELECT real_miles
+                    FROM driver_progress
+                    WHERE discord_user_id = $1;
+                    """,
+                    discord_user_id,
+                )
+            )
+
+            return {
+                "status": "added",
+                "real_miles": int(real_miles),
+            }
+
+
 # --------------------------------------------------
 # BOT STARTUP
 # --------------------------------------------------
@@ -172,13 +327,19 @@ async def on_ready():
         try:
             await setup_database()
         except Exception as error:
-            print(f"DATABASE ERROR: {error}")
+            print(
+                f"DATABASE ERROR: {error}"
+            )
 
     print("--------------------------------")
     print("A&T Transport LTD Bot")
     print(f"Logged in as: {bot.user}")
+    print(f"Bot ID: {bot.user.id}")
+    print("--------------------------------")
 
-    guild = bot.get_guild(GUILD_ID)
+    guild = bot.get_guild(
+        GUILD_ID
+    )
 
     if guild is None:
         print(
@@ -186,11 +347,23 @@ async def on_ready():
             "could not be found."
         )
     else:
-        print(f"Connected Server: {guild.name}")
-        print("Checking A&T progression roles...")
+        print(
+            f"Connected Server: "
+            f"{guild.name}"
+        )
 
-        for miles, role_id, role_name in PROGRESSION_ROLES:
-            role = guild.get_role(role_id)
+        print(
+            "Checking A&T progression roles..."
+        )
+
+        for (
+            miles,
+            role_id,
+            role_name,
+        ) in PROGRESSION_ROLES:
+            role = guild.get_role(
+                role_id
+            )
 
             if role:
                 print(
@@ -221,241 +394,311 @@ async def on_ready():
 
 
 # --------------------------------------------------
-# TRUCKSBOOK WEBHOOK DETECTOR
-#
-# READ-ONLY TEST MODE
-#
-# This currently:
-# - Detects TrucksBook jobs
-# - Reads the job ID
-# - Reads Real / Race classification
-# - Reads accepted mileage
-# - Matches TrucksBook driver to Discord member
-# - Prints everything to Railway
-#
-# It DOES NOT:
-# - Save mileage
-# - Add roles
-# - Remove roles
+# TRUCKSBOOK WEBHOOK PROCESSING
 # --------------------------------------------------
 
 @bot.event
 async def on_message(message):
-    # Ignore normal Discord messages.
+    # Only process webhook messages.
     if message.webhook_id is None:
-        await bot.process_commands(message)
+        await bot.process_commands(
+            message
+        )
         return
 
-    # TrucksBook job messages should contain embeds.
+    # TrucksBook jobs arrive as embeds.
     if not message.embeds:
-        await bot.process_commands(message)
+        await bot.process_commands(
+            message
+        )
         return
 
     for embed in message.embeds:
         data = embed.to_dict()
 
-        title = data.get("title", "")
-        description = data.get("description", "")
+        title = (
+            data.get("title")
+            or ""
+        )
 
-        author_data = data.get("author", {})
-        author = author_data.get("name", "")
+        description = (
+            data.get("description")
+            or ""
+        )
 
-        # ------------------------------------------
-        # CHECK FOR TRUCKSBOOK DELIVERY
-        # ------------------------------------------
+        author = (
+            data.get("author")
+            or {}
+        )
 
-        combined_text = f"{title}\n{description}"
-
-        if "Job delivery #" not in combined_text:
-            continue
-
-        print("--------------------------------")
-        print("TRUCKSBOOK WEBHOOK DETECTED")
-        print(f"Driver: {author}")
-        print(f"Title: {title}")
-        print(f"Description: {description}")
-        print("--------------------------------")
-
-        # ------------------------------------------
-        # EXTRACT JOB ID
-        # ------------------------------------------
-
-        job_id = title.replace(
-            "Job delivery #",
-            "",
+        trucksbook_name = (
+            author.get("name")
+            or ""
         ).strip()
 
+        combined_text = (
+            f"{title}\n{description}"
+        )
+
+        if (
+            "Job delivery #"
+            not in combined_text
+        ):
+            continue
+
         # ------------------------------------------
-        # READ TRUCKSBOOK DETAILS
+        # JOB ID
         # ------------------------------------------
+
+        job_match = re.search(
+            r"Job delivery #(\d+)",
+            combined_text,
+            re.IGNORECASE,
+        )
+
+        if not job_match:
+            print(
+                "TRUCKSBOOK: "
+                "Could not find Job ID."
+            )
+            continue
+
+        job_id = job_match.group(1)
+
+        # ------------------------------------------
+        # DETAILS FIELD
+        # ------------------------------------------
+
+        details = ""
+
+        for field in (
+            data.get("fields")
+            or []
+        ):
+            field_name = (
+                field.get("name")
+                or ""
+            )
+
+            if (
+                field_name.strip().lower()
+                == "details"
+            ):
+                details = (
+                    field.get("value")
+                    or ""
+                )
+                break
+
+        if not details:
+            print(
+                f"TRUCKSBOOK JOB {job_id}: "
+                "Details field missing."
+            )
+            continue
 
         statistics = None
         accepted_distance = None
 
-        for field in data.get("fields", []):
-            field_name = field.get("name", "")
-            field_value = field.get("value", "")
+        for line in details.splitlines():
+            clean_line = (
+                line.replace(
+                    "**",
+                    "",
+                )
+                .strip()
+            )
 
-            if field_name != "Details":
-                continue
+            lower_line = (
+                clean_line.lower()
+            )
 
-            for line in field_value.splitlines():
-                clean_line = line.strip()
+            if lower_line.startswith(
+                "statistics:"
+            ):
+                statistics = (
+                    clean_line
+                    .split(
+                        ":",
+                        1,
+                    )[1]
+                    .strip()
+                )
 
-                # Accepted distance
-                if clean_line.startswith(
-                    "Accepted distance:"
-                ):
-                    distance_text = clean_line.replace(
-                        "Accepted distance:",
-                        "",
-                    ).strip()
+            elif lower_line.startswith(
+                "accepted distance:"
+            ):
+                distance_text = (
+                    clean_line
+                    .split(
+                        ":",
+                        1,
+                    )[1]
+                    .strip()
+                )
 
-                    distance_parts = (
-                        distance_text.split()
+                accepted_distance = (
+                    extract_integer(
+                        distance_text
                     )
-
-                    if distance_parts:
-                        distance_number = (
-                            distance_parts[0]
-                            .replace(",", "")
-                        )
-
-                        try:
-                            accepted_distance = int(
-                                distance_number
-                            )
-                        except ValueError:
-                            accepted_distance = None
-
-                # TrucksBook classification
-                if clean_line.startswith(
-                    "Statistics:"
-                ):
-                    statistics = clean_line.replace(
-                        "Statistics:",
-                        "",
-                    ).strip()
+                )
 
         # ------------------------------------------
-        # PRINT PARSED JOB
+        # LOG DETECTED JOB
         # ------------------------------------------
 
-        print("A&T JOB PARSER")
-        print(f"Job ID: {job_id}")
-        print(f"Driver: {author}")
-        print(f"Statistics: {statistics}")
-
+        print("--------------------------------")
+        print(
+            f"TRUCKSBOOK JOB: {job_id}"
+        )
+        print(
+            f"Driver: {trucksbook_name}"
+        )
+        print(
+            f"Statistics: {statistics}"
+        )
         print(
             "Accepted Distance: "
             f"{accepted_distance}"
         )
 
         # ------------------------------------------
-        # REAL / RACE CHECK
+        # ONLY COUNT REAL JOBS
         # ------------------------------------------
 
-        qualifying_job = (
-            statistics == "Real"
-            and accepted_distance is not None
+        if (
+            not statistics
+            or statistics.lower()
+            != "real"
+        ):
+            print(
+                "ACTION: Job ignored. "
+                "Not Real mileage."
+            )
+            print("--------------------------------")
+            continue
+
+        if (
+            accepted_distance is None
+            or accepted_distance < 0
+        ):
+            print(
+                "ACTION: Job ignored. "
+                "Invalid accepted distance."
+            )
+            print("--------------------------------")
+            continue
+
+        if not trucksbook_name:
+            print(
+                "ACTION: Job ignored. "
+                "Driver name missing."
+            )
+            print("--------------------------------")
+            continue
+
+        # ------------------------------------------
+        # FIND DISCORD DRIVER
+        # ------------------------------------------
+
+        discord_user_id = (
+            await find_driver_link(
+                trucksbook_name
+            )
         )
 
-        if qualifying_job:
-            print("QUALIFYING JOB: YES")
-
+        if discord_user_id is None:
             print(
-                "ACTION: Would add "
-                f"{accepted_distance} miles "
-                "to A&T progression."
+                "ACTION: Job ignored. "
+                "No Discord link exists for "
+                f"{trucksbook_name}."
+            )
+            print("--------------------------------")
+            continue
+
+        guild = bot.get_guild(
+            GUILD_ID
+        )
+
+        member = None
+
+        if guild is not None:
+            member = guild.get_member(
+                discord_user_id
             )
 
+        if member:
+            print(
+                "MATCHED DISCORD MEMBER: "
+                f"{member}"
+            )
         else:
-            print("QUALIFYING JOB: NO")
-
             print(
-                "ACTION: Job would be ignored."
+                "MATCHED DISCORD USER ID: "
+                f"{discord_user_id}"
             )
 
-        print("--------------------------------")
-
         # ------------------------------------------
-        # MATCH TRUCKSBOOK DRIVER TO DISCORD
+        # SAVE REAL JOB
         # ------------------------------------------
 
-        discord_user_id = DRIVER_MAPPINGS.get(
-            author
-        )
-
-        if discord_user_id:
-            guild = bot.get_guild(GUILD_ID)
-
-            if guild:
-                member = guild.get_member(
+        try:
+            result = await record_real_job(
+                job_id=job_id,
+                trucksbook_name=(
+                    trucksbook_name
+                ),
+                discord_user_id=(
                     discord_user_id
-                )
-            else:
-                member = None
+                ),
+                accepted_distance=(
+                    accepted_distance
+                ),
+            )
 
-            if member:
-                print(
-                    "MATCHED DISCORD MEMBER: "
-                    f"{member}"
-                )
-
-                print(
-                    "Discord User ID: "
-                    f"{member.id}"
-                )
-
-            else:
-                print(
-                    "WARNING: Discord member "
-                    "not found for "
-                    f"{author}"
-                )
-
-        else:
+        except Exception as error:
             print(
-                "WARNING: No Discord mapping "
-                "exists for "
-                f"{author}"
+                "DATABASE JOB ERROR: "
+                f"{error}"
+            )
+            print("--------------------------------")
+            continue
+
+        if result is None:
+            print(
+                "ACTION: Database unavailable."
+            )
+
+        elif (
+            result["status"]
+            == "duplicate"
+        ):
+            print(
+                "ACTION: Duplicate Job ID. "
+                "Mileage was not added again."
+            )
+
+        elif (
+            result["status"]
+            == "added"
+        ):
+            print(
+                "ACTION: Real mileage added."
+            )
+            print(
+                f"NEW A&T TOTAL: "
+                f"{result['real_miles']:,} miles"
+            )
+            print(
+                "ROLE ACTION: Disabled "
+                "during verification."
             )
 
         print("--------------------------------")
 
-        # ------------------------------------------
-        # PRINT RAW TRUCKSBOOK EMBED FIELDS
-        # ------------------------------------------
-
-        for field in data.get("fields", []):
-            field_name = field.get(
-                "name",
-                "",
-            )
-
-            field_value = field.get(
-                "value",
-                "",
-            )
-
-            print(
-                f"Field: {field_name} = "
-                f"{field_value}"
-            )
-
-        print(
-            "Discord Message ID: "
-            f"{message.id}"
-        )
-
-        print(
-            "Webhook ID: "
-            f"{message.webhook_id}"
-        )
-
-        print("--------------------------------")
-
-    await bot.process_commands(message)
+    await bot.process_commands(
+        message
+    )
 
 
 # --------------------------------------------------
@@ -466,6 +709,5 @@ if not TOKEN:
     raise RuntimeError(
         "DISCORD_TOKEN has not been configured."
     )
-
 
 bot.run(TOKEN)
