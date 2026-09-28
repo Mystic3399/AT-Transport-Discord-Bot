@@ -243,6 +243,17 @@ async def setup_database():
             """
         )
 
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS repair_achievement_announcements (
+                discord_user_id BIGINT NOT NULL,
+                milestone_miles BIGINT NOT NULL,
+                announced_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (discord_user_id, milestone_miles)
+            );
+            """
+        )
+
         # ------------------------------------------
         # ANNOUNCED PROGRESSION MILESTONES
         # ------------------------------------------
@@ -760,7 +771,7 @@ async def announce_progression_milestone(
             "MILESTONE_ANNOUNCEMENT_CHANNEL_ID is unset or invalid. "
             f"Recorded {milestone_miles:,} miles for {trucksbook_name}."
         )
-        return
+        return False
 
     channel = bot.get_channel(
         MILESTONE_ANNOUNCEMENT_CHANNEL_ID
@@ -780,14 +791,14 @@ async def announce_progression_milestone(
                 "MILESTONE ANNOUNCEMENT SKIPPED: Could not access "
                 f"channel {MILESTONE_ANNOUNCEMENT_CHANNEL_ID}: {error}"
             )
-            return
+            return False
 
     if guild is not None and getattr(channel, "guild", None) != guild:
         print(
             "MILESTONE ANNOUNCEMENT SKIPPED: Configured channel is "
             "not in the A&T Transport LTD server."
         )
-        return
+        return False
 
     embed = build_progression_milestone_embed(
         member,
@@ -805,7 +816,7 @@ async def announce_progression_milestone(
             f"Discord send failed for {trucksbook_name} at "
             f"{milestone_miles:,} miles: {error}"
         )
-        return
+        return False
 
     try:
         await mark_milestone_announced(
@@ -823,6 +834,7 @@ async def announce_progression_milestone(
         f"{trucksbook_name} reached {milestone_miles:,} Real miles "
         f"and earned {milestone_rank}."
     )
+    return True
 
 
 # --------------------------------------------------
@@ -1746,7 +1758,7 @@ def extract_trucksbook_job_from_embed(embed):
 async def mileage_audit(ctx, message_limit: int = 0):
     """Dry-run audit of TrucksBook embeds across readable guild channels."""
     if ctx.guild.id != GUILD_ID:
-        return
+        return False
     if db_pool is None:
         await ctx.reply("❌ The database is unavailable.", mention_author=False)
         return
@@ -1899,11 +1911,110 @@ async def mileage_audit(ctx, message_limit: int = 0):
     )
 
 
+async def announce_pending_repair_achievements(guild):
+    """Announce repair-created milestones once, including older repairs."""
+    async with db_pool.acquire() as connection:
+        pending = await connection.fetch(
+            """
+            SELECT
+                milestones.discord_user_id,
+                milestones.milestone_miles,
+                milestones.trucksbook_name,
+                COALESCE(progress.real_miles, 0) AS real_miles
+            FROM announced_milestones AS milestones
+            INNER JOIN mileage_repair_candidates AS repairs
+                ON repairs.job_id = milestones.job_id
+               AND repairs.applied_at IS NOT NULL
+            LEFT JOIN repair_achievement_announcements AS sent
+                ON sent.discord_user_id = milestones.discord_user_id
+               AND sent.milestone_miles = milestones.milestone_miles
+            LEFT JOIN driver_progress AS progress
+                ON progress.discord_user_id = milestones.discord_user_id
+            WHERE sent.discord_user_id IS NULL
+            ORDER BY milestones.discord_user_id, milestones.milestone_miles;
+            """
+        )
+
+    sent_count = 0
+    failed_count = 0
+    for row in pending:
+        milestone_miles = int(row["milestone_miles"])
+        rank_name = next(
+            (
+                role_name
+                for required_miles, _, role_name in PROGRESSION_ROLES
+                if required_miles == milestone_miles
+            ),
+            None,
+        )
+        if rank_name is None:
+            failed_count += 1
+            continue
+
+        user_id = int(row["discord_user_id"])
+        member = guild.get_member(user_id) if guild is not None else None
+        sent = await announce_progression_milestone(
+            guild=guild,
+            member=member,
+            discord_user_id=user_id,
+            trucksbook_name=row["trucksbook_name"],
+            milestone={"miles": milestone_miles, "rank": rank_name},
+            real_miles=int(row["real_miles"]),
+        )
+        if not sent:
+            failed_count += 1
+            continue
+
+        async with db_pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO repair_achievement_announcements (
+                    discord_user_id, milestone_miles
+                )
+                VALUES ($1, $2)
+                ON CONFLICT (discord_user_id, milestone_miles)
+                DO NOTHING;
+                """,
+                user_id,
+                milestone_miles,
+            )
+        sent_count += 1
+
+    return sent_count, failed_count
+
+
+@bot.command(name="repairachievements")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+@commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
+async def repair_achievements(ctx):
+    """Post any milestone achievements created by the mileage repair."""
+    if ctx.guild.id != GUILD_ID:
+        return
+    if db_pool is None:
+        await ctx.reply("❌ The database is unavailable.", mention_author=False)
+        return
+
+    await ctx.reply(
+        "🏆 Checking repaired mileage for unposted achievements...",
+        mention_author=False,
+    )
+    sent_count, failed_count = await announce_pending_repair_achievements(
+        ctx.guild
+    )
+    await ctx.send(
+        "✅ **Repair achievement check complete.**\n"
+        f"Achievements posted: `{sent_count:,}`\n"
+        f"Could not post: `{failed_count:,}`\n"
+        "Running this command again will not repost completed achievements."
+    )
+
+
 @bot.command(name="mileageapply")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
 async def mileage_apply(ctx, confirmation: str = ""):
-    """Apply staged positive deltas once; never sends milestone messages."""
+    """Apply staged positive deltas once and announce earned milestones."""
     if ctx.guild.id != GUILD_ID:
         return
     if confirmation != "CONFIRM":
@@ -2040,22 +2151,34 @@ async def mileage_apply(ctx, confirmation: str = ""):
             role_failures += 1
             print(f"REPAIR ROLE SYNC ERROR for {user_id}: {error}")
 
+    achievements_sent, achievement_failures = (
+        await announce_pending_repair_achievements(ctx.guild)
+    )
+
     await ctx.send(
         "✅ **Mileage repair complete.**\n"
         f"Corrected jobs: `{applied_jobs:,}`\n"
         f"Mileage restored: `{applied_miles:,}`\n"
         f"Drivers updated: `{len(affected_users):,}`\n"
         f"Role-sync failures: `{role_failures:,}`\n"
-        "Historical milestone announcements were suppressed intentionally."
+        f"Achievements posted: `{achievements_sent:,}`\n"
+        f"Achievement-post failures: `{achievement_failures:,}`"
     )
 
 
 @mileage_audit.error
 @mileage_apply.error
+@repair_achievements.error
 async def mileage_repair_command_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.reply(
             "❌ Only a server administrator can use mileage repair commands.",
+            mention_author=False,
+        )
+        return
+    if isinstance(error, commands.MaxConcurrencyReached):
+        await ctx.reply(
+            "An achievement posting run is already in progress.",
             mention_author=False,
         )
         return
