@@ -223,6 +223,26 @@ async def setup_database():
             """
         )
 
+        # Staged corrections discovered by the read-only history audit.
+        # Merely populating this table never changes driver mileage.
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mileage_repair_candidates (
+                job_id TEXT PRIMARY KEY,
+                discord_user_id BIGINT NOT NULL,
+                trucksbook_name TEXT NOT NULL,
+                recorded_distance INTEGER NOT NULL,
+                actual_distance INTEGER NOT NULL,
+                missing_distance INTEGER NOT NULL CHECK (missing_distance > 0),
+                source_channel_id BIGINT NOT NULL,
+                source_message_id BIGINT NOT NULL,
+                audited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                applied_at TIMESTAMPTZ,
+                applied_by BIGINT
+            );
+            """
+        )
+
         # ------------------------------------------
         # ANNOUNCED PROGRESSION MILESTONES
         # ------------------------------------------
@@ -329,11 +349,17 @@ bot = commands.Bot(
 # --------------------------------------------------
 
 def extract_integer(value):
+    """Parse a non-negative integer with common thousands separators.
+
+    TrucksBook has emitted distances as ``3813``, ``3,813`` and
+    ``3 813`` (including non-breaking spaces).  The previous expression
+    stopped at whitespace, turning ``3 813`` into ``3``.
+    """
     if not value:
         return None
 
     match = re.search(
-        r"[\d,]+",
+        r"\d+(?:(?:\s+|,\s*)\d+)*",
         str(value),
     )
 
@@ -342,7 +368,7 @@ def extract_integer(value):
 
     try:
         return int(
-            match.group(0).replace(",", "")
+            re.sub(r"[\s,]", "", match.group(0))
         )
     except ValueError:
         return None
@@ -1667,6 +1693,348 @@ async def on_message(message):
 
     await bot.process_commands(
         message
+    )
+
+
+# --------------------------------------------------
+# MILEAGE AUDIT / REPAIR (ADMINISTRATOR ONLY)
+# --------------------------------------------------
+
+def extract_trucksbook_job_from_embed(embed):
+    """Return audit fields from a TrucksBook delivery embed, if present."""
+    data = embed.to_dict()
+    combined_text = (
+        f"{data.get('title') or ''}\n"
+        f"{data.get('description') or ''}"
+    )
+    job_match = re.search(
+        r"Job delivery #(\d+)",
+        combined_text,
+        re.IGNORECASE,
+    )
+    if not job_match:
+        return None
+
+    details = ""
+    for field in data.get("fields") or []:
+        if (field.get("name") or "").strip().lower() == "details":
+            details = field.get("value") or ""
+            break
+
+    statistics = None
+    accepted_distance = None
+    for line in details.splitlines():
+        clean_line = line.replace("**", "").strip()
+        lower_line = clean_line.lower()
+        if lower_line.startswith("statistics:"):
+            statistics = clean_line.split(":", 1)[1].strip()
+        elif lower_line.startswith("accepted distance:"):
+            accepted_distance = extract_integer(
+                clean_line.split(":", 1)[1].strip()
+            )
+
+    return {
+        "job_id": job_match.group(1),
+        "statistics": statistics,
+        "accepted_distance": accepted_distance,
+    }
+
+
+@bot.command(name="mileageaudit")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def mileage_audit(ctx, message_limit: int = 0):
+    """Dry-run audit of TrucksBook embeds in the current channel."""
+    if ctx.guild.id != GUILD_ID:
+        return
+    if db_pool is None:
+        await ctx.reply("❌ The database is unavailable.", mention_author=False)
+        return
+    if message_limit < 0 or message_limit > 100000:
+        await ctx.reply(
+            "Use `!mileageaudit` for all history or a limit up to 100000.",
+            mention_author=False,
+        )
+        return
+
+    await ctx.reply(
+        "🔎 Starting a dry-run audit. No mileage will be changed.",
+        mention_author=False,
+    )
+
+    scanned = 0
+    matched = 0
+    staged = 0
+    missing_from_database = 0
+    history_limit = message_limit or None
+
+    async for historical_message in ctx.channel.history(
+        limit=history_limit,
+        oldest_first=True,
+    ):
+        if historical_message.webhook_id is None:
+            continue
+        for embed in historical_message.embeds:
+            parsed = extract_trucksbook_job_from_embed(embed)
+            if parsed is None:
+                continue
+            scanned += 1
+            if (
+                (parsed["statistics"] or "").casefold() != "real"
+                or parsed["accepted_distance"] is None
+            ):
+                continue
+
+            async with db_pool.acquire() as connection:
+                recorded = await connection.fetchrow(
+                    """
+                    SELECT
+                        discord_user_id,
+                        trucksbook_name,
+                        accepted_distance
+                    FROM processed_jobs
+                    WHERE job_id = $1
+                      AND LOWER(statistics) = 'real';
+                    """,
+                    parsed["job_id"],
+                )
+                if recorded is None:
+                    missing_from_database += 1
+                    continue
+
+                matched += 1
+                actual = int(parsed["accepted_distance"])
+                credited = int(recorded["accepted_distance"])
+                if actual <= credited:
+                    continue
+
+                await connection.execute(
+                    """
+                    INSERT INTO mileage_repair_candidates (
+                        job_id,
+                        discord_user_id,
+                        trucksbook_name,
+                        recorded_distance,
+                        actual_distance,
+                        missing_distance,
+                        source_channel_id,
+                        source_message_id,
+                        audited_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                    ON CONFLICT (job_id) DO UPDATE SET
+                        discord_user_id = EXCLUDED.discord_user_id,
+                        trucksbook_name = EXCLUDED.trucksbook_name,
+                        recorded_distance = EXCLUDED.recorded_distance,
+                        actual_distance = EXCLUDED.actual_distance,
+                        missing_distance = EXCLUDED.missing_distance,
+                        source_channel_id = EXCLUDED.source_channel_id,
+                        source_message_id = EXCLUDED.source_message_id,
+                        audited_at = NOW()
+                    WHERE mileage_repair_candidates.applied_at IS NULL;
+                    """,
+                    parsed["job_id"],
+                    int(recorded["discord_user_id"]),
+                    recorded["trucksbook_name"],
+                    credited,
+                    actual,
+                    actual - credited,
+                    ctx.channel.id,
+                    historical_message.id,
+                )
+                staged += 1
+
+    async with db_pool.acquire() as connection:
+        totals = await connection.fetchrow(
+            """
+            SELECT
+                COUNT(*) AS jobs,
+                COUNT(DISTINCT discord_user_id) AS drivers,
+                COALESCE(SUM(missing_distance), 0) AS missing_miles
+            FROM mileage_repair_candidates
+            WHERE applied_at IS NULL;
+            """
+        )
+
+    await ctx.send(
+        "✅ **Dry-run audit complete — no mileage changed.**\n"
+        f"Webhook jobs inspected: `{scanned:,}`\n"
+        f"Previously processed Real jobs matched: `{matched:,}`\n"
+        f"Candidates found/updated this run: `{staged:,}`\n"
+        f"Webhook jobs absent from processed_jobs: `{missing_from_database:,}`\n"
+        f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
+        f"`{int(totals['drivers']):,}` drivers\n"
+        f"Missing mileage pending: `{int(totals['missing_miles']):,}`\n\n"
+        "Review the Railway log/database backup, then explicitly run "
+        "`!mileageapply CONFIRM` to apply these deltas."
+    )
+
+
+@bot.command(name="mileageapply")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+async def mileage_apply(ctx, confirmation: str = ""):
+    """Apply staged positive deltas once; never sends milestone messages."""
+    if ctx.guild.id != GUILD_ID:
+        return
+    if confirmation != "CONFIRM":
+        await ctx.reply(
+            "No changes made. After reviewing the dry run and taking a "
+            "database backup, use `!mileageapply CONFIRM`.",
+            mention_author=False,
+        )
+        return
+    if db_pool is None:
+        await ctx.reply("❌ The database is unavailable.", mention_author=False)
+        return
+
+    affected_users = set()
+    applied_jobs = 0
+    applied_miles = 0
+
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            candidates = await connection.fetch(
+                """
+                SELECT *
+                FROM mileage_repair_candidates
+                WHERE applied_at IS NULL
+                ORDER BY discord_user_id, job_id
+                FOR UPDATE;
+                """
+            )
+
+            for candidate in candidates:
+                job = await connection.fetchrow(
+                    """
+                    SELECT discord_user_id, accepted_distance, statistics
+                    FROM processed_jobs
+                    WHERE job_id = $1
+                    FOR UPDATE;
+                    """,
+                    candidate["job_id"],
+                )
+                if (
+                    job is None
+                    or str(job["statistics"]).casefold() != "real"
+                    or int(job["discord_user_id"])
+                        != int(candidate["discord_user_id"])
+                    or int(job["accepted_distance"])
+                        != int(candidate["recorded_distance"])
+                ):
+                    continue
+
+                user_id = int(candidate["discord_user_id"])
+                delta = int(candidate["missing_distance"])
+                previous_total = int(
+                    await connection.fetchval(
+                        """
+                        SELECT real_miles
+                        FROM driver_progress
+                        WHERE discord_user_id = $1
+                        FOR UPDATE;
+                        """,
+                        user_id,
+                    )
+                    or 0
+                )
+                new_total = previous_total + delta
+
+                await connection.execute(
+                    """
+                    UPDATE processed_jobs
+                    SET accepted_distance = $2
+                    WHERE job_id = $1;
+                    """,
+                    candidate["job_id"],
+                    int(candidate["actual_distance"]),
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO driver_progress (
+                        discord_user_id, trucksbook_name, real_miles, updated_at
+                    )
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (discord_user_id) DO UPDATE SET
+                        real_miles = driver_progress.real_miles + $3,
+                        updated_at = NOW();
+                    """,
+                    user_id,
+                    candidate["trucksbook_name"],
+                    delta,
+                )
+
+                # Record repaired crossings as already announced. This keeps
+                # milestone history coherent without flooding the channel.
+                for milestone_miles, _, _ in PROGRESSION_ROLES:
+                    if previous_total < milestone_miles <= new_total:
+                        await connection.execute(
+                            """
+                            INSERT INTO announced_milestones (
+                                discord_user_id, milestone_miles,
+                                trucksbook_name, job_id, announced_at
+                            )
+                            VALUES ($1, $2, $3, $4, NOW())
+                            ON CONFLICT (discord_user_id, milestone_miles)
+                            DO NOTHING;
+                            """,
+                            user_id,
+                            milestone_miles,
+                            candidate["trucksbook_name"],
+                            candidate["job_id"],
+                        )
+
+                await connection.execute(
+                    """
+                    UPDATE mileage_repair_candidates
+                    SET applied_at = NOW(), applied_by = $2
+                    WHERE job_id = $1 AND applied_at IS NULL;
+                    """,
+                    candidate["job_id"],
+                    ctx.author.id,
+                )
+                affected_users.add(user_id)
+                applied_jobs += 1
+                applied_miles += delta
+
+    role_failures = 0
+    for user_id in affected_users:
+        try:
+            async with db_pool.acquire() as connection:
+                total = await connection.fetchval(
+                    "SELECT real_miles FROM driver_progress "
+                    "WHERE discord_user_id = $1;",
+                    user_id,
+                )
+            await sync_member_progression_role(ctx.guild, user_id, int(total))
+        except Exception as error:
+            role_failures += 1
+            print(f"REPAIR ROLE SYNC ERROR for {user_id}: {error}")
+
+    await ctx.send(
+        "✅ **Mileage repair complete.**\n"
+        f"Corrected jobs: `{applied_jobs:,}`\n"
+        f"Mileage restored: `{applied_miles:,}`\n"
+        f"Drivers updated: `{len(affected_users):,}`\n"
+        f"Role-sync failures: `{role_failures:,}`\n"
+        "Historical milestone announcements were suppressed intentionally."
+    )
+
+
+@mileage_audit.error
+@mileage_apply.error
+async def mileage_repair_command_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.reply(
+            "❌ Only a server administrator can use mileage repair commands.",
+            mention_author=False,
+        )
+        return
+    print(f"MILEAGE REPAIR COMMAND ERROR: {error}")
+    await ctx.reply(
+        "❌ The mileage operation failed. No uncommitted database changes "
+        "were retained.",
+        mention_author=False,
     )
 
 # --------------------------------------------------
