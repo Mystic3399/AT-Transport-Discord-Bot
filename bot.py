@@ -150,6 +150,66 @@ PROGRESSION_ROLES = [
         int(os.getenv("ROLE_BEYOND_HORIZONS")),
         "Beyond Horizons",
     ),
+    (
+        75000,
+        int(os.getenv("ROLE_HORIZON_WOLF")),
+        "Horizon Wolf",
+    ),
+    (
+        100000,
+        int(os.getenv("ROLE_AT_CENTURION")),
+        "A&T Centurion",
+    ),
+    (
+        150000,
+        int(os.getenv("ROLE_VIKING_PATHFINDER")),
+        "Viking Pathfinder",
+    ),
+    (
+        200000,
+        int(os.getenv("ROLE_ROAD_GUARDIAN")),
+        "Road Guardian",
+    ),
+    (
+        300000,
+        int(os.getenv("ROLE_AURORA_PATHFINDER")),
+        "Aurora Pathfinder",
+    ),
+    (
+        400000,
+        int(os.getenv("ROLE_VIKING_ROADMASTER")),
+        "Viking Roadmaster",
+    ),
+    (
+        500000,
+        int(os.getenv("ROLE_HORIZON_LEGEND")),
+        "Horizon Legend",
+    ),
+    (
+        600000,
+        int(os.getenv("ROLE_ALPHA_ROADMASTER")),
+        "Alpha Roadmaster",
+    ),
+    (
+        700000,
+        int(os.getenv("ROLE_AURORA_COMMANDER")),
+        "Aurora Commander",
+    ),
+    (
+        800000,
+        int(os.getenv("ROLE_GUARDIAN_HORIZON")),
+        "Guardian of the Horizon",
+    ),
+    (
+        900000,
+        int(os.getenv("ROLE_BEYOND_HORIZON")),
+        "Beyond the Horizon",
+    ),
+    (
+        1000000,
+        int(os.getenv("ROLE_AT_IMMORTAL")),
+        "A&T Immortal",
+    ),
 ]
 
 
