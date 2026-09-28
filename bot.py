@@ -1744,7 +1744,7 @@ def extract_trucksbook_job_from_embed(embed):
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
 async def mileage_audit(ctx, message_limit: int = 0):
-    """Dry-run audit of TrucksBook embeds in the current channel."""
+    """Dry-run audit of TrucksBook embeds across readable guild channels."""
     if ctx.guild.id != GUILD_ID:
         return
     if db_pool is None:
@@ -1758,7 +1758,7 @@ async def mileage_audit(ctx, message_limit: int = 0):
         return
 
     await ctx.reply(
-        "🔎 Starting a dry-run audit. No mileage will be changed.",
+        "🔎 Starting a server-wide dry-run audit. No mileage will be changed.",
         mention_author=False,
     )
 
@@ -1766,83 +1766,110 @@ async def mileage_audit(ctx, message_limit: int = 0):
     matched = 0
     staged = 0
     missing_from_database = 0
+    channels_scanned = 0
+    channels_skipped = 0
     history_limit = message_limit or None
 
-    async for historical_message in ctx.channel.history(
-        limit=history_limit,
-        oldest_first=True,
-    ):
-        if historical_message.webhook_id is None:
+    for channel in ctx.guild.text_channels:
+        bot_member = ctx.guild.me
+        permissions = channel.permissions_for(bot_member)
+        if not (
+            permissions.view_channel
+            and permissions.read_message_history
+        ):
+            channels_skipped += 1
+            print(
+                "MILEAGE AUDIT SKIPPED CHANNEL: "
+                f"#{channel.name} ({channel.id}) — missing permissions."
+            )
             continue
-        for embed in historical_message.embeds:
-            parsed = extract_trucksbook_job_from_embed(embed)
-            if parsed is None:
-                continue
-            scanned += 1
-            if (
-                (parsed["statistics"] or "").casefold() != "real"
-                or parsed["accepted_distance"] is None
+
+        try:
+            async for historical_message in channel.history(
+                limit=history_limit,
+                oldest_first=True,
             ):
-                continue
-
-            async with db_pool.acquire() as connection:
-                recorded = await connection.fetchrow(
-                    """
-                    SELECT
-                        discord_user_id,
-                        trucksbook_name,
-                        accepted_distance
-                    FROM processed_jobs
-                    WHERE job_id = $1
-                      AND LOWER(statistics) = 'real';
-                    """,
-                    parsed["job_id"],
-                )
-                if recorded is None:
-                    missing_from_database += 1
+                if historical_message.webhook_id is None:
                     continue
+                for embed in historical_message.embeds:
+                    parsed = extract_trucksbook_job_from_embed(embed)
+                    if parsed is None:
+                        continue
+                    scanned += 1
+                    if (
+                        (parsed["statistics"] or "").casefold() != "real"
+                        or parsed["accepted_distance"] is None
+                    ):
+                        continue
 
-                matched += 1
-                actual = int(parsed["accepted_distance"])
-                credited = int(recorded["accepted_distance"])
-                if actual <= credited:
-                    continue
+                    async with db_pool.acquire() as connection:
+                        recorded = await connection.fetchrow(
+                            """
+                            SELECT
+                                discord_user_id,
+                                trucksbook_name,
+                                accepted_distance
+                            FROM processed_jobs
+                            WHERE job_id = $1
+                              AND LOWER(statistics) = 'real';
+                            """,
+                            parsed["job_id"],
+                        )
+                        if recorded is None:
+                            missing_from_database += 1
+                            continue
 
-                await connection.execute(
-                    """
-                    INSERT INTO mileage_repair_candidates (
-                        job_id,
-                        discord_user_id,
-                        trucksbook_name,
-                        recorded_distance,
-                        actual_distance,
-                        missing_distance,
-                        source_channel_id,
-                        source_message_id,
-                        audited_at
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
-                    ON CONFLICT (job_id) DO UPDATE SET
-                        discord_user_id = EXCLUDED.discord_user_id,
-                        trucksbook_name = EXCLUDED.trucksbook_name,
-                        recorded_distance = EXCLUDED.recorded_distance,
-                        actual_distance = EXCLUDED.actual_distance,
-                        missing_distance = EXCLUDED.missing_distance,
-                        source_channel_id = EXCLUDED.source_channel_id,
-                        source_message_id = EXCLUDED.source_message_id,
-                        audited_at = NOW()
-                    WHERE mileage_repair_candidates.applied_at IS NULL;
-                    """,
-                    parsed["job_id"],
-                    int(recorded["discord_user_id"]),
-                    recorded["trucksbook_name"],
-                    credited,
-                    actual,
-                    actual - credited,
-                    ctx.channel.id,
-                    historical_message.id,
-                )
-                staged += 1
+                        matched += 1
+                        actual = int(parsed["accepted_distance"])
+                        credited = int(recorded["accepted_distance"])
+                        if actual <= credited:
+                            continue
+
+                        await connection.execute(
+                            """
+                            INSERT INTO mileage_repair_candidates (
+                                job_id,
+                                discord_user_id,
+                                trucksbook_name,
+                                recorded_distance,
+                                actual_distance,
+                                missing_distance,
+                                source_channel_id,
+                                source_message_id,
+                                audited_at
+                            )
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                            ON CONFLICT (job_id) DO UPDATE SET
+                                discord_user_id = EXCLUDED.discord_user_id,
+                                trucksbook_name = EXCLUDED.trucksbook_name,
+                                recorded_distance = EXCLUDED.recorded_distance,
+                                actual_distance = EXCLUDED.actual_distance,
+                                missing_distance = EXCLUDED.missing_distance,
+                                source_channel_id = EXCLUDED.source_channel_id,
+                                source_message_id = EXCLUDED.source_message_id,
+                                audited_at = NOW()
+                            WHERE mileage_repair_candidates.applied_at IS NULL;
+                            """,
+                            parsed["job_id"],
+                            int(recorded["discord_user_id"]),
+                            recorded["trucksbook_name"],
+                            credited,
+                            actual,
+                            actual - credited,
+                            channel.id,
+                            historical_message.id,
+                        )
+                        staged += 1
+
+            channels_scanned += 1
+
+        except (discord.Forbidden, discord.HTTPException) as error:
+            channels_skipped += 1
+            print(
+                "MILEAGE AUDIT SKIPPED CHANNEL: "
+                f"#{channel.name} ({channel.id}) — {error}"
+            )
+            continue
 
     async with db_pool.acquire() as connection:
         totals = await connection.fetchrow(
@@ -1858,6 +1885,8 @@ async def mileage_audit(ctx, message_limit: int = 0):
 
     await ctx.send(
         "✅ **Dry-run audit complete — no mileage changed.**\n"
+        f"Server channels scanned: `{channels_scanned:,}`\n"
+        f"Channels skipped (permissions/API): `{channels_skipped:,}`\n"
         f"Webhook jobs inspected: `{scanned:,}`\n"
         f"Previously processed Real jobs matched: `{matched:,}`\n"
         f"Candidates found/updated this run: `{staged:,}`\n"
