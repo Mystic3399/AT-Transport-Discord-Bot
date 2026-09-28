@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+import math
 from io import BytesIO
 from pathlib import Path
 
@@ -11,10 +12,11 @@ from bs4 import BeautifulSoup
 from discord.ext import commands
 
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageOps
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 except ImportError:
     Image = None
     ImageDraw = None
+    ImageFilter = None
     ImageFont = None
     ImageOps = None
 
@@ -2758,9 +2760,11 @@ def load_profile_font(size, bold=False):
     candidates = (
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+        "C:/Windows/Fonts/arialbd.ttf",
     ) if bold else (
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+        "C:/Windows/Fonts/arial.ttf",
     )
     for font_path in candidates:
         try:
@@ -2788,103 +2792,266 @@ def rounded_profile_image(source, size, radius):
     return image
 
 
+def profile_text(draw, position, text, font, fill, anchor=None, shadow=2):
+    """Draw crisp profile text with a restrained cinematic shadow."""
+    x, y = position
+    if shadow:
+        draw.text(
+            (x + shadow, y + shadow),
+            str(text),
+            font=font,
+            fill=(0, 4, 10, 190),
+            anchor=anchor,
+        )
+    draw.text(position, str(text), font=font, fill=fill, anchor=anchor)
+
+
+def profile_panel(draw, box, radius=24, outline=(83, 184, 212, 115)):
+    """Paint one translucent, blue-steel panel."""
+    draw.rounded_rectangle(
+        box,
+        radius=radius,
+        fill=(5, 16, 29, 168),
+        outline=outline,
+        width=2,
+    )
+
+
+def build_profile_backdrop(width, height):
+    """Create a dependency-free aurora, stars and Nordic mountain scene."""
+    backdrop = Image.new("RGBA", (width, height), (2, 8, 18, 255))
+    draw = ImageDraw.Draw(backdrop, "RGBA")
+
+    # Deep polar-night gradient.
+    for y in range(height):
+        blend = y / height
+        draw.line(
+            (0, y, width, y),
+            fill=(
+                int(3 + 5 * blend),
+                int(10 + 15 * blend),
+                int(24 + 20 * blend),
+                255,
+            ),
+        )
+
+    # Deterministic stars keep every render stable and inexpensive.
+    for index in range(105):
+        x = (index * 137 + index * index * 17) % width
+        y = (index * 73 + index * index * 7) % 560
+        radius = 1 + (index % 7 == 0)
+        alpha = 55 + (index * 31) % 130
+        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(196, 231, 244, alpha))
+
+    # Blurred aurora ribbons, created entirely with Pillow for Railway.
+    aurora = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    aurora_draw = ImageDraw.Draw(aurora, "RGBA")
+    for ribbon, colour in enumerate(((28, 231, 191), (57, 175, 235), (115, 83, 209))):
+        upper = []
+        lower = []
+        base_y = 75 + ribbon * 58
+        for x in range(-80, width + 81, 40):
+            wave = math.sin((x / 155.0) + ribbon * 1.35) * (34 + ribbon * 5)
+            wave += math.sin((x / 67.0) + ribbon) * 11
+            upper.append((x, base_y + wave))
+            lower.append((x, base_y + 115 + wave + math.sin(x / 90.0) * 24))
+        aurora_draw.polygon(
+            upper + list(reversed(lower)),
+            fill=(*colour, 92 - ribbon * 10),
+        )
+        aurora_draw.line(upper, fill=(*colour, 180), width=6)
+    aurora = aurora.filter(ImageFilter.GaussianBlur(18))
+    backdrop.alpha_composite(aurora)
+
+    # Layered mountain silhouettes anchor the art without external assets.
+    draw = ImageDraw.Draw(backdrop, "RGBA")
+    draw.polygon(
+        [(0, 565), (155, 405), (270, 520), (430, 335), (585, 530),
+         (760, 360), (930, 525), (1110, 320), (1315, 520), (1460, 395),
+         (1600, 520), (1600, 1000), (0, 1000)],
+        fill=(8, 22, 37, 235),
+    )
+    draw.polygon(
+        [(0, 655), (205, 500), (360, 620), (565, 450), (745, 635),
+         (960, 480), (1170, 625), (1390, 455), (1600, 610),
+         (1600, 1000), (0, 1000)],
+        fill=(4, 14, 26, 248),
+    )
+    draw.line(
+        [(0, 655), (205, 500), (360, 620), (565, 450), (745, 635),
+         (960, 480), (1170, 625), (1390, 455), (1600, 610)],
+        fill=(44, 133, 157, 105),
+        width=3,
+    )
+    return backdrop
+
+
+def load_profile_badge(threshold, maximum_size):
+    """Load the exact committed PNG for a configured progression rank."""
+    badge_path = BADGE_DIRECTORY / PROGRESSION_BADGES[threshold]
+    if not badge_path.is_file():
+        raise FileNotFoundError(f"Progression badge not found: {badge_path}")
+    with Image.open(badge_path) as badge_source:
+        badge = badge_source.convert("RGBA")
+        badge.thumbnail(maximum_size, Image.Resampling.LANCZOS)
+    return badge
+
+
 def render_driver_profile_png(avatar_bytes, discord_name, trucksbook_name, real_miles):
-    """Render from already-read values only; this function cannot alter state."""
+    """Render the cinematic V2 card from read-only, already-fetched values."""
     if Image is None:
         raise RuntimeError("Pillow is not installed")
 
     current_miles, _, current_rank_name = get_progression_role(real_miles)
     next_role = get_next_progression_role(real_miles)
-    badge_path = BADGE_DIRECTORY / PROGRESSION_BADGES[current_miles]
-    if not badge_path.is_file():
-        raise FileNotFoundError(f"Progression badge not found: {badge_path}")
+    width, height = 1600, 1000
+    card = build_profile_backdrop(width, height)
 
-    width, height = 1400, 800
-    card = Image.new("RGBA", (width, height), (7, 17, 31, 255))
-    draw = ImageDraw.Draw(card)
-    for y in range(height):
-        blend = y / height
-        draw.line((0, y, width, y), fill=(int(7 + 10 * blend), int(17 + 17 * blend), int(31 + 27 * blend), 255))
-    draw.rounded_rectangle((35, 35, 1365, 765), 34, fill=(8, 22, 40, 225), outline=(45, 164, 213, 180), width=3)
-    draw.rounded_rectangle((70, 160, 390, 650), 28, fill=(12, 31, 53, 235))
-    draw.rounded_rectangle((425, 160, 1325, 650), 28, fill=(12, 31, 53, 235))
-    draw.rectangle((70, 121, 1325, 126), fill=(48, 181, 224, 255))
+    # Dark veil and metallic outer frame keep text legible over the scenery.
+    veil = Image.new("RGBA", (width, height), (1, 8, 17, 80))
+    card.alpha_composite(veil)
+    draw = ImageDraw.Draw(card, "RGBA")
+    draw.rounded_rectangle((20, 20, 1580, 980), 30, fill=(2, 10, 21, 100), outline=(72, 205, 226, 205), width=3)
+    draw.rounded_rectangle((28, 28, 1572, 972), 26, outline=(191, 151, 63, 105), width=1)
 
-    title_font = load_profile_font(45, bold=True)
-    subtitle_font = load_profile_font(21)
-    label_font = load_profile_font(18, bold=True)
-    value_font = load_profile_font(31, bold=True)
-    small_font = load_profile_font(17)
-    draw.text((70, 56), "A&T TRANSPORT LTD", font=title_font, fill=(240, 247, 252))
-    draw.text((925, 72), "DRIVER PROFILE", font=subtitle_font, fill=(117, 205, 235))
+    white = (235, 244, 247, 255)
+    ice = (104, 215, 230, 255)
+    muted = (147, 178, 192, 255)
+    gold = (226, 181, 75, 255)
+    title_font = load_profile_font(38, bold=True)
+    heading_font = load_profile_font(17, bold=True)
+    value_font = load_profile_font(28, bold=True)
+    small_font = load_profile_font(14)
 
+    # Brand masthead.
+    profile_text(draw, (55, 45), "A&T TRANSPORT LTD", title_font, white)
+    profile_text(draw, (55, 91), "DRIVEN BEYOND HORIZONS", load_profile_font(15, bold=True), gold)
+    profile_text(draw, (1545, 55), "DRIVER PROFILE  /  V2", load_profile_font(18, bold=True), ice, anchor="ra")
+    draw.line((55, 116, 1545, 116), fill=(69, 205, 225, 210), width=3)
+    draw.line((55, 122, 1545, 122), fill=(223, 177, 69, 75), width=1)
+
+    # Three primary zones: identity, rank hero and complete ladder.
+    profile_panel(draw, (40, 145, 365, 650), radius=24)
+    profile_panel(draw, (385, 145, 965, 650), radius=24)
+    profile_panel(draw, (985, 145, 1560, 950), radius=24)
+    profile_panel(draw, (40, 670, 965, 950), radius=24)
+
+    # Compact driver identity, leaving the badge as the visual hero.
     with Image.open(BytesIO(avatar_bytes)) as avatar_source:
-        avatar = rounded_profile_image(avatar_source, (170, 170), 85)
-    card.alpha_composite(avatar, (145, 195))
-    draw.ellipse((140, 190, 320, 370), outline=(69, 194, 232), width=5)
-    discord_font = fit_profile_text(draw, discord_name, 275, 28, bold=True)
-    trucksbook_font = fit_profile_text(draw, trucksbook_name, 275, 20)
-    draw.text((230, 400), str(discord_name), font=discord_font, fill=(245, 248, 252), anchor="ma")
-    draw.text((230, 445), "TRUCKSBOOK", font=label_font, fill=(99, 174, 204), anchor="ma")
-    draw.text((230, 477), str(trucksbook_name), font=trucksbook_font, fill=(220, 232, 240), anchor="ma")
+        avatar = rounded_profile_image(avatar_source, (142, 142), 71)
+    avatar_glow = Image.new("RGBA", (170, 170), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(avatar_glow, "RGBA")
+    glow_draw.ellipse((10, 10, 160, 160), outline=(74, 221, 235, 165), width=10)
+    avatar_glow = avatar_glow.filter(ImageFilter.GaussianBlur(8))
+    card.alpha_composite(avatar_glow, (118, 175))
+    card.alpha_composite(avatar, (132, 189))
+    draw.ellipse((128, 185, 278, 335), outline=(95, 225, 236, 240), width=4)
 
-    with Image.open(badge_path) as badge_source:
-        badge = badge_source.convert("RGBA")
-        badge.thumbnail((205, 145), Image.Resampling.LANCZOS)
-    card.alpha_composite(badge, (230 - badge.width // 2, 510))
+    discord_font = fit_profile_text(draw, discord_name, 275, 27, bold=True)
+    trucksbook_font = fit_profile_text(draw, trucksbook_name, 275, 21, bold=True)
+    profile_text(draw, (202, 370), discord_name, discord_font, white, anchor="ma")
+    profile_text(draw, (202, 410), "DISCORD DRIVER", small_font, ice, anchor="ma", shadow=0)
+    draw.line((78, 438, 327, 438), fill=(84, 154, 174, 100), width=1)
+    profile_text(draw, (202, 475), trucksbook_name, trucksbook_font, white, anchor="ma")
+    profile_text(draw, (202, 509), "LINKED TRUCKSBOOK NAME", small_font, muted, anchor="ma", shadow=0)
+    profile_text(draw, (202, 568), f"{real_miles:,}", load_profile_font(34, bold=True), gold, anchor="ma")
+    profile_text(draw, (202, 610), "LIVE REAL MILES", heading_font, ice, anchor="ma", shadow=0)
 
-    draw.text((470, 195), "CURRENT RANK", font=label_font, fill=(99, 174, 204))
-    rank_font = fit_profile_text(draw, current_rank_name, 540, 39, bold=True)
-    draw.text((470, 228), current_rank_name, font=rank_font, fill=(245, 248, 252))
-    draw.text((470, 305), "REAL MILES", font=label_font, fill=(99, 174, 204))
-    draw.text((470, 338), f"{real_miles:,}", font=value_font, fill=(244, 190, 71))
+    # Current-rank centerpiece uses the exact committed badge artwork.
+    current_badge = load_profile_badge(current_miles, (315, 275))
+    badge_x = 675 - current_badge.width // 2
+    badge_y = 179 + (275 - current_badge.height) // 2
+    glow = Image.new("RGBA", (390, 330), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow, "RGBA")
+    glow_draw.ellipse((55, 35, 335, 305), fill=(24, 181, 214, 68))
+    glow = glow.filter(ImageFilter.GaussianBlur(35))
+    card.alpha_composite(glow, (480, 150))
+    card.alpha_composite(current_badge, (badge_x, badge_y))
+    profile_text(draw, (675, 166), "CURRENT PROGRESSION RANK", heading_font, ice, anchor="ma", shadow=0)
+    rank_font = fit_profile_text(draw, current_rank_name.upper(), 515, 37, bold=True)
+    profile_text(draw, (675, 476), current_rank_name.upper(), rank_font, white, anchor="ma")
 
     if next_role is None:
+        next_miles = PROGRESSION_ROLES[-1][0]
         next_name = "Maximum rank achieved"
         miles_remaining = 0
         progress = 1.0
-        progress_caption = f"{real_miles:,} Real miles • Beyond Horizons"
+        progress_caption = f"{real_miles:,} REAL MILES  •  LEGENDARY STATUS"
     else:
         next_miles, _, next_name = next_role
         miles_remaining = max(next_miles - real_miles, 0)
         stage_span = max(next_miles - current_miles, 1)
         progress = min(max((real_miles - current_miles) / stage_span, 0.0), 1.0)
-        progress_caption = f"{real_miles:,} / {next_miles:,} Real miles"
-    draw.text((830, 195), "NEXT RANK", font=label_font, fill=(99, 174, 204))
-    next_font = fit_profile_text(draw, next_name, 440, 29, bold=True)
-    draw.text((830, 228), next_name, font=next_font, fill=(245, 248, 252))
-    draw.text((830, 305), "MILES REMAINING", font=label_font, fill=(99, 174, 204))
-    draw.text((830, 338), f"{miles_remaining:,}", font=value_font, fill=(244, 190, 71))
+        progress_caption = f"{real_miles:,}  /  {next_miles:,} REAL MILES"
+    next_font = fit_profile_text(draw, next_name.upper(), 290, 20, bold=True)
+    profile_text(draw, (430, 539), "NEXT RANK", small_font, muted, shadow=0)
+    profile_text(draw, (430, 566), next_name.upper(), next_font, white)
+    profile_text(draw, (919, 539), "MILES REMAINING", small_font, muted, anchor="ra", shadow=0)
+    profile_text(draw, (919, 566), f"{miles_remaining:,}", value_font, gold, anchor="ra")
 
-    bar_left, bar_top, bar_right, bar_bottom = 470, 425, 1275, 466
-    draw.rounded_rectangle((bar_left, bar_top, bar_right, bar_bottom), 20, fill=(27, 50, 70), outline=(58, 91, 112), width=2)
+    bar_left, bar_top, bar_right, bar_bottom = 430, 596, 920, 618
+    draw.rounded_rectangle((bar_left - 3, bar_top - 3, bar_right + 3, bar_bottom + 3), 14, fill=(35, 99, 119, 75))
+    draw.rounded_rectangle((bar_left, bar_top, bar_right, bar_bottom), 11, fill=(15, 43, 59, 245), outline=(78, 151, 174, 180), width=1)
     filled_right = bar_left + int((bar_right - bar_left) * progress)
     if filled_right > bar_left:
-        draw.rounded_rectangle((bar_left, bar_top, max(filled_right, bar_left + 40), bar_bottom), 20, fill=(38, 181, 218))
-    draw.text((bar_left, 480), progress_caption, font=small_font, fill=(202, 219, 230))
-    draw.text((bar_right, 480), f"{progress * 100:.0f}%", font=small_font, fill=(244, 190, 71), anchor="ra")
+        draw.rounded_rectangle((bar_left, bar_top, max(filled_right, bar_left + 22), bar_bottom), 11, fill=(46, 211, 220, 255))
+        draw.line((bar_left + 10, bar_top + 4, max(filled_right - 10, bar_left + 12), bar_top + 4), fill=(188, 255, 250, 180), width=2)
+    profile_text(draw, (bar_left, 626), progress_caption, load_profile_font(13, bold=True), muted, shadow=0)
+    profile_text(draw, (bar_right, 626), f"{progress * 100:.1f}%", load_profile_font(14, bold=True), gold, anchor="ra", shadow=0)
 
+    # Recent earned milestones are intentionally large; the ladder records all ranks.
     earned = [role for role in PROGRESSION_ROLES if role[0] <= real_miles]
-    shown = earned[-7:]
-    draw.text((470, 535), "EARNED MILESTONES", font=label_font, fill=(99, 174, 204))
-    x = 470
-    for threshold, _, _ in shown:
-        earned_path = BADGE_DIRECTORY / PROGRESSION_BADGES[threshold]
-        if not earned_path.is_file():
-            raise FileNotFoundError(f"Progression badge not found: {earned_path}")
-        with Image.open(earned_path) as earned_source:
-            earned_badge = earned_source.convert("RGBA")
-            earned_badge.thumbnail((78, 62), Image.Resampling.LANCZOS)
-        card.alpha_composite(earned_badge, (x + (78 - earned_badge.width) // 2, 572))
-        draw.text((x + 39, 637), f"{threshold:,}", font=load_profile_font(12), fill=(180, 202, 216), anchor="ma")
-        x += 105
+    shown = earned[-6:]
+    profile_text(draw, (75, 694), "EARNED MILESTONES", load_profile_font(20, bold=True), ice)
+    profile_text(draw, (930, 699), f"{len(earned)} UNLOCKED", load_profile_font(14, bold=True), gold, anchor="ra", shadow=0)
+    slot_width = 140
+    start_x = 72
+    for index, (threshold, _, rank_name) in enumerate(shown):
+        centre_x = start_x + index * slot_width + 62
+        earned_badge = load_profile_badge(threshold, (112, 112))
+        card.alpha_composite(earned_badge, (centre_x - earned_badge.width // 2, 735 + (112 - earned_badge.height) // 2))
+        milestone_font = fit_profile_text(draw, rank_name, 128, 13, bold=True)
+        profile_text(draw, (centre_x, 858), rank_name.upper(), milestone_font, white, anchor="ma", shadow=1)
+        profile_text(draw, (centre_x, 883), f"{threshold:,} MI", load_profile_font(13, bold=True), gold, anchor="ma", shadow=0)
     if len(earned) > len(shown):
-        draw.text((x + 8, 596), f"+{len(earned) - len(shown)}", font=load_profile_font(20, bold=True), fill=(244, 190, 71))
-    draw.text((70, 716), "DRIVEN BEYOND HORIZONS", font=label_font, fill=(92, 172, 204))
-    draw.text((1325, 716), "Live progression • Read-only", font=small_font, fill=(138, 160, 176), anchor="ra")
+        profile_text(draw, (75, 922), f"+ {len(earned) - len(shown)} EARLIER MILESTONES RECORDED", load_profile_font(13, bold=True), muted, shadow=0)
+
+    # Complete illustrated company-wide ladder, matching the reference's gallery.
+    profile_text(draw, (1020, 170), "PROGRESSION RANKS", load_profile_font(22, bold=True), white)
+    profile_text(draw, (1525, 174), "0 — 1,000,000 REAL MILES", load_profile_font(13, bold=True), gold, anchor="ra", shadow=0)
+    draw.line((1020, 207, 1525, 207), fill=(76, 184, 204, 150), width=2)
+    for index, (threshold, _, rank_name) in enumerate(PROGRESSION_ROLES):
+        column = index % 5
+        row = index // 5
+        left = 1007 + column * 106
+        top = 224 + row * 139
+        centre_x = left + 48
+        is_current = threshold == current_miles
+        is_earned = threshold <= real_miles
+        if is_current:
+            draw.rounded_rectangle((left - 4, top - 5, left + 100, top + 128), 12, fill=(20, 105, 126, 120), outline=(91, 227, 233, 235), width=2)
+        ladder_badge = load_profile_badge(threshold, (88, 86))
+        if not is_earned:
+            dimmer = Image.new("RGBA", ladder_badge.size, (3, 10, 18, 105))
+            ladder_badge = Image.alpha_composite(ladder_badge, dimmer)
+        card.alpha_composite(
+            ladder_badge,
+            (centre_x - ladder_badge.width // 2, top + (86 - ladder_badge.height) // 2),
+        )
+        threshold_colour = gold if is_current else ((89, 222, 202, 255) if is_earned else muted)
+        draw.rounded_rectangle(
+            (centre_x - 43, top + 92, centre_x + 43, top + 116),
+            6,
+            fill=(4, 21, 34, 225),
+            outline=(49, 139, 163, 160),
+            width=1,
+        )
+        profile_text(draw, (centre_x, top + 104), f"{threshold:,}", load_profile_font(12, bold=True), threshold_colour, anchor="mm", shadow=1)
+
+    profile_text(draw, (1525, 925), "LIVE PROGRESSION  •  READ-ONLY", load_profile_font(12, bold=True), muted, anchor="ra", shadow=0)
 
     output = BytesIO()
-    card.convert("RGB").save(output, format="PNG", optimize=True)
+    card.convert("RGB").save(output, format="PNG", optimize=True, compress_level=7)
     output.seek(0)
     return output
 
