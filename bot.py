@@ -61,6 +61,79 @@ MILESTONE_ANNOUNCEMENT_CHANNEL_ID = optional_snowflake_env(
     "MILESTONE_ANNOUNCEMENT_CHANNEL_ID"
 )
 
+HALL_OF_FAME_CHANNEL_ID = optional_snowflake_env(
+    "HALL_OF_FAME_CHANNEL_ID"
+)
+MILEAGE_CLUB_40K_CHANNEL_ID = optional_snowflake_env(
+    "MILEAGE_CLUB_40K_CHANNEL_ID"
+)
+
+
+def first_optional_snowflake_env(*variable_names):
+    """Return the first configured ID from a group of compatible names."""
+    for variable_name in variable_names:
+        if os.getenv(variable_name, "").strip():
+            return optional_snowflake_env(variable_name)
+    return None
+
+
+# Achievement roles are cumulative and permanent while the driver is in the
+# server. Multiple names are accepted to remain compatible with the Railway
+# variables used during planning and with the conventional *_ROLE_ID spelling.
+ACHIEVEMENT_ROLES = [
+    (40000, first_optional_snowflake_env(
+        "ACHIEVEMENT_40K_ROLE_ID", "ACHIEVEMENT_ROLE_40K",
+        "ROLE_ACHIEVEMENT_40K", "ROLE_40K_ACHIEVEMENT",
+        "ROLE_MILEAGE_CLUB_40K", "ROLE_40K_MILEAGE_CLUB"),
+     "40K Mileage Club"),
+    (100000, first_optional_snowflake_env(
+        "ACHIEVEMENT_100K_ROLE_ID", "ACHIEVEMENT_ROLE_100K",
+        "ROLE_ACHIEVEMENT_100K", "ROLE_100K_ACHIEVEMENT",
+        "ROLE_MILEAGE_CLUB_100K"),
+     "100K Achievement"),
+    (250000, first_optional_snowflake_env(
+        "ACHIEVEMENT_250K_ROLE_ID", "ACHIEVEMENT_ROLE_250K",
+        "ROLE_ACHIEVEMENT_250K", "ROLE_250K_ACHIEVEMENT",
+        "ROLE_MILEAGE_CLUB_250K"),
+     "250K Achievement"),
+    (500000, first_optional_snowflake_env(
+        "ACHIEVEMENT_500K_ROLE_ID", "ACHIEVEMENT_ROLE_500K",
+        "ROLE_ACHIEVEMENT_500K", "ROLE_500K_ACHIEVEMENT",
+        "ROLE_MILEAGE_CLUB_500K"),
+     "500K Achievement"),
+    (750000, first_optional_snowflake_env(
+        "ACHIEVEMENT_750K_ROLE_ID", "ACHIEVEMENT_ROLE_750K",
+        "ROLE_ACHIEVEMENT_750K", "ROLE_750K_ACHIEVEMENT",
+        "ROLE_MILEAGE_CLUB_750K"),
+     "750K Achievement"),
+    (1000000, first_optional_snowflake_env(
+        "ACHIEVEMENT_1M_ROLE_ID", "ACHIEVEMENT_ROLE_1M",
+        "ROLE_ACHIEVEMENT_1M", "ROLE_1M_ACHIEVEMENT",
+        "ROLE_MILEAGE_CLUB_1M"),
+     "1M Achievement"),
+]
+
+# Hall of Fame roles are highest-tier-only. These are deliberately separate
+# from both normal progression roles and permanent cumulative achievements.
+HALL_OF_FAME_ROLES = [
+    (250000, first_optional_snowflake_env(
+        "HALL_OF_FAME_VETERAN_ROLE_ID", "HOF_VETERAN_ROLE_ID",
+        "ROLE_HOF_VETERAN", "ROLE_HOF_VETERAN_250K",
+        "ROLE_HALL_OF_FAME_VETERAN"), "Veteran"),
+    (500000, first_optional_snowflake_env(
+        "HALL_OF_FAME_ELITE_ROLE_ID", "HOF_ELITE_ROLE_ID",
+        "ROLE_HOF_ELITE", "ROLE_HOF_ELITE_500K",
+        "ROLE_HALL_OF_FAME_ELITE"), "Elite"),
+    (1000000, first_optional_snowflake_env(
+        "HALL_OF_FAME_IMMORTAL_ROLE_ID", "HOF_IMMORTAL_ROLE_ID",
+        "ROLE_HOF_IMMORTAL", "ROLE_HOF_IMMORTAL_1M",
+        "ROLE_HALL_OF_FAME_IMMORTAL"), "Immortal"),
+]
+
+PERMANENT_SYNC_LOCK = asyncio.Lock()
+LIVE_DISPLAY_LOCK = asyncio.Lock()
+permanent_history_synced = False
+
 
 # --------------------------------------------------
 # ONBOARDING CONFIGURATION
@@ -411,6 +484,50 @@ async def setup_database():
         )
 
         # ------------------------------------------
+        # PERMANENT ACHIEVEMENTS / HALL OF FAME
+        # ------------------------------------------
+
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS permanent_achievements (
+                discord_user_id BIGINT NOT NULL,
+                achievement_miles BIGINT NOT NULL,
+                trucksbook_name TEXT NOT NULL,
+                earned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (discord_user_id, achievement_miles)
+            );
+
+            CREATE SEQUENCE IF NOT EXISTS immortal_registry_number_seq
+                AS BIGINT START WITH 1;
+
+            CREATE TABLE IF NOT EXISTS hall_of_fame (
+                discord_user_id BIGINT PRIMARY KEY,
+                trucksbook_name TEXT NOT NULL,
+                highest_tier TEXT NOT NULL
+                    CHECK (highest_tier IN ('Veteran', 'Elite', 'Immortal')),
+                highest_verified_real_miles BIGINT NOT NULL,
+                veteran_since TIMESTAMPTZ NOT NULL,
+                elite_since TIMESTAMPTZ,
+                immortal_since TIMESTAMPTZ,
+                immortal_number BIGINT UNIQUE,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                last_seen_at TIMESTAMPTZ,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS bot_controlled_messages (
+                purpose TEXT PRIMARY KEY,
+                channel_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_hall_of_fame_tier
+                ON hall_of_fame(highest_tier, highest_verified_real_miles DESC);
+            """
+        )
+
+        # ------------------------------------------
         # ONBOARDING INDEXES
         # ------------------------------------------
 
@@ -440,6 +557,7 @@ async def setup_database():
     print("POSTGRESQL CONNECTED")
     print("Database tables ready.")
     print("Driver onboarding tables ready.")
+    print("Permanent achievements and Hall of Fame tables ready.")
 
 
 # --------------------------------------------------
@@ -939,6 +1057,439 @@ async def announce_progression_milestone(
 
 
 # --------------------------------------------------
+# PERMANENT ACHIEVEMENTS / HALL OF FAME
+# --------------------------------------------------
+
+def get_hall_of_fame_tier(real_miles):
+    """Return the highest earned Hall of Fame tier, or None."""
+    earned = [item for item in HALL_OF_FAME_ROLES if real_miles >= item[0]]
+    return earned[-1] if earned else None
+
+
+async def get_discord_channel(channel_id):
+    if channel_id is None:
+        return None
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return None
+    return channel if hasattr(channel, "send") else None
+
+
+async def reconcile_permanent_records(
+    discord_user_id,
+    trucksbook_name,
+    real_miles,
+    is_active,
+):
+    """Persist every earned achievement and the driver's permanent HOF record."""
+    new_achievements = []
+    hall_changed = False
+
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            for threshold, _, achievement_name in ACHIEVEMENT_ROLES:
+                if real_miles < threshold:
+                    continue
+                inserted = await connection.fetchval(
+                    """
+                    INSERT INTO permanent_achievements (
+                        discord_user_id, achievement_miles, trucksbook_name
+                    ) VALUES ($1, $2, $3)
+                    ON CONFLICT (discord_user_id, achievement_miles)
+                    DO UPDATE SET trucksbook_name = EXCLUDED.trucksbook_name
+                    RETURNING (xmax = 0);
+                    """,
+                    discord_user_id,
+                    threshold,
+                    trucksbook_name,
+                )
+                if inserted:
+                    new_achievements.append(
+                        {"miles": threshold, "name": achievement_name}
+                    )
+
+            tier = get_hall_of_fame_tier(real_miles)
+            if tier is not None:
+                _, _, tier_name = tier
+                existing = await connection.fetchrow(
+                    """
+                    SELECT highest_tier, immortal_number
+                    FROM hall_of_fame
+                    WHERE discord_user_id = $1
+                    FOR UPDATE;
+                    """,
+                    discord_user_id,
+                )
+                previous_tier = existing["highest_tier"] if existing else None
+                immortal_number = existing["immortal_number"] if existing else None
+                if tier_name == "Immortal" and immortal_number is None:
+                    immortal_number = await connection.fetchval(
+                        "SELECT nextval('immortal_registry_number_seq');"
+                    )
+
+                veteran_since = await connection.fetchval(
+                    """
+                    SELECT earned_at FROM permanent_achievements
+                    WHERE discord_user_id = $1 AND achievement_miles = 250000;
+                    """,
+                    discord_user_id,
+                )
+                elite_since = await connection.fetchval(
+                    """
+                    SELECT earned_at FROM permanent_achievements
+                    WHERE discord_user_id = $1 AND achievement_miles = 500000;
+                    """,
+                    discord_user_id,
+                )
+                immortal_since = await connection.fetchval(
+                    """
+                    SELECT earned_at FROM permanent_achievements
+                    WHERE discord_user_id = $1 AND achievement_miles = 1000000;
+                    """,
+                    discord_user_id,
+                )
+
+                await connection.execute(
+                    """
+                    INSERT INTO hall_of_fame (
+                        discord_user_id, trucksbook_name, highest_tier,
+                        highest_verified_real_miles, veteran_since, elite_since,
+                        immortal_since, immortal_number, is_active, last_seen_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+                              CASE WHEN $9 THEN NOW() ELSE NULL END)
+                    ON CONFLICT (discord_user_id) DO UPDATE SET
+                        trucksbook_name = EXCLUDED.trucksbook_name,
+                        highest_tier = EXCLUDED.highest_tier,
+                        highest_verified_real_miles = GREATEST(
+                            hall_of_fame.highest_verified_real_miles,
+                            EXCLUDED.highest_verified_real_miles
+                        ),
+                        veteran_since = LEAST(
+                            hall_of_fame.veteran_since, EXCLUDED.veteran_since
+                        ),
+                        elite_since = COALESCE(
+                            hall_of_fame.elite_since, EXCLUDED.elite_since
+                        ),
+                        immortal_since = COALESCE(
+                            hall_of_fame.immortal_since, EXCLUDED.immortal_since
+                        ),
+                        immortal_number = COALESCE(
+                            hall_of_fame.immortal_number, EXCLUDED.immortal_number
+                        ),
+                        is_active = EXCLUDED.is_active,
+                        last_seen_at = CASE WHEN EXCLUDED.is_active THEN NOW()
+                                            ELSE hall_of_fame.last_seen_at END,
+                        updated_at = NOW();
+                    """,
+                    discord_user_id,
+                    trucksbook_name,
+                    tier_name,
+                    real_miles,
+                    veteran_since,
+                    elite_since,
+                    immortal_since,
+                    immortal_number,
+                    is_active,
+                )
+                hall_changed = previous_tier != tier_name
+
+    return {
+        "new_achievements": new_achievements,
+        "hall_changed": hall_changed,
+        "hall_tier": get_hall_of_fame_tier(real_miles),
+    }
+
+
+async def sync_member_permanent_roles(guild, discord_user_id, real_miles):
+    """Add cumulative achievement roles and enforce one highest HOF role."""
+    member = guild.get_member(discord_user_id)
+    if member is None:
+        return {"status": "member_missing"}
+
+    add_roles = []
+    for threshold, role_id, _ in ACHIEVEMENT_ROLES:
+        if role_id and real_miles >= threshold:
+            role = guild.get_role(role_id)
+            if role and role not in member.roles:
+                add_roles.append(role)
+
+    hall_tier = get_hall_of_fame_tier(real_miles)
+    target_hall_role_id = hall_tier[1] if hall_tier else None
+    configured_hall_ids = {
+        role_id for _, role_id, _ in HALL_OF_FAME_ROLES if role_id
+    }
+    remove_roles = [
+        role for role in member.roles
+        if role.id in configured_hall_ids and role.id != target_hall_role_id
+    ]
+    if target_hall_role_id:
+        target_role = guild.get_role(target_hall_role_id)
+        if target_role and target_role not in member.roles:
+            add_roles.append(target_role)
+
+    if remove_roles:
+        await member.remove_roles(
+            *remove_roles, reason="A&T Hall of Fame highest-tier sync"
+        )
+    if add_roles:
+        await member.add_roles(
+            *add_roles, reason="A&T permanent achievement sync"
+        )
+    return {"status": "updated" if add_roles or remove_roles else "correct"}
+
+
+def build_achievement_embed(member, discord_user_id, trucksbook_name, achievement, real_miles):
+    threshold = achievement["miles"]
+    hall_tier = get_hall_of_fame_tier(real_miles)
+    driver_display = member.mention if member else f"<@{discord_user_id}>"
+    embed = discord.Embed(
+        title="🌟 A&T PERMANENT ACHIEVEMENT UNLOCKED",
+        description=(
+            f"Congratulations {driver_display}!\n\n"
+            f"**{threshold:,} verified A&T Real Miles**\n"
+            "This cumulative achievement is now part of your permanent record."
+        ),
+        colour=discord.Colour.gold(),
+    )
+    if member:
+        embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="TrucksBook Driver", value=f"`{trucksbook_name}`")
+    embed.add_field(name="Verified Real Total", value=f"**{real_miles:,} miles**")
+    if hall_tier and threshold in {250000, 500000, 1000000}:
+        embed.add_field(
+            name="Hall of Fame",
+            value=f"🏛️ **{hall_tier[2]}** — a permanent place in A&T history",
+            inline=False,
+        )
+    if threshold == 40000 and MILEAGE_CLUB_40K_CHANNEL_ID:
+        embed.add_field(
+            name="40K Reward Hub Unlocked",
+            value=f"Visit <#{MILEAGE_CLUB_40K_CHANNEL_ID}> for your milestone rewards.",
+            inline=False,
+        )
+    embed.set_footer(text="A&T Transport LTD • Permanent Achievement")
+    return embed
+
+
+async def announce_permanent_achievement(
+    guild, member, discord_user_id, trucksbook_name, achievement, real_miles
+):
+    channel = await get_discord_channel(MILESTONE_ANNOUNCEMENT_CHANNEL_ID)
+    if channel is None:
+        print("PERMANENT ACHIEVEMENT ANNOUNCEMENT SKIPPED: channel unavailable.")
+        return False
+    try:
+        await channel.send(embed=build_achievement_embed(
+            member, discord_user_id, trucksbook_name, achievement, real_miles
+        ))
+        return True
+    except (discord.Forbidden, discord.HTTPException) as error:
+        print(f"PERMANENT ACHIEVEMENT ANNOUNCEMENT ERROR: {error}")
+        return False
+
+
+async def upsert_controlled_message(purpose, channel_id, embeds):
+    """Edit the one recorded bot-owned message, recreating only if it vanished."""
+    channel = await get_discord_channel(channel_id)
+    if channel is None or db_pool is None:
+        return False
+    async with LIVE_DISPLAY_LOCK:
+        async with db_pool.acquire() as connection:
+            row = await connection.fetchrow(
+                "SELECT channel_id, message_id FROM bot_controlled_messages WHERE purpose = $1;",
+                purpose,
+            )
+        message = None
+        if row and int(row["channel_id"]) == channel.id:
+            try:
+                message = await channel.fetch_message(int(row["message_id"]))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                message = None
+        try:
+            if message is None:
+                message = await channel.send(embeds=embeds)
+            else:
+                await message.edit(content=None, embeds=embeds)
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"CONTROLLED MESSAGE ERROR ({purpose}): {error}")
+            return False
+        async with db_pool.acquire() as connection:
+            await connection.execute(
+                """
+                INSERT INTO bot_controlled_messages (purpose, channel_id, message_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (purpose) DO UPDATE SET
+                    channel_id = EXCLUDED.channel_id,
+                    message_id = EXCLUDED.message_id,
+                    updated_at = NOW();
+                """,
+                purpose,
+                channel.id,
+                message.id,
+            )
+        return True
+
+
+async def refresh_hall_of_fame_display():
+    if HALL_OF_FAME_CHANNEL_ID is None or db_pool is None:
+        return False
+    async with db_pool.acquire() as connection:
+        rows = await connection.fetch(
+            """
+            SELECT discord_user_id, trucksbook_name, highest_tier,
+                   highest_verified_real_miles, veteran_since, elite_since,
+                   immortal_since, immortal_number, is_active
+            FROM hall_of_fame
+            ORDER BY CASE highest_tier WHEN 'Immortal' THEN 1 WHEN 'Elite' THEN 2 ELSE 3 END,
+                     immortal_number NULLS LAST,
+                     highest_verified_real_miles DESC,
+                     veteran_since ASC;
+            """
+        )
+    colours = {
+        "Immortal": discord.Colour.from_rgb(96, 72, 170),
+        "Elite": discord.Colour.gold(),
+        "Veteran": discord.Colour.from_rgb(49, 120, 160),
+    }
+    icons = {"Immortal": "💎", "Elite": "👑", "Veteran": "⚔️"}
+    embeds = []
+    remaining_budget = 5200
+    for tier_name in ("Immortal", "Elite", "Veteran"):
+        tier_rows = [row for row in rows if row["highest_tier"] == tier_name]
+        lines = []
+        for row in tier_rows:
+            status = "🟢 Active" if row["is_active"] else "⚪ Former A&T Driver"
+            registry = (
+                f" **#{int(row['immortal_number']):03d}** |"
+                if row["immortal_number"] is not None else ""
+            )
+            since = row[f"{tier_name.lower()}_since"]
+            since_text = discord.utils.format_dt(since, style="D") if since else "Recorded"
+            line = (
+                f"{registry} <@{row['discord_user_id']}> — "
+                f"**{int(row['highest_verified_real_miles']):,}** Real Miles\n"
+                f"`{row['trucksbook_name']}` • {status} • Since {since_text}"
+            )
+            if sum(len(item) + 1 for item in lines) + len(line) > remaining_budget:
+                lines.append("*Further permanent records are safely stored in PostgreSQL.*")
+                break
+            lines.append(line)
+        description = "\n\n".join(lines) if lines else "*No drivers recorded in this tier yet.*"
+        remaining_budget -= len(description)
+        embeds.append(discord.Embed(
+            title=f"{icons[tier_name]} A&T {tier_name.upper()}S",
+            description=description,
+            colour=colours[tier_name],
+        ))
+    embeds[0].description = (
+        "**A&T Transport LTD — Permanent Hall of Fame**\n"
+        "Earned with verified Real Miles. Membership history is never erased.\n\n"
+        + embeds[0].description
+    )
+    embeds[-1].set_footer(
+        text="Veteran 250K • Elite 500K • Immortal 1M • Active/Former shown separately"
+    )
+    return await upsert_controlled_message(
+        "hall_of_fame", HALL_OF_FAME_CHANNEL_ID, embeds
+    )
+
+
+async def refresh_40k_reward_hub():
+    if MILEAGE_CLUB_40K_CHANNEL_ID is None or db_pool is None:
+        return False
+    async with db_pool.acquire() as connection:
+        count = await connection.fetchval(
+            "SELECT COUNT(*) FROM permanent_achievements WHERE achievement_miles = 40000;"
+        )
+    embed = discord.Embed(
+        title="🎁 A&T 40K MILEAGE CLUB REWARD HUB",
+        description=(
+            "Welcome to the reward hub for drivers who have earned "
+            "**40,000 verified A&T Real Miles**.\n\n"
+            "Your 40K achievement is permanent and remains recorded even as your "
+            "normal progression rank continues to change."
+        ),
+        colour=discord.Colour.from_rgb(31, 150, 135),
+    )
+    embed.add_field(name="Permanent 40K Members", value=f"**{int(count):,}**")
+    embed.set_footer(text="A&T Transport LTD • Driven Beyond Horizons")
+    return await upsert_controlled_message(
+        "40k_reward_hub", MILEAGE_CLUB_40K_CHANNEL_ID, [embed]
+    )
+
+
+async def sync_permanent_system_for_driver(
+    guild, discord_user_id, trucksbook_name, real_miles, announce=False,
+    refresh_displays=True,
+):
+    member = guild.get_member(discord_user_id) if guild else None
+    result = await reconcile_permanent_records(
+        discord_user_id,
+        trucksbook_name,
+        int(real_miles),
+        member is not None,
+    )
+    if guild and member:
+        await sync_member_permanent_roles(guild, discord_user_id, int(real_miles))
+    if announce:
+        for achievement in result["new_achievements"]:
+            await announce_permanent_achievement(
+                guild, member, discord_user_id, trucksbook_name,
+                achievement, int(real_miles)
+            )
+    if refresh_displays and result["hall_changed"]:
+        await refresh_hall_of_fame_display()
+    if refresh_displays and any(
+        item["miles"] == 40000 for item in result["new_achievements"]
+    ):
+        await refresh_40k_reward_hub()
+    return result
+
+
+async def silent_historical_permanent_sync(guild):
+    """Backfill history and roles without announcing old threshold crossings."""
+    global permanent_history_synced
+    if permanent_history_synced or db_pool is None:
+        return
+    async with PERMANENT_SYNC_LOCK:
+        if permanent_history_synced:
+            return
+        async with db_pool.acquire() as connection:
+            rows = await connection.fetch(
+                "SELECT discord_user_id, trucksbook_name, real_miles FROM driver_progress;"
+            )
+        synced = 0
+        failures = 0
+        for row in rows:
+            try:
+                await sync_permanent_system_for_driver(
+                    guild,
+                    int(row["discord_user_id"]),
+                    row["trucksbook_name"],
+                    int(row["real_miles"]),
+                    announce=False,
+                    refresh_displays=False,
+                )
+                synced += 1
+            except (discord.Forbidden, discord.HTTPException) as error:
+                failures += 1
+                print(f"PERMANENT HISTORICAL SYNC ROLE ERROR: {error}")
+            except Exception as error:
+                failures += 1
+                print(f"PERMANENT HISTORICAL SYNC ERROR: {error}")
+        await refresh_hall_of_fame_display()
+        await refresh_40k_reward_hub()
+        permanent_history_synced = True
+        print(
+            f"Permanent historical sync complete: {synced} driver(s), "
+            f"{failures} failure(s), no historical announcements."
+        )
+
+
+# --------------------------------------------------
 # ONBOARDING DATABASE HELPERS
 # --------------------------------------------------
 
@@ -1380,6 +1931,9 @@ async def on_ready():
                 "Automatic role sync skipped."
             )
 
+        if db_pool is not None:
+            await silent_historical_permanent_sync(guild)
+
         check_onboarding_configuration(
             guild
         )
@@ -1397,6 +1951,55 @@ async def on_ready():
             "Slash command sync failed: "
             f"{error}"
         )
+
+
+@bot.event
+async def on_member_join(member):
+    """Restore earned permanent roles and Active status when a driver returns."""
+    if member.guild.id != GUILD_ID or db_pool is None:
+        return
+    async with db_pool.acquire() as connection:
+        row = await connection.fetchrow(
+            """
+            SELECT trucksbook_name, real_miles
+            FROM driver_progress
+            WHERE discord_user_id = $1;
+            """,
+            member.id,
+        )
+    if row is None:
+        return
+    try:
+        await sync_permanent_system_for_driver(
+            member.guild,
+            member.id,
+            row["trucksbook_name"],
+            int(row["real_miles"]),
+            announce=False,
+        )
+        await sync_member_progression_role(
+            member.guild, member.id, int(row["real_miles"])
+        )
+    except Exception as error:
+        print(f"RETURNING DRIVER SYNC ERROR: {member.id}: {error}")
+
+
+@bot.event
+async def on_member_remove(member):
+    """Retain Hall of Fame history and show the member as a former driver."""
+    if member.guild.id != GUILD_ID or db_pool is None:
+        return
+    async with db_pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            UPDATE hall_of_fame
+            SET is_active = FALSE, updated_at = NOW()
+            WHERE discord_user_id = $1 AND is_active = TRUE;
+            """,
+            member.id,
+        )
+    if result != "UPDATE 0":
+        await refresh_hall_of_fame_display()
 
 
 # --------------------------------------------------
@@ -1779,6 +2382,22 @@ async def on_message(message):
                         "ROLE ACTION ERROR: "
                         f"{error}"
                     )
+
+            # Permanent achievements and Hall of Fame are intentionally
+            # independent from the highest-current-only progression role.
+            try:
+                await sync_permanent_system_for_driver(
+                    guild,
+                    discord_user_id,
+                    trucksbook_name,
+                    real_miles,
+                    announce=True,
+                )
+            except Exception as error:
+                print(
+                    "PERMANENT ACHIEVEMENT ERROR: Mileage remains saved; "
+                    f"{error}"
+                )
 
             # --------------------------------------
             # ANNOUNCE NEWLY CROSSED MILESTONES
@@ -2242,12 +2861,23 @@ async def mileage_apply(ctx, confirmation: str = ""):
     for user_id in affected_users:
         try:
             async with db_pool.acquire() as connection:
-                total = await connection.fetchval(
-                    "SELECT real_miles FROM driver_progress "
+                progress_row = await connection.fetchrow(
+                    "SELECT trucksbook_name, real_miles FROM driver_progress "
                     "WHERE discord_user_id = $1;",
                     user_id,
                 )
-            await sync_member_progression_role(ctx.guild, user_id, int(total))
+            await sync_member_progression_role(
+                ctx.guild, user_id, int(progress_row["real_miles"])
+            )
+            # Repairs restore historical mileage, so backfill permanent records
+            # and roles silently just like startup history migration.
+            await sync_permanent_system_for_driver(
+                ctx.guild,
+                user_id,
+                progress_row["trucksbook_name"],
+                int(progress_row["real_miles"]),
+                announce=False,
+            )
         except Exception as error:
             role_failures += 1
             print(f"REPAIR ROLE SYNC ERROR for {user_id}: {error}")
@@ -4747,6 +5377,17 @@ async def confirm_verification(
             "CONFIRM ROLE ERROR: "
             f"{error}"
         )
+
+    try:
+        await sync_permanent_system_for_driver(
+            ctx.guild,
+            applicant_id,
+            link_name,
+            final_real_miles,
+            announce=False,
+        )
+    except Exception as error:
+        print(f"CONFIRM PERMANENT ROLE ERROR: {error}")
 
     # ------------------------------------------
     # SUCCESS MESSAGE
