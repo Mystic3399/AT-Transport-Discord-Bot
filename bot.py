@@ -2760,21 +2760,21 @@ def profile_font_candidates(bold=False):
     """Return local-only fonts in broad Unicode coverage order."""
     return (
         (
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
-            "C:/Windows/Fonts/arialbd.ttf",
             "C:/Windows/Fonts/seguisb.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
         )
         if bold
         else (
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-            "C:/Windows/Fonts/arial.ttf",
             "C:/Windows/Fonts/segoeui.ttf",
+            "C:/Windows/Fonts/arial.ttf",
         )
     )
 
@@ -2801,30 +2801,24 @@ def fit_profile_text(draw, text, max_width, start_size, bold=False):
 
 
 def sanitise_profile_name(value, fallback="A&T DRIVER"):
-    """Make user-controlled names readable with bundled Linux fonts.
+    """Return a Unicode-safe, display-only name for the profile artwork.
 
-    Compatibility characters are folded to their normal equivalents and
-    emoji/decorative symbols that commonly render as square boxes are removed.
-    The Discord and TrucksBook values themselves are never changed.
+    Compatibility alphabets are folded into ordinary text, invisible controls
+    and emoji are discarded, and only conservative punctuation is retained.
+    This avoids Linux font tofu without changing the stored Discord or
+    TrucksBook value.
     """
     normalised = unicodedata.normalize("NFKC", str(value or ""))
     readable = []
     for character in normalised:
         category = unicodedata.category(character)
-        if category[0] in {"L", "M", "N", "P", "Z"}:
+        if category[0] in {"L", "M", "N"}:
             readable.append(character)
-        elif character in "&+@#":
+        elif character.isspace():
+            readable.append(" ")
+        elif character in " ._-'&+@#()":
             readable.append(character)
-    cleaned = " ".join("".join(readable).split())
-    # NFKC turns common mathematical/fraktur Discord styling into ordinary
-    # letters (for example 𝕸𝖞𝖘𝖙𝖎𝖈 -> Mystic).  Removing variation selectors and
-    # invisible formatting characters prevents broken glyph clusters on Linux.
-    cleaned = "".join(
-        character
-        for character in cleaned
-        if character not in {"\ufe0e", "\ufe0f"}
-        and unicodedata.category(character) != "Cf"
-    )
+    cleaned = " ".join("".join(readable).split()).strip(" ._-'&+@#()")
     return cleaned or fallback
 
 
@@ -3161,7 +3155,7 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, trucksbook_name, re
     # skyline visible across the poster instead of recreating a dashboard.
     draw.rounded_rectangle((43, 39, 947, 139), 20, fill=(2, 10, 20, 102), outline=(83, 195, 218, 95), width=1)
     draw.rounded_rectangle((43, 163, 358, 677), 24, fill=(2, 10, 20, 118), outline=(83, 195, 218, 100), width=1)
-    draw.rounded_rectangle((376, 555, 947, 758), 24, fill=(2, 10, 20, 112), outline=(83, 195, 218, 100), width=1)
+    draw.rounded_rectangle((376, 610, 947, 758), 24, fill=(2, 10, 20, 112), outline=(83, 195, 218, 100), width=1)
     draw.rounded_rectangle((43, 770, 947, 960), 22, fill=(2, 10, 20, 132), outline=(83, 195, 218, 105), width=1)
     draw.rounded_rectangle((974, 24, 1574, 976), 24, fill=(1, 9, 18, 128), outline=(41, 142, 178, 145), width=2)
 
@@ -3185,9 +3179,8 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, trucksbook_name, re
     draw.line((78, 445, 323, 445), fill=(91, 197, 214, 130), width=1)
     profile_text(draw, (200, 473), "TRUCKSBOOK DRIVER", load_profile_font(12, True), ice, anchor="ma", shadow=0)
     profile_text(draw, (200, 504), safe_trucksbook_name, fit_profile_text(draw, safe_trucksbook_name, 270, 24, True), white, anchor="ma")
-    profile_text(draw, (200, 558), "CURRENT REAL MILES", load_profile_font(13, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (200, 596), f"{real_miles:,}", fit_profile_text(draw, f"{real_miles:,}", 275, 56, True), gold, anchor="ma")
-    profile_text(draw, (200, 650), "REAL MILES", load_profile_font(19, True), white, anchor="ma")
+    draw.line((78, 542, 323, 542), fill=(91, 197, 214, 90), width=1)
+    profile_text(draw, (200, 578), "VERIFIED A&T DRIVER", load_profile_font(13, True), muted, anchor="ma", shadow=0)
 
     current_badge = load_profile_badge(current_miles, (455, 405))
     hero_x = 659
@@ -3200,37 +3193,44 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, trucksbook_name, re
     card.alpha_composite(glow.filter(ImageFilter.GaussianBlur(44)), (399, 105))
     card.alpha_composite(current_badge, (badge_x, badge_y))
     profile_text(draw, (hero_x, 151), "CURRENT PROGRESSION RANK", load_profile_font(14, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (hero_x, 510), current_rank_name.upper(), fit_profile_text(draw, current_rank_name.upper(), 535, 46, True), white, anchor="ma")
-    profile_text(draw, (hero_x, 568), f"{real_miles:,}", fit_profile_text(draw, f"{real_miles:,}", 510, 62, True), gold, anchor="ma")
-    profile_text(draw, (hero_x, 625), "REAL MILES", load_profile_font(18, True), white, anchor="ma", shadow=0)
+    profile_text(draw, (hero_x, 493), current_rank_name.upper(), fit_profile_text(draw, current_rank_name.upper(), 535, 42, True), white, anchor="ma")
+    mileage_headline = f"{real_miles:,} REAL MILES"
+    profile_text(
+        draw,
+        (hero_x, 548),
+        mileage_headline,
+        fit_profile_text(draw, mileage_headline, 530, 48, True),
+        gold,
+        anchor="ma",
+    )
 
     if next_role is None:
         next_miles = PROGRESSION_ROLES[-1][0]
         next_name = "Maximum rank achieved"
         miles_remaining = 0
         progress = 1.0
-        progress_caption = f"{real_miles:,} REAL MILES  •  LEGENDARY STATUS"
+        progress_caption = "LEGENDARY STATUS  •  MAXIMUM RANK ACHIEVED"
     else:
         next_miles, _, next_name = next_role
         miles_remaining = max(next_miles - real_miles, 0)
         stage_span = max(next_miles - current_miles, 1)
         progress = min(max((real_miles - current_miles) / stage_span, 0.0), 1.0)
-        progress_caption = f"{real_miles:,}  /  {next_miles:,} REAL MILES"
+        progress_caption = f"RANK PROGRESS  •  TARGET {next_miles:,} MILES"
 
-    profile_text(draw, (407, 650), "NEXT RANK", load_profile_font(12, True), ice, shadow=0)
-    profile_text(draw, (407, 677), next_name.upper(), fit_profile_text(draw, next_name.upper(), 320, 23, True), white)
-    profile_text(draw, (916, 650), "MILES REMAINING", load_profile_font(12, True), ice, anchor="ra", shadow=0)
-    profile_text(draw, (916, 677), f"{miles_remaining:,}", load_profile_font(27, True), gold, anchor="ra")
+    profile_text(draw, (407, 626), "NEXT RANK", load_profile_font(12, True), ice, shadow=0)
+    profile_text(draw, (407, 652), next_name.upper(), fit_profile_text(draw, next_name.upper(), 320, 22, True), white)
+    profile_text(draw, (916, 626), "MILES REMAINING", load_profile_font(12, True), ice, anchor="ra", shadow=0)
+    profile_text(draw, (916, 652), f"{miles_remaining:,}", load_profile_font(26, True), gold, anchor="ra")
 
-    bar_left, bar_top, bar_right, bar_bottom = 407, 710, 916, 735
+    bar_left, bar_top, bar_right, bar_bottom = 407, 687, 916, 713
     draw.rounded_rectangle((bar_left - 4, bar_top - 4, bar_right + 4, bar_bottom + 4), 16, fill=(31, 142, 171, 90))
     draw.rounded_rectangle((bar_left, bar_top, bar_right, bar_bottom), 13, fill=(8, 29, 43, 245), outline=(98, 197, 218, 220), width=2)
     filled_right = bar_left + int((bar_right - bar_left) * progress)
     if filled_right > bar_left:
         draw.rounded_rectangle((bar_left, bar_top, max(filled_right, bar_left + 27), bar_bottom), 13, fill=(48, 219, 223, 255))
         draw.line((bar_left + 12, bar_top + 5, max(filled_right - 10, bar_left + 14), bar_top + 5), fill=(215, 255, 251, 205), width=3)
-    profile_text(draw, (bar_left, 741), progress_caption, load_profile_font(12, True), white, shadow=1)
-    profile_text(draw, (bar_right, 741), f"{progress * 100:.1f}%", load_profile_font(17, True), gold, anchor="ra")
+    profile_text(draw, (bar_left, 739), progress_caption, load_profile_font(12, True), white, shadow=1)
+    profile_text(draw, (bar_right, 739), f"{progress * 100:.1f}%", load_profile_font(17, True), gold, anchor="ra")
 
     milestone_thresholds = (25000, 50000, 100000, 500000, 1000000)
     profile_text(draw, (69, 787), "CAREER MILESTONES", load_profile_font(20, True), white)
