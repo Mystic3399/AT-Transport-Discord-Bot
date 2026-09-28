@@ -1,11 +1,22 @@
 import os
 import re
+import asyncio
+from io import BytesIO
+from pathlib import Path
 
 import aiohttp
 import asyncpg
 import discord
 from bs4 import BeautifulSoup
 from discord.ext import commands
+
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageOps
+except ImportError:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+    ImageOps = None
 
 
 # --------------------------------------------------
@@ -211,6 +222,33 @@ PROGRESSION_ROLES = [
         "A&T Immortal",
     ),
 ]
+
+PROGRESSION_BADGES = {
+    0: "at-new-driver-0.png",
+    5000: "road-runner-5000.png",
+    10000: "distance-driver-10000.png",
+    15000: "aurora-driver-15000.png",
+    20000: "wolf-pack-driver-20000.png",
+    25000: "viking-hauler-25000.png",
+    30000: "elite-hauler-30000.png",
+    35000: "at-veteran-35000.png",
+    40000: "at-road-legend-40000.png",
+    50000: "beyond-horizons-50000.png",
+    75000: "horizon-wolf-75000.png",
+    100000: "at-centurion-100000.png",
+    150000: "viking-pathfinder-150000.png",
+    200000: "road-guardian-200000.png",
+    300000: "aurora-pathfinder-300000.png",
+    400000: "viking-roadmaster-400000.png",
+    500000: "horizon-legend-500000.png",
+    600000: "alpha-roadmaster-600000.png",
+    700000: "aurora-commander-700000.png",
+    800000: "guardian-of-the-horizon-800000.png",
+    900000: "beyond-the-horizon-900000.png",
+    1000000: "at-immortal-1000000.png",
+}
+
+BADGE_DIRECTORY = Path(__file__).resolve().parent / "assets" / "badges"
 
 
 # --------------------------------------------------
@@ -2677,6 +2715,179 @@ async def cancel_verification_record(
 # A&T DRIVER PROFILE
 # --------------------------------------------------
 
+def build_driver_profile_embed(target_member, trucksbook_name, real_miles):
+    """Build the original read-only embed used as the safe fallback."""
+    current_rank_name = get_progression_role(real_miles)[2]
+    next_role = get_next_progression_role(real_miles)
+    embed = discord.Embed(
+        title="🌌 A&T TRANSPORT LTD — DRIVER PROFILE",
+        description=f"Progression record for {target_member.mention}",
+        colour=discord.Colour.from_rgb(31, 78, 121),
+    )
+    embed.set_thumbnail(url=target_member.display_avatar.url)
+    embed.add_field(name="Discord Driver", value=target_member.mention, inline=True)
+    embed.add_field(name="TrucksBook Driver", value=f"`{trucksbook_name}`", inline=True)
+    embed.add_field(name="Current Progression Rank", value=f"🏅 **{current_rank_name}**", inline=False)
+    embed.add_field(name="Real Miles", value=f"🚛 **{real_miles:,}**", inline=True)
+
+    if next_role is None:
+        bar, _ = build_progress_bar(real_miles, PROGRESSION_ROLES[-1][0])
+        embed.add_field(
+            name="Progression Status",
+            value=("🌌 **Beyond Horizons achieved**\n" f"`{bar}` **100%**\n" "Maximum A&T progression rank reached."),
+            inline=False,
+        )
+        embed.add_field(name="Miles Remaining", value="**0 — maximum rank achieved**", inline=False)
+    else:
+        next_required_miles, _, next_rank_name = next_role
+        miles_remaining = max(next_required_miles - real_miles, 0)
+        bar, percentage = build_progress_bar(real_miles, next_required_miles)
+        embed.add_field(name="Next Progression Rank", value=f"🌠 **{next_rank_name}**", inline=True)
+        embed.add_field(name="Miles Remaining", value=f"**{miles_remaining:,}**", inline=True)
+        embed.add_field(
+            name="Progress",
+            value=f"`{bar}` **{percentage:.0f}%**\n**{real_miles:,} / {next_required_miles:,} Real miles**",
+            inline=False,
+        )
+    embed.set_footer(text="A&T Transport LTD • Driven Beyond Horizons")
+    return embed
+
+
+def load_profile_font(size, bold=False):
+    """Load a common Railway/Linux font, then use Pillow's default."""
+    candidates = (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
+    ) if bold else (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
+    )
+    for font_path in candidates:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except (OSError, IOError):
+            continue
+    return ImageFont.load_default()
+
+
+def fit_profile_text(draw, text, max_width, start_size, bold=False):
+    """Choose a font size that keeps user-controlled text on the card."""
+    for size in range(start_size, 11, -2):
+        font = load_profile_font(size, bold=bold)
+        box = draw.textbbox((0, 0), str(text), font=font)
+        if box[2] - box[0] <= max_width:
+            return font
+    return load_profile_font(11, bold=bold)
+
+
+def rounded_profile_image(source, size, radius):
+    image = ImageOps.fit(source.convert("RGBA"), size, method=Image.Resampling.LANCZOS)
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=radius, fill=255)
+    image.putalpha(mask)
+    return image
+
+
+def render_driver_profile_png(avatar_bytes, discord_name, trucksbook_name, real_miles):
+    """Render from already-read values only; this function cannot alter state."""
+    if Image is None:
+        raise RuntimeError("Pillow is not installed")
+
+    current_miles, _, current_rank_name = get_progression_role(real_miles)
+    next_role = get_next_progression_role(real_miles)
+    badge_path = BADGE_DIRECTORY / PROGRESSION_BADGES[current_miles]
+    if not badge_path.is_file():
+        raise FileNotFoundError(f"Progression badge not found: {badge_path}")
+
+    width, height = 1400, 800
+    card = Image.new("RGBA", (width, height), (7, 17, 31, 255))
+    draw = ImageDraw.Draw(card)
+    for y in range(height):
+        blend = y / height
+        draw.line((0, y, width, y), fill=(int(7 + 10 * blend), int(17 + 17 * blend), int(31 + 27 * blend), 255))
+    draw.rounded_rectangle((35, 35, 1365, 765), 34, fill=(8, 22, 40, 225), outline=(45, 164, 213, 180), width=3)
+    draw.rounded_rectangle((70, 160, 390, 650), 28, fill=(12, 31, 53, 235))
+    draw.rounded_rectangle((425, 160, 1325, 650), 28, fill=(12, 31, 53, 235))
+    draw.rectangle((70, 121, 1325, 126), fill=(48, 181, 224, 255))
+
+    title_font = load_profile_font(45, bold=True)
+    subtitle_font = load_profile_font(21)
+    label_font = load_profile_font(18, bold=True)
+    value_font = load_profile_font(31, bold=True)
+    small_font = load_profile_font(17)
+    draw.text((70, 56), "A&T TRANSPORT LTD", font=title_font, fill=(240, 247, 252))
+    draw.text((925, 72), "DRIVER PROFILE", font=subtitle_font, fill=(117, 205, 235))
+
+    with Image.open(BytesIO(avatar_bytes)) as avatar_source:
+        avatar = rounded_profile_image(avatar_source, (170, 170), 85)
+    card.alpha_composite(avatar, (145, 195))
+    draw.ellipse((140, 190, 320, 370), outline=(69, 194, 232), width=5)
+    discord_font = fit_profile_text(draw, discord_name, 275, 28, bold=True)
+    trucksbook_font = fit_profile_text(draw, trucksbook_name, 275, 20)
+    draw.text((230, 400), str(discord_name), font=discord_font, fill=(245, 248, 252), anchor="ma")
+    draw.text((230, 445), "TRUCKSBOOK", font=label_font, fill=(99, 174, 204), anchor="ma")
+    draw.text((230, 477), str(trucksbook_name), font=trucksbook_font, fill=(220, 232, 240), anchor="ma")
+
+    with Image.open(badge_path) as badge_source:
+        badge = badge_source.convert("RGBA")
+        badge.thumbnail((205, 145), Image.Resampling.LANCZOS)
+    card.alpha_composite(badge, (230 - badge.width // 2, 510))
+
+    draw.text((470, 195), "CURRENT RANK", font=label_font, fill=(99, 174, 204))
+    rank_font = fit_profile_text(draw, current_rank_name, 540, 39, bold=True)
+    draw.text((470, 228), current_rank_name, font=rank_font, fill=(245, 248, 252))
+    draw.text((470, 305), "REAL MILES", font=label_font, fill=(99, 174, 204))
+    draw.text((470, 338), f"{real_miles:,}", font=value_font, fill=(244, 190, 71))
+
+    if next_role is None:
+        next_name = "Maximum rank achieved"
+        miles_remaining = 0
+        progress = 1.0
+        progress_caption = f"{real_miles:,} Real miles • Beyond Horizons"
+    else:
+        next_miles, _, next_name = next_role
+        miles_remaining = max(next_miles - real_miles, 0)
+        stage_span = max(next_miles - current_miles, 1)
+        progress = min(max((real_miles - current_miles) / stage_span, 0.0), 1.0)
+        progress_caption = f"{real_miles:,} / {next_miles:,} Real miles"
+    draw.text((830, 195), "NEXT RANK", font=label_font, fill=(99, 174, 204))
+    next_font = fit_profile_text(draw, next_name, 440, 29, bold=True)
+    draw.text((830, 228), next_name, font=next_font, fill=(245, 248, 252))
+    draw.text((830, 305), "MILES REMAINING", font=label_font, fill=(99, 174, 204))
+    draw.text((830, 338), f"{miles_remaining:,}", font=value_font, fill=(244, 190, 71))
+
+    bar_left, bar_top, bar_right, bar_bottom = 470, 425, 1275, 466
+    draw.rounded_rectangle((bar_left, bar_top, bar_right, bar_bottom), 20, fill=(27, 50, 70), outline=(58, 91, 112), width=2)
+    filled_right = bar_left + int((bar_right - bar_left) * progress)
+    if filled_right > bar_left:
+        draw.rounded_rectangle((bar_left, bar_top, max(filled_right, bar_left + 40), bar_bottom), 20, fill=(38, 181, 218))
+    draw.text((bar_left, 480), progress_caption, font=small_font, fill=(202, 219, 230))
+    draw.text((bar_right, 480), f"{progress * 100:.0f}%", font=small_font, fill=(244, 190, 71), anchor="ra")
+
+    earned = [role for role in PROGRESSION_ROLES if role[0] <= real_miles]
+    shown = earned[-7:]
+    draw.text((470, 535), "EARNED MILESTONES", font=label_font, fill=(99, 174, 204))
+    x = 470
+    for threshold, _, _ in shown:
+        earned_path = BADGE_DIRECTORY / PROGRESSION_BADGES[threshold]
+        if not earned_path.is_file():
+            raise FileNotFoundError(f"Progression badge not found: {earned_path}")
+        with Image.open(earned_path) as earned_source:
+            earned_badge = earned_source.convert("RGBA")
+            earned_badge.thumbnail((78, 62), Image.Resampling.LANCZOS)
+        card.alpha_composite(earned_badge, (x + (78 - earned_badge.width) // 2, 572))
+        draw.text((x + 39, 637), f"{threshold:,}", font=load_profile_font(12), fill=(180, 202, 216), anchor="ma")
+        x += 105
+    if len(earned) > len(shown):
+        draw.text((x + 8, 596), f"+{len(earned) - len(shown)}", font=load_profile_font(20, bold=True), fill=(244, 190, 71))
+    draw.text((70, 716), "DRIVEN BEYOND HORIZONS", font=label_font, fill=(92, 172, 204))
+    draw.text((1325, 716), "Live progression • Read-only", font=small_font, fill=(138, 160, 176), anchor="ra")
+
+    output = BytesIO()
+    card.convert("RGB").save(output, format="PNG", optimize=True)
+    output.seek(0)
+    return output
+
 @bot.command(
     name="profile"
 )
@@ -2773,133 +2984,30 @@ async def driver_profile(
         0,
     )
 
-    (
-        _,
-        _,
-        current_rank_name,
-    ) = get_progression_role(
-        real_miles
+    fallback_embed = build_driver_profile_embed(
+        target_member,
+        trucksbook_name,
+        real_miles,
     )
 
-    next_role = get_next_progression_role(
-        real_miles
-    )
-
-    embed = discord.Embed(
-        title=(
-            "🌌 A&T TRANSPORT LTD — "
-            "DRIVER PROFILE"
-        ),
-        description=(
-            f"Progression record for "
-            f"{target_member.mention}"
-        ),
-        colour=discord.Colour.from_rgb(
-            31,
-            78,
-            121,
-        ),
-    )
-
-    embed.set_thumbnail(
-        url=target_member.display_avatar.url
-    )
-
-    embed.add_field(
-        name="Discord Driver",
-        value=target_member.mention,
-        inline=True,
-    )
-
-    embed.add_field(
-        name="TrucksBook Driver",
-        value=f"`{trucksbook_name}`",
-        inline=True,
-    )
-
-    embed.add_field(
-        name="Current Progression Rank",
-        value=f"🏅 **{current_rank_name}**",
-        inline=False,
-    )
-
-    embed.add_field(
-        name="Real Miles",
-        value=f"🚛 **{real_miles:,}**",
-        inline=True,
-    )
-
-    if next_role is None:
-        bar, _ = build_progress_bar(
+    try:
+        avatar_bytes = await target_member.display_avatar.with_size(256).read()
+        profile_png = await asyncio.to_thread(
+            render_driver_profile_png,
+            avatar_bytes,
+            target_member.display_name,
+            trucksbook_name,
             real_miles,
-            PROGRESSION_ROLES[-1][0],
         )
-
-        embed.add_field(
-            name="Progression Status",
-            value=(
-                "🌌 **Beyond Horizons achieved**\n"
-                f"`{bar}` **100%**\n"
-                "Maximum A&T progression rank reached."
-            ),
-            inline=False,
+        await ctx.send(
+            file=discord.File(
+                profile_png,
+                filename="at-driver-profile.png",
+            )
         )
-
-        embed.add_field(
-            name="Miles Remaining",
-            value="**0 — maximum rank achieved**",
-            inline=False,
-        )
-
-    else:
-        (
-            next_required_miles,
-            _,
-            next_rank_name,
-        ) = next_role
-
-        miles_remaining = max(
-            next_required_miles - real_miles,
-            0,
-        )
-
-        bar, percentage = build_progress_bar(
-            real_miles,
-            next_required_miles,
-        )
-
-        embed.add_field(
-            name="Next Progression Rank",
-            value=f"🌠 **{next_rank_name}**",
-            inline=True,
-        )
-
-        embed.add_field(
-            name="Miles Remaining",
-            value=f"**{miles_remaining:,}**",
-            inline=True,
-        )
-
-        embed.add_field(
-            name="Progress",
-            value=(
-                f"`{bar}` **{percentage:.0f}%**\n"
-                f"**{real_miles:,} / "
-                f"{next_required_miles:,} Real miles**"
-            ),
-            inline=False,
-        )
-
-    embed.set_footer(
-        text=(
-            "A&T Transport LTD • "
-            "Driven Beyond Horizons"
-        )
-    )
-
-    await ctx.send(
-        embed=embed
-    )
+    except Exception as error:
+        print(f"GRAPHICAL PROFILE FALLBACK: {error}")
+        await ctx.send(embed=fallback_embed)
 
 
 @driver_profile.error
