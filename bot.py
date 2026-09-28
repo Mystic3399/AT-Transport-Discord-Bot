@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import math
+import unicodedata
 from io import BytesIO
 from pathlib import Path
 
@@ -2784,6 +2785,25 @@ def fit_profile_text(draw, text, max_width, start_size, bold=False):
     return load_profile_font(11, bold=bold)
 
 
+def sanitise_profile_name(value, fallback="A&T DRIVER"):
+    """Make user-controlled names readable with bundled Linux fonts.
+
+    Compatibility characters are folded to their normal equivalents and
+    emoji/decorative symbols that commonly render as square boxes are removed.
+    The Discord and TrucksBook values themselves are never changed.
+    """
+    normalised = unicodedata.normalize("NFKC", str(value or ""))
+    readable = []
+    for character in normalised:
+        category = unicodedata.category(character)
+        if category[0] in {"L", "M", "N", "P", "Z"}:
+            readable.append(character)
+        elif character in "&+@#":
+            readable.append(character)
+    cleaned = " ".join("".join(readable).split())
+    return cleaned or fallback
+
+
 def rounded_profile_image(source, size, radius):
     image = ImageOps.fit(source.convert("RGBA"), size, method=Image.Resampling.LANCZOS)
     mask = Image.new("L", size, 0)
@@ -2818,7 +2838,7 @@ def profile_panel(draw, box, radius=24, outline=(83, 184, 212, 115)):
 
 
 def build_profile_backdrop(width, height):
-    """Create a dependency-free aurora, stars and Nordic mountain scene."""
+    """Create a dependency-free cinematic Nordic road and aurora scene."""
     backdrop = Image.new("RGBA", (width, height), (2, 8, 18, 255))
     draw = ImageDraw.Draw(backdrop, "RGBA")
 
@@ -2843,10 +2863,10 @@ def build_profile_backdrop(width, height):
         alpha = 55 + (index * 31) % 130
         draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(196, 231, 244, alpha))
 
-    # Blurred aurora ribbons, created entirely with Pillow for Railway.
+    # Layered aurora curtains, created entirely with Pillow for Railway.
     aurora = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     aurora_draw = ImageDraw.Draw(aurora, "RGBA")
-    for ribbon, colour in enumerate(((28, 231, 191), (57, 175, 235), (115, 83, 209))):
+    for ribbon, colour in enumerate(((28, 236, 192), (48, 176, 238), (105, 74, 210))):
         upper = []
         lower = []
         base_y = 75 + ribbon * 58
@@ -2857,13 +2877,13 @@ def build_profile_backdrop(width, height):
             lower.append((x, base_y + 115 + wave + math.sin(x / 90.0) * 24))
         aurora_draw.polygon(
             upper + list(reversed(lower)),
-            fill=(*colour, 92 - ribbon * 10),
+            fill=(*colour, 112 - ribbon * 12),
         )
         aurora_draw.line(upper, fill=(*colour, 180), width=6)
     aurora = aurora.filter(ImageFilter.GaussianBlur(18))
     backdrop.alpha_composite(aurora)
 
-    # Layered mountain silhouettes anchor the art without external assets.
+    # Layered mountain silhouettes and a road provide the trucking atmosphere.
     draw = ImageDraw.Draw(backdrop, "RGBA")
     draw.polygon(
         [(0, 565), (155, 405), (270, 520), (430, 335), (585, 530),
@@ -2883,6 +2903,13 @@ def build_profile_backdrop(width, height):
         fill=(44, 133, 157, 105),
         width=3,
     )
+    draw.polygon(
+        [(510, height), (724, 600), (876, 600), (1090, height)],
+        fill=(2, 8, 15, 248),
+    )
+    draw.line((800, 640, 800, 1000), fill=(213, 235, 236, 115), width=4)
+    draw.line((715, 1000, 786, 665), fill=(55, 169, 192, 70), width=3)
+    draw.line((885, 1000, 814, 665), fill=(55, 169, 192, 70), width=3)
     return backdrop
 
 
@@ -3055,6 +3082,135 @@ def render_driver_profile_png(avatar_bytes, discord_name, trucksbook_name, real_
     output.seek(0)
     return output
 
+
+def render_driver_profile_v3_png(avatar_bytes, discord_name, trucksbook_name, real_miles):
+    """Render the cinematic V3 poster using only read-only profile values."""
+    if Image is None:
+        raise RuntimeError("Pillow is not installed")
+
+    current_miles, _, current_rank_name = get_progression_role(real_miles)
+    next_role = get_next_progression_role(real_miles)
+    width, height = 1600, 1000
+    card = build_profile_backdrop(width, height)
+    card.alpha_composite(Image.new("RGBA", (width, height), (1, 7, 15, 52)))
+    draw = ImageDraw.Draw(card, "RGBA")
+
+    white = (238, 246, 249, 255)
+    ice = (91, 218, 242, 255)
+    muted = (157, 186, 199, 255)
+    gold = (238, 190, 82, 255)
+    teal = (56, 226, 210, 255)
+
+    draw.rounded_rectangle((14, 14, 1586, 986), 28, fill=(1, 8, 17, 45), outline=(55, 177, 219, 215), width=3)
+    draw.rounded_rectangle((22, 22, 1578, 978), 23, outline=(218, 175, 77, 115), width=1)
+    draw.rounded_rectangle((38, 38, 955, 958), 22, fill=(2, 10, 20, 76), outline=(55, 158, 190, 150), width=2)
+    draw.rounded_rectangle((974, 24, 1574, 976), 24, fill=(1, 10, 19, 222), outline=(41, 142, 178, 165), width=2)
+    draw.rectangle((39, 760, 954, 957), fill=(1, 8, 16, 205))
+
+    profile_text(draw, (73, 61), "A&T TRANSPORT LTD — DRIVER PROFILE", load_profile_font(31, True), white)
+    profile_text(draw, (73, 101), "DRIVEN BEYOND HORIZONS", load_profile_font(14, True), ice, shadow=0)
+    profile_text(draw, (918, 68), "CINEMATIC  /  V3", load_profile_font(14, True), gold, anchor="ra", shadow=0)
+    draw.line((73, 127, 918, 127), fill=(73, 205, 229, 210), width=2)
+
+    with Image.open(BytesIO(avatar_bytes)) as avatar_source:
+        avatar = rounded_profile_image(avatar_source, (148, 148), 74)
+    avatar_glow = Image.new("RGBA", (188, 188), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(avatar_glow, "RGBA")
+    glow_draw.ellipse((14, 14, 174, 174), outline=(57, 226, 238, 205), width=12)
+    card.alpha_composite(avatar_glow.filter(ImageFilter.GaussianBlur(10)), (66, 158))
+    card.alpha_composite(avatar, (86, 178))
+    draw.ellipse((82, 174, 238, 330), outline=(121, 236, 242, 245), width=4)
+
+    safe_discord_name = sanitise_profile_name(discord_name)
+    safe_trucksbook_name = sanitise_profile_name(trucksbook_name, "UNLINKED DRIVER")
+    profile_text(draw, (74, 350), "DISCORD DRIVER", load_profile_font(14, True), ice, shadow=0)
+    profile_text(draw, (74, 380), safe_discord_name, fit_profile_text(draw, safe_discord_name, 285, 29, True), white)
+    draw.line((74, 423, 340, 423), fill=(91, 197, 214, 150), width=1)
+    profile_text(draw, (74, 447), "TRUCKSBOOK DRIVER", load_profile_font(14, True), ice, shadow=0)
+    profile_text(draw, (74, 477), safe_trucksbook_name, fit_profile_text(draw, safe_trucksbook_name, 285, 25, True), white)
+
+    current_badge = load_profile_badge(current_miles, (365, 425))
+    hero_x = 657
+    badge_x = hero_x - current_badge.width // 2
+    badge_y = 147 + (425 - current_badge.height) // 2
+    glow = Image.new("RGBA", (480, 480), (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow, "RGBA")
+    glow_draw.ellipse((60, 30, 420, 450), fill=(24, 190, 221, 105))
+    card.alpha_composite(glow.filter(ImageFilter.GaussianBlur(42)), (417, 120))
+    card.alpha_composite(current_badge, (badge_x, badge_y))
+    profile_text(draw, (hero_x, 150), "CURRENT PROGRESSION RANK", load_profile_font(14, True), ice, anchor="ma", shadow=0)
+    profile_text(draw, (hero_x, 579), current_rank_name.upper(), fit_profile_text(draw, current_rank_name.upper(), 510, 38, True), white, anchor="ma")
+
+    profile_text(draw, (82, 548), f"{real_miles:,}", load_profile_font(48, True), gold)
+    profile_text(draw, (84, 606), "REAL MILES", load_profile_font(20, True), white, shadow=1)
+
+    if next_role is None:
+        next_miles = PROGRESSION_ROLES[-1][0]
+        next_name = "Maximum rank achieved"
+        miles_remaining = 0
+        progress = 1.0
+        progress_caption = f"{real_miles:,} REAL MILES  •  LEGENDARY STATUS"
+    else:
+        next_miles, _, next_name = next_role
+        miles_remaining = max(next_miles - real_miles, 0)
+        stage_span = max(next_miles - current_miles, 1)
+        progress = min(max((real_miles - current_miles) / stage_span, 0.0), 1.0)
+        progress_caption = f"{real_miles:,}  /  {next_miles:,} REAL MILES"
+
+    profile_text(draw, (365, 635), "NEXT RANK", load_profile_font(13, True), muted, shadow=0)
+    profile_text(draw, (365, 663), next_name.upper(), fit_profile_text(draw, next_name.upper(), 330, 25, True), white)
+    profile_text(draw, (918, 635), "MILES REMAINING", load_profile_font(13, True), muted, anchor="ra", shadow=0)
+    profile_text(draw, (918, 663), f"{miles_remaining:,}", load_profile_font(27, True), gold, anchor="ra")
+
+    bar_left, bar_top, bar_right, bar_bottom = 365, 708, 918, 735
+    draw.rounded_rectangle((bar_left - 4, bar_top - 4, bar_right + 4, bar_bottom + 4), 16, fill=(31, 142, 171, 90))
+    draw.rounded_rectangle((bar_left, bar_top, bar_right, bar_bottom), 13, fill=(8, 29, 43, 245), outline=(98, 197, 218, 220), width=2)
+    filled_right = bar_left + int((bar_right - bar_left) * progress)
+    if filled_right > bar_left:
+        draw.rounded_rectangle((bar_left, bar_top, max(filled_right, bar_left + 27), bar_bottom), 13, fill=(48, 219, 223, 255))
+        draw.line((bar_left + 12, bar_top + 5, max(filled_right - 10, bar_left + 14), bar_top + 5), fill=(215, 255, 251, 205), width=3)
+    profile_text(draw, (bar_left, 744), progress_caption, load_profile_font(13, True), white, shadow=1)
+    profile_text(draw, (bar_right, 744), f"{progress * 100:.0f}%", load_profile_font(19, True), gold, anchor="ra")
+
+    earned = [role for role in PROGRESSION_ROLES if role[0] <= real_miles]
+    shown = earned[-6:]
+    profile_text(draw, (69, 781), "MILESTONE ACHIEVEMENTS", load_profile_font(21, True), white)
+    profile_text(draw, (920, 785), f"{len(earned)} UNLOCKED", load_profile_font(13, True), teal, anchor="ra", shadow=0)
+    for index, (threshold, _, rank_name) in enumerate(shown):
+        centre_x = 130 + index * 143
+        earned_badge = load_profile_badge(threshold, (126, 126))
+        card.alpha_composite(earned_badge, (centre_x - earned_badge.width // 2, 805 + (126 - earned_badge.height) // 2))
+        profile_text(draw, (centre_x, 923), rank_name.upper(), fit_profile_text(draw, rank_name.upper(), 136, 13, True), white, anchor="ma", shadow=1)
+        profile_text(draw, (centre_x, 946), f"{threshold:,} MI", load_profile_font(12, True), gold, anchor="ma", shadow=0)
+
+    profile_text(draw, (1274, 50), "A&T TRANSPORT LTD", load_profile_font(28, True), white, anchor="ma")
+    profile_text(draw, (1274, 86), "PROGRESSION RANKS", load_profile_font(19, True), ice, anchor="ma", shadow=1)
+    draw.line((1006, 114, 1541, 114), fill=(76, 195, 219, 190), width=2)
+    for index, (threshold, _, rank_name) in enumerate(PROGRESSION_ROLES):
+        column, row = index % 5, index // 5
+        left, top = 992 + column * 111, 132 + row * 156
+        centre_x = left + 50
+        is_current = threshold == current_miles
+        is_earned = threshold <= real_miles
+        if is_current:
+            draw.rounded_rectangle((left - 3, top - 4, left + 103, top + 145), 13, fill=(15, 94, 121, 125), outline=(93, 231, 239, 240), width=2)
+        ladder_badge = load_profile_badge(threshold, (99, 112))
+        if not is_earned:
+            ladder_badge = Image.alpha_composite(ladder_badge, Image.new("RGBA", ladder_badge.size, (2, 8, 16, 70)))
+        card.alpha_composite(ladder_badge, (centre_x - ladder_badge.width // 2, top + (112 - ladder_badge.height) // 2))
+        threshold_colour = gold if is_current else (teal if is_earned else muted)
+        draw.rounded_rectangle((centre_x - 43, top + 116, centre_x + 43, top + 140), 6, fill=(4, 21, 34, 225), outline=(49, 139, 163, 160), width=1)
+        profile_text(draw, (centre_x, top + 128), f"{threshold:,}", load_profile_font(12, True), threshold_colour, anchor="mm", shadow=1)
+
+    draw.line((1014, 914, 1535, 914), fill=(73, 180, 207, 120), width=1)
+    profile_text(draw, (1274, 933), "DRIVEN BEYOND HORIZONS", load_profile_font(13, True), ice, anchor="ma", shadow=0)
+    profile_text(draw, (1274, 955), "TOGETHER WE DRIVE  •  TOGETHER WE CONQUER", load_profile_font(10, True), muted, anchor="ma", shadow=0)
+
+    output = BytesIO()
+    card.convert("RGB").save(output, format="PNG", optimize=True, compress_level=7)
+    output.seek(0)
+    return output
+
 @bot.command(
     name="profile"
 )
@@ -3160,7 +3316,7 @@ async def driver_profile(
     try:
         avatar_bytes = await target_member.display_avatar.with_size(256).read()
         profile_png = await asyncio.to_thread(
-            render_driver_profile_png,
+            render_driver_profile_v3_png,
             avatar_bytes,
             target_member.display_name,
             trucksbook_name,
