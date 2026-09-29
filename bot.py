@@ -3,14 +3,17 @@ import re
 import asyncio
 import math
 import unicodedata
+import json
+from datetime import date, datetime, time, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import asyncpg
 import discord
 from bs4 import BeautifulSoup
-from discord.ext import commands
+from discord.ext import commands, tasks
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -67,6 +70,17 @@ HALL_OF_FAME_CHANNEL_ID = optional_snowflake_env(
 MILEAGE_CLUB_40K_CHANNEL_ID = optional_snowflake_env(
     "MILEAGE_CLUB_40K_CHANNEL_ID"
 )
+DRIVER_LEADERBOARD_CHANNEL_ID = optional_snowflake_env(
+    "DRIVER_LEADERBOARD_CHANNEL_ID"
+)
+WEEKLY_CHAMPION_ROLE_ID = optional_snowflake_env(
+    "WEEKLY_CHAMPION_ROLE_ID"
+)
+DRIVER_OF_THE_MONTH_ROLE_ID = optional_snowflake_env(
+    "DRIVER_OF_THE_MONTH_ROLE_ID"
+)
+
+UK_TIMEZONE = ZoneInfo("Europe/London")
 
 
 def first_optional_snowflake_env(*variable_names):
@@ -132,6 +146,7 @@ HALL_OF_FAME_ROLES = [
 
 PERMANENT_SYNC_LOCK = asyncio.Lock()
 LIVE_DISPLAY_LOCK = asyncio.Lock()
+LEADERBOARD_UPDATE_LOCK = asyncio.Lock()
 permanent_history_synced = False
 
 
@@ -524,6 +539,41 @@ async def setup_database():
 
             CREATE INDEX IF NOT EXISTS idx_hall_of_fame_tier
                 ON hall_of_fame(highest_tier, highest_verified_real_miles DESC);
+
+            CREATE TABLE IF NOT EXISTS leaderboard_periods (
+                period_type TEXT NOT NULL
+                    CHECK (period_type IN ('weekly', 'monthly')),
+                period_start DATE NOT NULL,
+                period_end DATE NOT NULL,
+                winner_discord_user_id BIGINT,
+                winner_trucksbook_name TEXT,
+                winner_real_miles BIGINT,
+                rankings JSONB NOT NULL DEFAULT '[]'::jsonb,
+                finalized_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (period_type, period_start),
+                CHECK (period_end > period_start)
+            );
+
+            CREATE TABLE IF NOT EXISTS competition_wins (
+                period_type TEXT NOT NULL
+                    CHECK (period_type IN ('weekly', 'monthly')),
+                period_start DATE NOT NULL,
+                discord_user_id BIGINT NOT NULL,
+                trucksbook_name TEXT NOT NULL,
+                real_miles BIGINT NOT NULL CHECK (real_miles > 0),
+                awarded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (period_type, period_start),
+                FOREIGN KEY (period_type, period_start)
+                    REFERENCES leaderboard_periods(period_type, period_start)
+                    ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_processed_jobs_leaderboard
+                ON processed_jobs(processed_at, discord_user_id)
+                WHERE LOWER(statistics) = 'real';
+
+            CREATE INDEX IF NOT EXISTS idx_competition_wins_driver
+                ON competition_wins(discord_user_id, period_type);
             """
         )
 
@@ -558,6 +608,7 @@ async def setup_database():
     print("Database tables ready.")
     print("Driver onboarding tables ready.")
     print("Permanent achievements and Hall of Fame tables ready.")
+    print("Automated driver leaderboard tables ready.")
 
 
 # --------------------------------------------------
@@ -1298,39 +1349,367 @@ async def upsert_controlled_message(purpose, channel_id, embeds):
         return False
     async with LIVE_DISPLAY_LOCK:
         async with db_pool.acquire() as connection:
-            row = await connection.fetchrow(
-                "SELECT channel_id, message_id FROM bot_controlled_messages WHERE purpose = $1;",
-                purpose,
-            )
-        message = None
-        if row and int(row["channel_id"]) == channel.id:
-            try:
-                message = await channel.fetch_message(int(row["message_id"]))
-            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            async with connection.transaction():
+                # The PostgreSQL lock also protects against overlapping Railway
+                # instances during a deployment, not only tasks in this process.
+                await connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1));",
+                    f"at-controlled-message-{purpose}",
+                )
+                row = await connection.fetchrow(
+                    "SELECT channel_id, message_id FROM bot_controlled_messages "
+                    "WHERE purpose = $1 FOR UPDATE;",
+                    purpose,
+                )
                 message = None
-        try:
-            if message is None:
-                message = await channel.send(embeds=embeds)
-            else:
-                await message.edit(content=None, embeds=embeds)
-        except (discord.Forbidden, discord.HTTPException) as error:
-            print(f"CONTROLLED MESSAGE ERROR ({purpose}): {error}")
-            return False
-        async with db_pool.acquire() as connection:
+                if row and int(row["channel_id"]) == channel.id:
+                    try:
+                        message = await channel.fetch_message(int(row["message_id"]))
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        message = None
+                try:
+                    if message is None:
+                        message = await channel.send(embeds=embeds)
+                    else:
+                        await message.edit(content=None, embeds=embeds)
+                except (discord.Forbidden, discord.HTTPException) as error:
+                    print(f"CONTROLLED MESSAGE ERROR ({purpose}): {error}")
+                    return False
+                await connection.execute(
+                    """
+                    INSERT INTO bot_controlled_messages (purpose, channel_id, message_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (purpose) DO UPDATE SET
+                        channel_id = EXCLUDED.channel_id,
+                        message_id = EXCLUDED.message_id,
+                        updated_at = NOW();
+                    """,
+                    purpose,
+                    channel.id,
+                    message.id,
+                )
+        return True
+
+
+def leaderboard_period_bounds(period_type, reference=None):
+    """Return the current UK-local period as [start, end) calendar dates."""
+    local_now = reference or datetime.now(UK_TIMEZONE)
+    local_day = local_now.date()
+    if period_type == "weekly":
+        start = local_day - timedelta(days=local_day.weekday())
+        return start, start + timedelta(days=7)
+    if period_type == "monthly":
+        start = local_day.replace(day=1)
+        if start.month == 12:
+            end = date(start.year + 1, 1, 1)
+        else:
+            end = date(start.year, start.month + 1, 1)
+        return start, end
+    raise ValueError(f"Unsupported leaderboard period: {period_type}")
+
+
+def leaderboard_period_end(period_type, period_start):
+    if period_type == "weekly":
+        return period_start + timedelta(days=7)
+    if period_start.month == 12:
+        return date(period_start.year + 1, 1, 1)
+    return date(period_start.year, period_start.month + 1, 1)
+
+
+def uk_midnight_utc(local_day):
+    return datetime.combine(local_day, time.min, UK_TIMEZONE).astimezone(timezone.utc)
+
+
+def active_driver_ids(guild):
+    """Linked leaderboard eligibility is limited to members still in A&T."""
+    if guild is None:
+        return []
+    return [member.id for member in guild.members if not member.bot]
+
+
+async def fetch_period_rankings(connection, guild, period_start, period_end):
+    member_ids = active_driver_ids(guild)
+    if not member_ids:
+        return []
+    return await connection.fetch(
+        """
+        SELECT
+            jobs.discord_user_id,
+            COALESCE(links.trucksbook_name, MAX(jobs.trucksbook_name))
+                AS trucksbook_name,
+            SUM(jobs.accepted_distance)::BIGINT AS real_miles,
+            MIN(jobs.processed_at) AS first_job_at
+        FROM processed_jobs AS jobs
+        LEFT JOIN driver_links AS links
+            ON links.discord_user_id = jobs.discord_user_id
+        WHERE LOWER(jobs.statistics) = 'real'
+          AND jobs.accepted_distance > 0
+          AND jobs.processed_at >= $1
+          AND jobs.processed_at < $2
+          AND jobs.discord_user_id = ANY($3::BIGINT[])
+        GROUP BY jobs.discord_user_id, links.trucksbook_name
+        HAVING SUM(jobs.accepted_distance) > 0
+        ORDER BY real_miles DESC, first_job_at ASC, jobs.discord_user_id ASC;
+        """,
+        uk_midnight_utc(period_start),
+        uk_midnight_utc(period_end),
+        member_ids,
+    )
+
+
+async def finalize_leaderboard_period(guild, period_type, period_start):
+    """Persist one completed period exactly once and permanently record its win."""
+    period_end = leaderboard_period_end(period_type, period_start)
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtext($1));",
+                f"at-leaderboard-{period_type}-{period_start.isoformat()}",
+            )
+            exists = await connection.fetchval(
+                """
+                SELECT TRUE FROM leaderboard_periods
+                WHERE period_type = $1 AND period_start = $2;
+                """,
+                period_type,
+                period_start,
+            )
+            if exists:
+                return False
+
+            rows = await fetch_period_rankings(
+                connection, guild, period_start, period_end
+            )
+            saved_rankings = [
+                {
+                    "rank": index,
+                    "discord_user_id": int(row["discord_user_id"]),
+                    "trucksbook_name": str(row["trucksbook_name"]),
+                    "real_miles": int(row["real_miles"]),
+                }
+                for index, row in enumerate(rows, start=1)
+            ]
+            winner = rows[0] if rows else None
             await connection.execute(
                 """
-                INSERT INTO bot_controlled_messages (purpose, channel_id, message_id)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (purpose) DO UPDATE SET
-                    channel_id = EXCLUDED.channel_id,
-                    message_id = EXCLUDED.message_id,
-                    updated_at = NOW();
+                INSERT INTO leaderboard_periods (
+                    period_type, period_start, period_end,
+                    winner_discord_user_id, winner_trucksbook_name,
+                    winner_real_miles, rankings
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7::JSONB)
+                ON CONFLICT (period_type, period_start) DO NOTHING;
                 """,
-                purpose,
-                channel.id,
-                message.id,
+                period_type,
+                period_start,
+                period_end,
+                int(winner["discord_user_id"]) if winner else None,
+                str(winner["trucksbook_name"]) if winner else None,
+                int(winner["real_miles"]) if winner else None,
+                json.dumps(saved_rankings),
             )
-        return True
+            if winner:
+                await connection.execute(
+                    """
+                    INSERT INTO competition_wins (
+                        period_type, period_start, discord_user_id,
+                        trucksbook_name, real_miles
+                    )
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (period_type, period_start) DO NOTHING;
+                    """,
+                    period_type,
+                    period_start,
+                    int(winner["discord_user_id"]),
+                    str(winner["trucksbook_name"]),
+                    int(winner["real_miles"]),
+                )
+    print(
+        f"LEADERBOARD: Finalized {period_type} period "
+        f"{period_start} to {period_end}."
+    )
+    return True
+
+
+async def finalize_completed_leaderboard_periods(guild):
+    """Catch up missed rollovers; first deployment starts with the last period."""
+    if db_pool is None or guild is None:
+        return
+    for period_type in ("weekly", "monthly"):
+        current_start, _ = leaderboard_period_bounds(period_type)
+        async with db_pool.acquire() as connection:
+            last_end = await connection.fetchval(
+                """
+                SELECT period_end FROM leaderboard_periods
+                WHERE period_type = $1
+                ORDER BY period_start DESC LIMIT 1;
+                """,
+                period_type,
+            )
+        if last_end is None:
+            if period_type == "weekly":
+                next_start = current_start - timedelta(days=7)
+            else:
+                previous_day = current_start - timedelta(days=1)
+                next_start = previous_day.replace(day=1)
+        else:
+            next_start = last_end
+
+        while next_start < current_start:
+            await finalize_leaderboard_period(guild, period_type, next_start)
+            next_start = leaderboard_period_end(period_type, next_start)
+
+
+async def sync_competition_role(guild, period_type, role_id):
+    if not role_id or guild is None or db_pool is None:
+        return
+    role = guild.get_role(role_id)
+    if role is None:
+        print(f"LEADERBOARD ROLE ERROR: Role {role_id} was not found.")
+        return
+    async with db_pool.acquire() as connection:
+        winner_id = await connection.fetchval(
+            """
+            SELECT winner_discord_user_id
+            FROM leaderboard_periods
+            WHERE period_type = $1
+            ORDER BY period_start DESC
+            LIMIT 1;
+            """,
+            period_type,
+        )
+    winner = guild.get_member(int(winner_id)) if winner_id else None
+    remove_from = [member for member in role.members if member != winner]
+    for member in remove_from:
+        try:
+            await member.remove_roles(
+                role, reason=f"A&T {period_type} champion rollover"
+            )
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"LEADERBOARD ROLE REMOVE ERROR ({member.id}): {error}")
+    if winner and role not in winner.roles:
+        try:
+            await winner.add_roles(
+                role, reason=f"A&T {period_type} champion"
+            )
+        except (discord.Forbidden, discord.HTTPException) as error:
+            print(f"LEADERBOARD ROLE ADD ERROR ({winner.id}): {error}")
+
+
+def leaderboard_lines(rows, guild, limit, mark_former=False):
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines = []
+    for position, row in enumerate(rows[:limit], start=1):
+        user_id = int(row["discord_user_id"])
+        member = guild.get_member(user_id) if guild else None
+        if member:
+            label = member.mention
+        else:
+            safe_name = discord.utils.escape_markdown(str(row["trucksbook_name"]))
+            label = f"**{safe_name}**"
+            if mark_former:
+                label += " *(Former Driver)*"
+        prefix = medals.get(position, f"`{position:>2}.`")
+        lines.append(
+            f"{prefix} {label} — **{int(row['real_miles']):,} mi**"
+        )
+    return "\n".join(lines) if lines else "*No qualifying Real miles recorded yet.*"
+
+
+async def refresh_driver_leaderboard(guild=None):
+    if DRIVER_LEADERBOARD_CHANNEL_ID is None or db_pool is None:
+        return False
+    guild = guild or bot.get_guild(GUILD_ID)
+    if guild is None:
+        return False
+    weekly_start, weekly_end = leaderboard_period_bounds("weekly")
+    monthly_start, monthly_end = leaderboard_period_bounds("monthly")
+    async with db_pool.acquire() as connection:
+        weekly_rows = await fetch_period_rankings(
+            connection, guild, weekly_start, weekly_end
+        )
+        monthly_rows = await fetch_period_rankings(
+            connection, guild, monthly_start, monthly_end
+        )
+        all_time_rows = await connection.fetch(
+            """
+            SELECT discord_user_id, trucksbook_name, real_miles
+            FROM driver_progress
+            WHERE real_miles > 0
+            ORDER BY real_miles DESC, updated_at ASC, discord_user_id ASC
+            LIMIT 10;
+            """
+        )
+    next_week = int(uk_midnight_utc(weekly_end).timestamp())
+    next_month = int(uk_midnight_utc(monthly_end).timestamp())
+    embed = discord.Embed(
+        title="🚛 A&T TRANSPORT LTD — DRIVER LEADERBOARD",
+        description=(
+            "Verified **Real Miles** only. Weekly and monthly rankings show "
+            "active A&T drivers; all-time records preserve former drivers."
+        ),
+        colour=discord.Colour.from_rgb(31, 110, 150),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(
+        name="📅 Top 5 Weekly",
+        value=(
+            leaderboard_lines(weekly_rows, guild, 5)
+            + f"\n\nResets <t:{next_week}:R>"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🗓️ Top 5 Monthly",
+        value=(
+            leaderboard_lines(monthly_rows, guild, 5)
+            + f"\n\nResets <t:{next_month}:R>"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🏛️ Top 10 All-Time",
+        value=leaderboard_lines(all_time_rows, guild, 10, mark_former=True),
+        inline=False,
+    )
+    embed.set_footer(
+        text=(
+            "A&T Transport LTD • UK time • Ties: earliest qualifying job "
+            "then Discord ID • Automatically updated"
+        )
+    )
+    return await upsert_controlled_message(
+        "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, [embed]
+    )
+
+
+async def maintain_driver_leaderboard():
+    """Finalize periods, rotate holder roles, and refresh the one live display."""
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None or db_pool is None:
+        return
+    async with LEADERBOARD_UPDATE_LOCK:
+        await finalize_completed_leaderboard_periods(guild)
+        await sync_competition_role(
+            guild, "weekly", WEEKLY_CHAMPION_ROLE_ID
+        )
+        await sync_competition_role(
+            guild, "monthly", DRIVER_OF_THE_MONTH_ROLE_ID
+        )
+        await refresh_driver_leaderboard(guild)
+
+
+@tasks.loop(minutes=1)
+async def leaderboard_rollover_task():
+    try:
+        await maintain_driver_leaderboard()
+    except Exception as error:
+        print(f"LEADERBOARD MAINTENANCE ERROR: {error}")
+
+
+@leaderboard_rollover_task.before_loop
+async def before_leaderboard_rollover_task():
+    await bot.wait_until_ready()
 
 
 async def refresh_hall_of_fame_display():
@@ -1933,6 +2312,13 @@ async def on_ready():
 
         if db_pool is not None:
             await silent_historical_permanent_sync(guild)
+            try:
+                await maintain_driver_leaderboard()
+            except Exception as error:
+                print(f"LEADERBOARD STARTUP ERROR: {error}")
+
+            if not leaderboard_rollover_task.is_running():
+                leaderboard_rollover_task.start()
 
         check_onboarding_configuration(
             guild
@@ -1982,6 +2368,10 @@ async def on_member_join(member):
         )
     except Exception as error:
         print(f"RETURNING DRIVER SYNC ERROR: {member.id}: {error}")
+    try:
+        await refresh_driver_leaderboard(member.guild)
+    except Exception as error:
+        print(f"LEADERBOARD MEMBER-JOIN REFRESH ERROR: {error}")
 
 
 @bot.event
@@ -2000,6 +2390,10 @@ async def on_member_remove(member):
         )
     if result != "UPDATE 0":
         await refresh_hall_of_fame_display()
+    try:
+        await refresh_driver_leaderboard(member.guild)
+    except Exception as error:
+        print(f"LEADERBOARD MEMBER-REMOVE REFRESH ERROR: {error}")
 
 
 # --------------------------------------------------
@@ -2420,6 +2814,14 @@ async def on_message(message):
                         "MILESTONE ANNOUNCEMENT ERROR: Mileage remains "
                         f"saved; unexpected failure: {error}"
                     )
+
+            try:
+                await refresh_driver_leaderboard(guild)
+            except Exception as error:
+                print(
+                    "LEADERBOARD REFRESH ERROR: Mileage remains saved; "
+                    f"{error}"
+                )
 
         print("--------------------------------")
 
@@ -2885,6 +3287,11 @@ async def mileage_apply(ctx, confirmation: str = ""):
     achievements_sent, achievement_failures = (
         await announce_pending_repair_achievements(ctx.guild)
     )
+
+    try:
+        await refresh_driver_leaderboard(ctx.guild)
+    except Exception as error:
+        print(f"LEADERBOARD REPAIR REFRESH ERROR: {error}")
 
     await ctx.send(
         "✅ **Mileage repair complete.**\n"
@@ -5711,3 +6118,4 @@ if not TOKEN:
     )
 
 bot.run(TOKEN)
+
