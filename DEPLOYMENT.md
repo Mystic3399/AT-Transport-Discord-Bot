@@ -11,12 +11,20 @@ assets/
 │   ├── manifest.json
 │   └── [22 existing progression badge PNGs]
 └── profile/
-    └── driver-profile-template.png
+    ├── driver-profile-template.png
+    ├── icons/
+    │   └── at-profile-icons.png
+    └── prestige/
+        └── at-prestige-insignias.png
 ```
 
 The renderer resolves both asset directories relative to `bot.py`, so the
 paths and lowercase filenames must remain unchanged on Railway's Linux
 filesystem.
+
+The renderer crops the icon and prestige atlases at runtime. They are local,
+transparent PNGs, so no emoji font, network image host or platform-specific
+glyph support is required.
 
 ## Python dependency
 
