@@ -423,7 +423,16 @@ def member_matches_role_category(member, configuration):
 async def sync_member_role_category_dividers(member):
     """Synchronise all decorative category roles for one guild member."""
     if member.guild.id != GUILD_ID:
-        return {"added": 0, "removed": 0, "missing": []}
+        return {"added": 0, "removed": 0, "missing": [], "skipped": False}
+
+    # Discord never permits a bot to modify the server owner or its own member
+    # record. Skipping them avoids harmless 403s during the startup repair.
+    guild_bot = member.guild.me
+    if member.id in {member.guild.owner_id, getattr(bot.user, "id", None)}:
+        return {"added": 0, "removed": 0, "missing": [], "skipped": True}
+    if guild_bot is None or not guild_bot.guild_permissions.manage_roles:
+        print("ROLE DIVIDER WARNING: Bot requires Manage Roles permission.")
+        return {"added": 0, "removed": 0, "missing": [], "skipped": True}
 
     roles_by_name = {
         normalise_role_name(role.name): role for role in member.guild.roles
@@ -445,19 +454,39 @@ async def sync_member_role_category_dividers(member):
         elif not should_have and has_divider:
             remove_roles.append(divider)
 
-    if remove_roles:
-        await member.remove_roles(
-            *remove_roles, reason="A&T role category divider sync"
+    changed_roles = add_roles + remove_roles
+    unmanageable = [
+        role for role in changed_roles if role >= guild_bot.top_role
+    ]
+    if unmanageable:
+        print(
+            "ROLE DIVIDER WARNING: Move the A&T bot role above divider "
+            "role(s): " + ", ".join(role.name for role in unmanageable)
         )
-    if add_roles:
-        await member.add_roles(
-            *add_roles, reason="A&T role category divider sync"
+        return {"added": 0, "removed": 0, "missing": [], "skipped": True}
+
+    # Apply additions and removals together. This is one Discord request per
+    # member instead of one request per changed role, preventing startup 429s.
+    if changed_roles:
+        remove_ids = {role.id for role in remove_roles}
+        updated_roles = [
+            role for role in member.roles
+            if not role.is_default() and role.id not in remove_ids
+        ]
+        updated_role_ids = {role.id for role in updated_roles}
+        updated_roles.extend(
+            role for role in add_roles if role.id not in updated_role_ids
+        )
+        await member.edit(
+            roles=updated_roles,
+            reason="A&T role category divider sync",
         )
 
     return {
         "added": len(add_roles),
         "removed": len(remove_roles),
         "missing": missing,
+        "skipped": False,
     }
 
 
@@ -467,6 +496,7 @@ async def sync_all_role_category_dividers(guild):
     removed = 0
     missing = set()
     failures = 0
+    skipped = 0
 
     for member in guild.members:
         try:
@@ -474,13 +504,15 @@ async def sync_all_role_category_dividers(guild):
             added += result["added"]
             removed += result["removed"]
             missing.update(result["missing"])
+            skipped += int(result["skipped"])
         except (discord.Forbidden, discord.HTTPException) as error:
             failures += 1
             print(f"ROLE DIVIDER SYNC ERROR: {member.id}: {error}")
 
     print(
         "Role category divider sync complete: "
-        f"{added} added, {removed} removed, {failures} failed."
+        f"{added} added, {removed} removed, {skipped} protected account(s) "
+        f"skipped, {failures} failed."
     )
     if missing:
         print(
