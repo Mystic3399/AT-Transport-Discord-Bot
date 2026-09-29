@@ -340,6 +340,12 @@ PROGRESSION_BADGES = {
 }
 
 BADGE_DIRECTORY = Path(__file__).resolve().parent / "assets" / "badges"
+PROFILE_TEMPLATE_PATH = (
+    Path(__file__).resolve().parent
+    / "assets"
+    / "profile"
+    / "driver-profile-template.png"
+)
 
 
 # --------------------------------------------------
@@ -423,16 +429,7 @@ def member_matches_role_category(member, configuration):
 async def sync_member_role_category_dividers(member):
     """Synchronise all decorative category roles for one guild member."""
     if member.guild.id != GUILD_ID:
-        return {"added": 0, "removed": 0, "missing": [], "skipped": False}
-
-    # Discord never permits a bot to modify the server owner or its own member
-    # record. Skipping them avoids harmless 403s during the startup repair.
-    guild_bot = member.guild.me
-    if member.id in {member.guild.owner_id, getattr(bot.user, "id", None)}:
-        return {"added": 0, "removed": 0, "missing": [], "skipped": True}
-    if guild_bot is None or not guild_bot.guild_permissions.manage_roles:
-        print("ROLE DIVIDER WARNING: Bot requires Manage Roles permission.")
-        return {"added": 0, "removed": 0, "missing": [], "skipped": True}
+        return {"added": 0, "removed": 0, "missing": []}
 
     roles_by_name = {
         normalise_role_name(role.name): role for role in member.guild.roles
@@ -454,39 +451,19 @@ async def sync_member_role_category_dividers(member):
         elif not should_have and has_divider:
             remove_roles.append(divider)
 
-    changed_roles = add_roles + remove_roles
-    unmanageable = [
-        role for role in changed_roles if role >= guild_bot.top_role
-    ]
-    if unmanageable:
-        print(
-            "ROLE DIVIDER WARNING: Move the A&T bot role above divider "
-            "role(s): " + ", ".join(role.name for role in unmanageable)
+    if remove_roles:
+        await member.remove_roles(
+            *remove_roles, reason="A&T role category divider sync"
         )
-        return {"added": 0, "removed": 0, "missing": [], "skipped": True}
-
-    # Apply additions and removals together. This is one Discord request per
-    # member instead of one request per changed role, preventing startup 429s.
-    if changed_roles:
-        remove_ids = {role.id for role in remove_roles}
-        updated_roles = [
-            role for role in member.roles
-            if not role.is_default() and role.id not in remove_ids
-        ]
-        updated_role_ids = {role.id for role in updated_roles}
-        updated_roles.extend(
-            role for role in add_roles if role.id not in updated_role_ids
-        )
-        await member.edit(
-            roles=updated_roles,
-            reason="A&T role category divider sync",
+    if add_roles:
+        await member.add_roles(
+            *add_roles, reason="A&T role category divider sync"
         )
 
     return {
         "added": len(add_roles),
         "removed": len(remove_roles),
         "missing": missing,
-        "skipped": False,
     }
 
 
@@ -496,7 +473,6 @@ async def sync_all_role_category_dividers(guild):
     removed = 0
     missing = set()
     failures = 0
-    skipped = 0
 
     for member in guild.members:
         try:
@@ -504,15 +480,13 @@ async def sync_all_role_category_dividers(guild):
             added += result["added"]
             removed += result["removed"]
             missing.update(result["missing"])
-            skipped += int(result["skipped"])
         except (discord.Forbidden, discord.HTTPException) as error:
             failures += 1
             print(f"ROLE DIVIDER SYNC ERROR: {member.id}: {error}")
 
     print(
         "Role category divider sync complete: "
-        f"{added} added, {removed} removed, {skipped} protected account(s) "
-        f"skipped, {failures} failed."
+        f"{added} added, {removed} removed, {failures} failed."
     )
     if missing:
         print(
@@ -3959,8 +3933,10 @@ async def cancel_verification_record(
 # A&T DRIVER PROFILE
 # --------------------------------------------------
 
-def build_driver_profile_embed(target_member, trucksbook_name, real_miles):
+def build_driver_profile_embed(target_member, profile):
     """Build the original read-only embed used as the safe fallback."""
+    trucksbook_name = profile["trucksbook_name"]
+    real_miles = profile["real_miles"]
     current_rank_name = get_progression_role(real_miles)[2]
     next_role = get_next_progression_role(real_miles)
     embed = discord.Embed(
@@ -3973,6 +3949,21 @@ def build_driver_profile_embed(target_member, trucksbook_name, real_miles):
     embed.add_field(name="TrucksBook Driver", value=f"`{trucksbook_name}`", inline=True)
     embed.add_field(name="Current Progression Rank", value=f"🏅 **{current_rank_name}**", inline=False)
     embed.add_field(name="Real Miles", value=f"🚛 **{real_miles:,}**", inline=True)
+    embed.add_field(
+        name="Verified Real Jobs",
+        value=f"**{profile['jobs_completed']:,}**",
+        inline=True,
+    )
+    embed.add_field(
+        name="Average Job",
+        value=f"**{profile['average_job_distance']:,} mi**",
+        inline=True,
+    )
+    embed.add_field(
+        name="Longest Job",
+        value=f"**{profile['longest_job_distance']:,} mi**",
+        inline=True,
+    )
 
     if next_role is None:
         bar, _ = build_progress_bar(real_miles, PROGRESSION_ROLES[-1][0])
@@ -3993,7 +3984,28 @@ def build_driver_profile_embed(target_member, trucksbook_name, real_miles):
             value=f"`{bar}` **{percentage:.0f}%**\n**{real_miles:,} / {next_required_miles:,} Real miles**",
             inline=False,
         )
-    embed.set_footer(text="A&T Transport LTD • Driven Beyond Horizons")
+    achievement_names = [
+        name for threshold, _, name in ACHIEVEMENT_ROLES
+        if threshold in profile["permanent_achievements"]
+    ]
+    embed.add_field(
+        name="Permanent Mileage Achievements",
+        value=(" • ".join(achievement_names) if achievement_names else "None earned yet"),
+        inline=False,
+    )
+    hall_value = profile["hall_of_fame_tier"] or "Not yet inducted"
+    if profile["immortal_number"] is not None:
+        hall_value += f" • Immortal #{profile['immortal_number']:03d}"
+    embed.add_field(name="Hall of Fame", value=f"**{hall_value}**", inline=True)
+    embed.add_field(
+        name="Competition Record",
+        value=(
+            f"Weekly Champion: **{profile['weekly_wins']}**\n"
+            f"Driver of the Month: **{profile['monthly_wins']}**"
+        ),
+        inline=True,
+    )
+    embed.set_footer(text="A&T Transport LTD • Verified Real data • Driven Beyond Horizons")
     return embed
 
 
@@ -4097,7 +4109,15 @@ def profile_panel(draw, box, radius=24, outline=(83, 184, 212, 115)):
 
 
 def build_profile_backdrop(width, height):
-    """Create a dependency-free cinematic Nordic road and aurora scene."""
+    """Load permanent profile art, with a self-contained cinematic fallback."""
+    if PROFILE_TEMPLATE_PATH.is_file():
+        with Image.open(PROFILE_TEMPLATE_PATH) as template_source:
+            return ImageOps.fit(
+                template_source.convert("RGBA"),
+                (width, height),
+                method=Image.Resampling.LANCZOS,
+            )
+
     backdrop = Image.new("RGBA", (width, height), (2, 8, 18, 255))
     draw = ImageDraw.Draw(backdrop, "RGBA")
 
@@ -4361,14 +4381,16 @@ def render_driver_profile_png(avatar_bytes, discord_name, trucksbook_name, real_
     return output
 
 
-def render_driver_profile_v5_png(avatar_bytes, discord_name, trucksbook_name, real_miles):
+def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
     """Render the final cinematic profile from read-only driver values."""
     if Image is None:
         raise RuntimeError("Pillow is not installed")
 
+    trucksbook_name = profile["trucksbook_name"]
+    real_miles = profile["real_miles"]
     current_miles, _, current_rank_name = get_progression_role(real_miles)
     next_role = get_next_progression_role(real_miles)
-    width, height = 1600, 1000
+    width, height = 1600, 1200
     card = build_profile_backdrop(width, height)
     # Preserve the full-canvas scenery; only a light vignette is applied here.
     vignette = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -4390,15 +4412,15 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, trucksbook_name, re
     gold = (238, 190, 82, 255)
     teal = (56, 226, 210, 255)
 
-    draw.rounded_rectangle((14, 14, 1586, 986), 28, outline=(55, 177, 219, 215), width=3)
-    draw.rounded_rectangle((22, 22, 1578, 978), 23, outline=(218, 175, 77, 115), width=1)
+    draw.rounded_rectangle((14, 14, 1586, 1186), 28, outline=(55, 177, 219, 215), width=3)
+    draw.rounded_rectangle((22, 22, 1578, 1178), 23, outline=(218, 175, 77, 115), width=1)
     # Frosted glass is deliberately local, leaving the aurora and mountain
     # skyline visible across the poster instead of recreating a dashboard.
     draw.rounded_rectangle((43, 39, 947, 139), 20, fill=(2, 10, 20, 102), outline=(83, 195, 218, 95), width=1)
     draw.rounded_rectangle((43, 163, 358, 677), 24, fill=(2, 10, 20, 118), outline=(83, 195, 218, 100), width=1)
     draw.rounded_rectangle((376, 610, 947, 758), 24, fill=(2, 10, 20, 112), outline=(83, 195, 218, 100), width=1)
     draw.rounded_rectangle((43, 770, 947, 960), 22, fill=(2, 10, 20, 132), outline=(83, 195, 218, 105), width=1)
-    draw.rounded_rectangle((974, 24, 1574, 976), 24, fill=(1, 9, 18, 128), outline=(41, 142, 178, 145), width=2)
+    draw.rounded_rectangle((974, 24, 1574, 1176), 24, fill=(1, 9, 18, 128), outline=(41, 142, 178, 145), width=2)
 
     profile_text(draw, (72, 58), "A&T TRANSPORT LTD", load_profile_font(32, True), white)
     profile_text(draw, (73, 101), "DRIVEN BEYOND HORIZONS  •  DRIVER PROFILE", load_profile_font(14, True), ice, shadow=0)
@@ -4523,14 +4545,125 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, trucksbook_name, re
         draw.rounded_rectangle((centre_x - 43, top + 116, centre_x + 43, top + 140), 6, fill=(4, 21, 34, 178), outline=(49, 139, 163, 145), width=1)
         profile_text(draw, (centre_x, top + 128), f"{threshold:,}", load_profile_font(12, True), threshold_colour, anchor="mm", shadow=1)
 
+    # Permanent records live beneath the complete badge ladder. Convoy UI is
+    # deliberately absent until that project has a production data source.
     draw.line((1014, 914, 1535, 914), fill=(73, 180, 207, 120), width=1)
-    profile_text(draw, (1274, 935), "DRIVEN BEYOND HORIZONS", load_profile_font(13, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (1274, 957), "TOGETHER WE DRIVE  •  TOGETHER WE CONQUER", load_profile_font(10, True), muted, anchor="ma", shadow=0)
+    profile_text(draw, (1014, 943), "PERMANENT MILEAGE ACHIEVEMENTS", load_profile_font(14, True), white)
+    earned_achievements = set(profile["permanent_achievements"])
+    achievement_labels = []
+    for threshold, _, _ in ACHIEVEMENT_ROLES:
+        marker = "◆" if threshold in earned_achievements else "◇"
+        short_label = "1M" if threshold == 1000000 else f"{threshold // 1000}K"
+        achievement_labels.append(f"{marker} {short_label}")
+    profile_text(draw, (1014, 978), "   ".join(achievement_labels), load_profile_font(15, True), teal, shadow=0)
+
+    hall_text = profile["hall_of_fame_tier"] or "NOT YET INDUCTED"
+    if profile["immortal_number"] is not None:
+        hall_text += f"  •  IMMORTAL #{profile['immortal_number']:03d}"
+    profile_text(draw, (1014, 1025), "HALL OF FAME", load_profile_font(12, True), muted, shadow=0)
+    profile_text(draw, (1014, 1053), hall_text.upper(), fit_profile_text(draw, hall_text.upper(), 525, 22, True), gold)
+    profile_text(draw, (1274, 1126), "DRIVEN BEYOND HORIZONS", load_profile_font(13, True), ice, anchor="ma", shadow=0)
+    profile_text(draw, (1274, 1150), "TOGETHER WE DRIVE  •  TOGETHER WE CONQUER", load_profile_font(10, True), muted, anchor="ma", shadow=0)
+
+    # Career statistics are a single dynamic overlay over the permanent art.
+    draw.rounded_rectangle((43, 980, 947, 1170), 22, fill=(2, 10, 20, 152), outline=(83, 195, 218, 120), width=1)
+    profile_text(draw, (69, 1003), "VERIFIED CAREER RECORD", load_profile_font(19, True), white)
+    stat_items = (
+        ("REAL JOBS", f"{profile['jobs_completed']:,}"),
+        ("AVERAGE JOB", f"{profile['average_job_distance']:,} MI"),
+        ("LONGEST JOB", f"{profile['longest_job_distance']:,} MI"),
+        ("WEEKLY WINS", f"{profile['weekly_wins']:,}"),
+        ("MONTHLY WINS", f"{profile['monthly_wins']:,}"),
+    )
+    for index, (label, value) in enumerate(stat_items):
+        centre_x = 130 + index * 178
+        profile_text(draw, (centre_x, 1064), value, fit_profile_text(draw, value, 155, 27, True), gold, anchor="ma")
+        profile_text(draw, (centre_x, 1101), label, load_profile_font(11, True), ice, anchor="ma", shadow=0)
+    profile_text(draw, (69, 1145), "All figures use verified TrucksBook Real jobs only", load_profile_font(11, True), muted, shadow=0)
 
     output = BytesIO()
     card.convert("RGB").save(output, format="PNG", optimize=True, compress_level=7)
     output.seek(0)
     return output
+
+
+async def fetch_driver_profile_stats(connection, discord_user_id):
+    """Read one driver's profile statistics without locking or mutating data."""
+    row = await connection.fetchrow(
+        """
+        SELECT
+            links.trucksbook_name,
+            COALESCE(progress.real_miles, 0)::BIGINT AS real_miles,
+            COALESCE(jobs.jobs_completed, 0)::BIGINT AS jobs_completed,
+            COALESCE(jobs.average_job_distance, 0)::BIGINT
+                AS average_job_distance,
+            COALESCE(jobs.longest_job_distance, 0)::BIGINT
+                AS longest_job_distance,
+            COALESCE(achievements.earned_thresholds, ARRAY[]::BIGINT[])
+                AS permanent_achievements,
+            fame.highest_tier AS hall_of_fame_tier,
+            fame.immortal_number,
+            COALESCE(wins.weekly_wins, 0)::BIGINT AS weekly_wins,
+            COALESCE(wins.monthly_wins, 0)::BIGINT AS monthly_wins
+        FROM driver_links AS links
+        LEFT JOIN driver_progress AS progress
+            ON progress.discord_user_id = links.discord_user_id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*)::BIGINT AS jobs_completed,
+                ROUND(AVG(accepted_distance))::BIGINT
+                    AS average_job_distance,
+                MAX(accepted_distance)::BIGINT AS longest_job_distance
+            FROM processed_jobs
+            WHERE discord_user_id = links.discord_user_id
+              AND LOWER(statistics) = 'real'
+              AND accepted_distance > 0
+        ) AS jobs ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT ARRAY_AGG(achievement_miles ORDER BY achievement_miles)
+                AS earned_thresholds
+            FROM permanent_achievements
+            WHERE discord_user_id = links.discord_user_id
+        ) AS achievements ON TRUE
+        LEFT JOIN hall_of_fame AS fame
+            ON fame.discord_user_id = links.discord_user_id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) FILTER (WHERE period_type = 'weekly')::BIGINT
+                    AS weekly_wins,
+                COUNT(*) FILTER (WHERE period_type = 'monthly')::BIGINT
+                    AS monthly_wins
+            FROM competition_wins
+            WHERE discord_user_id = links.discord_user_id
+        ) AS wins ON TRUE
+        WHERE links.discord_user_id = $1;
+        """,
+        discord_user_id,
+    )
+    if row is None:
+        return None
+    return {
+        "trucksbook_name": str(row["trucksbook_name"]),
+        "real_miles": max(int(row["real_miles"] or 0), 0),
+        "jobs_completed": max(int(row["jobs_completed"] or 0), 0),
+        "average_job_distance": max(
+            int(row["average_job_distance"] or 0), 0
+        ),
+        "longest_job_distance": max(
+            int(row["longest_job_distance"] or 0), 0
+        ),
+        "permanent_achievements": tuple(
+            int(value) for value in (row["permanent_achievements"] or ())
+        ),
+        "hall_of_fame_tier": row["hall_of_fame_tier"],
+        "immortal_number": (
+            int(row["immortal_number"])
+            if row["immortal_number"] is not None else None
+        ),
+        "weekly_wins": max(int(row["weekly_wins"] or 0), 0),
+        "monthly_wins": max(int(row["monthly_wins"] or 0), 0),
+    }
+
 
 @bot.command(
     name="profile"
@@ -4568,20 +4701,11 @@ async def driver_profile(
 
     try:
         async with db_pool.acquire() as connection:
-            profile = await connection.fetchrow(
-                """
-                SELECT
-                    links.trucksbook_name,
-                    COALESCE(progress.real_miles, 0)
-                        AS real_miles
-                FROM driver_links AS links
-                LEFT JOIN driver_progress AS progress
-                    ON progress.discord_user_id =
-                        links.discord_user_id
-                WHERE links.discord_user_id = $1;
-                """,
-                target_member.id,
-            )
+            async with connection.transaction(readonly=True):
+                profile = await fetch_driver_profile_stats(
+                    connection,
+                    target_member.id,
+                )
 
     except Exception as error:
         print(
@@ -4620,18 +4744,9 @@ async def driver_profile(
         )
         return
 
-    trucksbook_name = profile[
-        "trucksbook_name"
-    ]
-    real_miles = max(
-        int(profile["real_miles"]),
-        0,
-    )
-
     fallback_embed = build_driver_profile_embed(
         target_member,
-        trucksbook_name,
-        real_miles,
+        profile,
     )
 
     try:
@@ -4640,8 +4755,7 @@ async def driver_profile(
             render_driver_profile_v5_png,
             avatar_bytes,
             target_member.display_name,
-            trucksbook_name,
-            real_miles,
+            profile,
         )
         await ctx.send(
             file=discord.File(
@@ -6322,4 +6436,3 @@ if not TOKEN:
     )
 
 bot.run(TOKEN)
-
