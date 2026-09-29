@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import math
+import sys
 import unicodedata
 import json
 from datetime import date, datetime, time, timedelta, timezone
@@ -4106,12 +4107,26 @@ def profile_text(draw, position, text, font, fill, anchor=None, shadow=2):
 
 
 def profile_composite(base, overlay, position=(0, 0)):
-    """Composite without replacing Pillow's image core under an active draw."""
-    base.paste(overlay, position, overlay)
-    active_draw = getattr(base, "_profile_draw", None)
-    if active_draw is not None:
-        active_draw._image = base
-        active_draw.im = base.im
+    """Composite one RGBA layer while preserving the active Pillow canvas."""
+    base.alpha_composite(overlay, dest=position)
+
+
+class ProfileCanvasDraw:
+    """Use a fresh ImageDraw handle per operation around RGBA composites.
+
+    Pillow can invalidate a long-lived drawing handle after an in-place image
+    composite.  Reacquiring it prevents intermittent missing or clipped text
+    and badges across prestige tiers while keeping the renderer deterministic.
+    """
+
+    def __init__(self, image):
+        self.image = image
+
+    def __getattr__(self, method_name):
+        def draw_operation(*args, **kwargs):
+            operation = getattr(ImageDraw.Draw(self.image, "RGBA"), method_name)
+            return operation(*args, **kwargs)
+        return draw_operation
 
 
 def profile_panel(draw, box, radius=24, outline=(83, 184, 212, 115)):
@@ -4141,6 +4156,17 @@ def profile_prestige_theme(real_miles, hall_of_fame_tier=None):
     if real_miles >= 40000:
         return {"name": "40K MILEAGE CLUB", "index": 1, "recognition": "40K MILEAGE CLUB", "accent": (226, 184, 91, 255), "secondary": (79, 215, 235, 255), "glow": (34, 173, 204, 52), "frame": (184, 165, 104, 205), "aurora": (28, 166, 200, 36), "runes": 1}
     return {"name": "STANDARD", "index": 0, "recognition": "STANDARD A&T DRIVER RECORD", "accent": (181, 205, 214, 255), "secondary": (80, 212, 235, 255), "glow": (32, 160, 194, 40), "frame": (67, 177, 214, 195), "aurora": (24, 151, 188, 30), "runes": 1}
+
+
+PROFILE_PREVIEW_STATES = (
+    ("01-standard", 25000, None, None),
+    ("02-40k-mileage-club", 57096, None, None),
+    ("03-centurion", 125000, None, None),
+    ("04-veteran", 275000, "Veteran", None),
+    ("05-elite", 525000, "Elite", None),
+    ("06-horizon-elite", 775000, "Elite", None),
+    ("07-immortal", 1000000, "Immortal", 999),
+)
 
 
 def load_profile_atlas_cell(path, columns, rows, index, maximum_size):
@@ -4487,8 +4513,7 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
             width=8,
         )
     profile_composite(card, prestige_wash.filter(ImageFilter.GaussianBlur(70)))
-    draw = ImageDraw.Draw(card, "RGBA")
-    card._profile_draw = draw
+    draw = ProfileCanvasDraw(card)
 
     white = (238, 246, 249, 255)
     ice = (91, 218, 242, 255)
@@ -4502,6 +4527,30 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
         inset = 31 + rune_index * 7
         draw.line((inset, 165, inset, 1035), fill=(*teal[:3], 70 + rune_index * 15), width=1)
         draw.line((1600 - inset, 165, 1600 - inset, 1035), fill=(*gold[:3], 65 + rune_index * 15), width=1)
+    # Each prestige tier changes the whole card, not only its label.  The
+    # progressively denser corner rails, horizon band and Nordic diamonds are
+    # deliberately restrained so the shared A&T composition remains intact.
+    treatment_level = prestige["index"]
+    if treatment_level:
+        band_alpha = 18 + treatment_level * 7
+        draw.polygon(
+            ((24, 700), (430, 530), (1170, 530), (1576, 700),
+             (1576, 758), (1125, 588), (475, 588), (24, 758)),
+            fill=(*teal[:3], band_alpha),
+        )
+        for ornament in range(1, treatment_level + 1):
+            y = 188 + ornament * 78
+            size = 7 + ornament
+            for x, colour in ((36 + ornament * 7, teal), (1564 - ornament * 7, gold)):
+                draw.polygon(
+                    ((x, y - size), (x + size, y), (x, y + size), (x - size, y)),
+                    outline=(*colour[:3], 90 + ornament * 12),
+                )
+    if treatment_level >= 4:
+        draw.arc((7, 6, 250, 249), 183, 276, fill=(*gold[:3], 185), width=4)
+        draw.arc((1350, 6, 1593, 249), 264, 357, fill=(*teal[:3], 185), width=4)
+    if treatment_level == 6:
+        draw.rounded_rectangle((28, 28, 1572, 1172), 22, outline=(*teal[:3], 165), width=2)
     # Frosted glass is deliberately local, leaving the aurora and mountain
     # skyline visible across the poster instead of recreating a dashboard.
     draw.rounded_rectangle((43, 39, 947, 139), 20, fill=(2, 10, 20, 102), outline=(83, 195, 218, 95), width=1)
@@ -4533,11 +4582,11 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
 
     safe_discord_name = sanitise_profile_name(discord_name)
     safe_trucksbook_name = sanitise_profile_name(trucksbook_name, "UNLINKED DRIVER")
-    profile_text(draw, (200, 365), "DISCORD DRIVER", load_profile_font(13, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (200, 401), safe_discord_name, fit_profile_text(draw, safe_discord_name, 270, 38, True), white, anchor="ma")
+    profile_text(draw, (200, 362), "DISCORD DRIVER", load_profile_font(13, True), ice, anchor="ma", shadow=0)
+    profile_text(draw, (200, 405), safe_discord_name, fit_profile_text(draw, safe_discord_name, 276, 54, True), white, anchor="ma", shadow=3)
     draw.line((78, 445, 323, 445), fill=(91, 197, 214, 130), width=1)
     profile_text(draw, (200, 473), "TRUCKSBOOK DRIVER", load_profile_font(12, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (200, 504), safe_trucksbook_name, fit_profile_text(draw, safe_trucksbook_name, 270, 24, True), white, anchor="ma")
+    profile_text(draw, (200, 504), safe_trucksbook_name, fit_profile_text(draw, safe_trucksbook_name, 270, 21, True), muted, anchor="ma")
     draw.line((78, 542, 323, 542), fill=(91, 197, 214, 90), width=1)
     identity_verified = load_profile_icon("verified", (45, 45))
     profile_composite(card, identity_verified, (92, 554))
@@ -4555,15 +4604,25 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
     profile_composite(card, glow.filter(ImageFilter.GaussianBlur(44)), (399, 105))
     profile_composite(card, current_badge, (badge_x, badge_y))
     profile_text(draw, (hero_x, 151), "CURRENT A&T RANK", load_profile_font(15, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (hero_x, 493), current_rank_name.upper(), fit_profile_text(draw, current_rank_name.upper(), 535, 42, True), white, anchor="ma")
+    # A local glass ribbon protects the two hero lines from bright Aurora
+    # artwork at Discord/mobile scale without hiding the surrounding scenery.
+    draw.rounded_rectangle(
+        (390, 460, 928, 589),
+        22,
+        fill=(0, 7, 16, 178),
+        outline=(*teal[:3], 128),
+        width=1,
+    )
+    profile_text(draw, (hero_x, 505), current_rank_name.upper(), fit_profile_text(draw, current_rank_name.upper(), 510, 76, True), white, anchor="mm", shadow=3)
     mileage_headline = f"{real_miles:,} VERIFIED REAL MILES"
     profile_text(
         draw,
-        (hero_x, 548),
+        (hero_x, 558),
         mileage_headline,
-        fit_profile_text(draw, mileage_headline, 530, 48, True),
+        fit_profile_text(draw, mileage_headline, 510, 56, True),
         gold,
-        anchor="ma",
+        anchor="mm",
+        shadow=3,
     )
 
     if next_role is None:
@@ -4697,7 +4756,8 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
 
     if profile["immortal_number"] is not None:
         hall_text = "HALL OF FAME - IMMORTAL"
-        hall_subtext = f"IMMORTAL REGISTRY #{profile['immortal_number']:03d}"
+        registry_prefix = "SAMPLE IMMORTAL REGISTRY" if profile.get("is_preview") else "IMMORTAL REGISTRY"
+        hall_subtext = f"{registry_prefix} #{profile['immortal_number']:03d}"
     elif real_miles >= 500000 or (profile["hall_of_fame_tier"] or "").casefold() == "elite":
         hall_text, hall_subtext = "HALL OF FAME - ELITE", "HALF-MILLION LEGEND"
     elif real_miles >= 250000 or (profile["hall_of_fame_tier"] or "").casefold() == "veteran":
@@ -4741,10 +4801,66 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
             profile_text(draw, (centre_x, 1115), ribbon, fit_profile_text(draw, ribbon, 140, 9, True), muted, anchor="ma", shadow=0)
     profile_text(draw, (69, 1152), "VERIFIED TRUCKSBOOK REAL JOBS ONLY", load_profile_font(11, True), muted, shadow=0)
 
+    if profile.get("is_preview"):
+        draw.rounded_rectangle((504, 1162, 1096, 1192), 10, fill=(1, 8, 17, 225), outline=(*gold[:3], 205), width=1)
+        profile_text(
+            draw,
+            (800, 1177),
+            "SYNTHETIC PREVIEW - NO PRODUCTION DATA USED",
+            load_profile_font(13, True),
+            gold,
+            anchor="mm",
+            shadow=0,
+        )
+
     output = BytesIO()
     card.convert("RGB").save(output, format="PNG", optimize=True, compress_level=7)
     output.seek(0)
     return output
+
+
+def generate_profile_prestige_previews(output_directory):
+    """Render all seven prestige states from synthetic, in-memory values only."""
+    output_directory = Path(output_directory)
+    output_directory.mkdir(parents=True, exist_ok=True)
+
+    avatar = Image.new("RGBA", (512, 512), (3, 14, 29, 255))
+    avatar_draw = ImageDraw.Draw(avatar, "RGBA")
+    avatar_draw.ellipse((28, 28, 484, 484), fill=(5, 39, 63, 255), outline=(77, 226, 239, 255), width=14)
+    avatar_draw.ellipse((90, 90, 422, 422), outline=(232, 190, 82, 220), width=8)
+    avatar_draw.polygon(((256, 102), (340, 256), (256, 410), (172, 256)), fill=(24, 174, 202, 180), outline=(244, 207, 103, 255))
+    profile_text(avatar_draw, (256, 256), "A&T", load_profile_font(94, True), (244, 248, 249, 255), anchor="mm", shadow=4)
+    avatar_bytes = BytesIO()
+    avatar.save(avatar_bytes, format="PNG")
+    synthetic_achievement_thresholds = [threshold for threshold, _, _ in ACHIEVEMENT_ROLES]
+
+    generated_paths = []
+    for slug, real_miles, hall_tier, immortal_number in PROFILE_PREVIEW_STATES:
+        profile = {
+            "trucksbook_name": "Synthetic Test Driver",
+            "real_miles": real_miles,
+            "jobs_completed": max(real_miles // 800, 1),
+            "average_job_distance": 800,
+            "longest_job_distance": 2189,
+            "permanent_achievements": [
+                threshold for threshold in synthetic_achievement_thresholds
+                if threshold <= real_miles
+            ],
+            "hall_of_fame_tier": hall_tier,
+            "immortal_number": immortal_number,
+            "weekly_wins": min(real_miles // 100000, 9),
+            "monthly_wins": min(real_miles // 250000, 4),
+            "is_preview": True,
+        }
+        preview = render_driver_profile_v5_png(
+            avatar_bytes.getvalue(),
+            "MYSTIC",
+            profile,
+        )
+        destination = output_directory / f"at-driver-profile-{slug}.png"
+        destination.write_bytes(preview.getvalue())
+        generated_paths.append(destination)
+    return generated_paths
 
 
 async def fetch_driver_profile_stats(connection, discord_user_id):
@@ -6587,12 +6703,21 @@ async def cancel_verification_error(
     )
 
 # --------------------------------------------------
-# START BOT
+# START BOT / READ-ONLY ARTWORK PREVIEW
 # --------------------------------------------------
 
-if not TOKEN:
-    raise RuntimeError(
-        "DISCORD_TOKEN has not been configured."
+if "--render-profile-previews" in sys.argv:
+    argument_index = sys.argv.index("--render-profile-previews")
+    preview_directory = (
+        Path(sys.argv[argument_index + 1])
+        if len(sys.argv) > argument_index + 1
+        else Path(__file__).resolve().parent / "profile-previews"
     )
-
-bot.run(TOKEN)
+    for preview_path in generate_profile_prestige_previews(preview_directory):
+        print(preview_path)
+else:
+    if not TOKEN:
+        raise RuntimeError(
+            "DISCORD_TOKEN has not been configured."
+        )
+    bot.run(TOKEN)
