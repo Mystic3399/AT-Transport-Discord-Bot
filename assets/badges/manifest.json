@@ -1,0 +1,310 @@
+[
+  {
+    "file": "at-new-driver-0.png",
+    "sha256": "42ecfbdf0b8c7d74f7497a59da10e3239c67f8d5000cc18d9ec3624f7dadec7d",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      17,
+      303,
+      151,
+      525
+    ]
+  },
+  {
+    "file": "road-runner-5000.png",
+    "sha256": "882ea1510de71aa5c362c39e786b8a533034015ba5f75d16dc58bc6b6a71f38a",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      158,
+      303,
+      290,
+      525
+    ]
+  },
+  {
+    "file": "distance-driver-10000.png",
+    "sha256": "96c2ce6cb1ce57c7a4d90d7ea72baa4a6f4574ddf4e8a0957b4c8f373b33ae64",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      296,
+      303,
+      429,
+      525
+    ]
+  },
+  {
+    "file": "aurora-driver-15000.png",
+    "sha256": "1fc45ec8a7d13754272deef4e7f8cd12c16292748c27da032f5eb77000312c37",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      432,
+      303,
+      565,
+      525
+    ]
+  },
+  {
+    "file": "wolf-pack-driver-20000.png",
+    "sha256": "d91c167d90767417c651b5258c4ae4085465315e23a17bb7aea25cc955d91989",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      570,
+      303,
+      706,
+      525
+    ]
+  },
+  {
+    "file": "viking-hauler-25000.png",
+    "sha256": "099b5b87bbd444e3d1fd1015f13ed3a26a73b0c48f5e0ad761cc929dc8466cc9",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      710,
+      303,
+      844,
+      525
+    ]
+  },
+  {
+    "file": "elite-hauler-30000.png",
+    "sha256": "c1f0661558bf2bd035b4d16e247420b8689bb67f11772a9c5a2a71ff3750c687",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      848,
+      303,
+      979,
+      525
+    ]
+  },
+  {
+    "file": "at-veteran-35000.png",
+    "sha256": "68be5a763b8c7baaafccbb7fc7b60f567d761aa0d254caa578ee04deec103d41",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      980,
+      303,
+      1111,
+      525
+    ]
+  },
+  {
+    "file": "at-road-legend-40000.png",
+    "sha256": "173f78eacf64db5b023fdb360dce543308b78a6336176bce1bfe2c32fb8800a8",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      1112,
+      303,
+      1243,
+      525
+    ]
+  },
+  {
+    "file": "beyond-horizons-50000.png",
+    "sha256": "d8b5efdb6a15cabdda403c964c5217cda404f5b155a4832a9fbcbc9f5a94fcfc",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      1245,
+      303,
+      1372,
+      525
+    ]
+  },
+  {
+    "file": "horizon-wolf-75000.png",
+    "sha256": "8abe273dcdb92565b2fd7e6893c9de0a54e6dc20783d67f721bd7ab21a5c4f4c",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      16,
+      625,
+      151,
+      884
+    ]
+  },
+  {
+    "file": "at-centurion-100000.png",
+    "sha256": "b3221eae019502813aa35fb68960992e4583e0286544eb3b31cf85ad2063ddad",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      151,
+      625,
+      273,
+      884
+    ]
+  },
+  {
+    "file": "viking-pathfinder-150000.png",
+    "sha256": "bb0495fc081e2ff7813911a47e4b45a9444af5ae708010d0a608bfa964567d77",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      275,
+      625,
+      394,
+      884
+    ]
+  },
+  {
+    "file": "road-guardian-200000.png",
+    "sha256": "7351f59900099490779f14157e4b03874360f770976e4d8f1e22437988eb3601",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      395,
+      625,
+      516,
+      884
+    ]
+  },
+  {
+    "file": "aurora-pathfinder-300000.png",
+    "sha256": "84466f72dbe31274df836747dc1377cf15c92c881c3ea2cb564081c1ae08ae0f",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      518,
+      625,
+      639,
+      884
+    ]
+  },
+  {
+    "file": "viking-roadmaster-400000.png",
+    "sha256": "66eef503b351b7a5fa0c36fc711fc63f23e4329beeebe03b0a3b6faf5babeb15",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      639,
+      625,
+      759,
+      884
+    ]
+  },
+  {
+    "file": "horizon-legend-500000.png",
+    "sha256": "797c61cf55b1f87ff28f59119c58f7e5a6b4a0c380f3de1919f9213d73af11bc",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      758,
+      625,
+      874,
+      884
+    ]
+  },
+  {
+    "file": "alpha-roadmaster-600000.png",
+    "sha256": "1cfc584d4ff76d2830fd470d93c39c22904171f44b8bef09e83fdd73c5b9b093",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      875,
+      625,
+      992,
+      884
+    ]
+  },
+  {
+    "file": "aurora-commander-700000.png",
+    "sha256": "25f1fbd4922f44d43c3058719d4080a54feeda0766a69e92462747f881746bea",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      990,
+      625,
+      1109,
+      884
+    ]
+  },
+  {
+    "file": "guardian-of-the-horizon-800000.png",
+    "sha256": "50c5b7e6462c06084b8e0313170a50b234ed243a92a0efee0ad25a2be5789fef",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      1108,
+      625,
+      1232,
+      884
+    ]
+  },
+  {
+    "file": "beyond-the-horizon-900000.png",
+    "sha256": "83004a159eb6462035570a63ecf0193908511a64fbdc6d41ec922b9f0d1f096d",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      1232,
+      625,
+      1366,
+      884
+    ]
+  },
+  {
+    "file": "at-immortal-1000000.png",
+    "sha256": "2fb693147ad6b6fbf0dafa7d33dbc4d36e905cae13c974323a042a55de2eb31d",
+    "size": [
+      176,
+      288
+    ],
+    "source_box": [
+      1367,
+      618,
+      1518,
+      889
+    ]
+  }
+]
