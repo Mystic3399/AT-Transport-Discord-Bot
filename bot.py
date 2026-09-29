@@ -343,6 +343,153 @@ BADGE_DIRECTORY = Path(__file__).resolve().parent / "assets" / "badges"
 
 
 # --------------------------------------------------
+# ROLE CATEGORY DIVIDERS
+# --------------------------------------------------
+
+# Discord has no native parent/child role relationship. These decorative
+# divider roles are kept in sync by the bot: a member receives a divider while
+# they hold any role in that category and loses it after the last match goes.
+ROLE_CATEGORY_DIVIDERS = {
+    "━━ 👑 LEADERSHIP & STAFF ━━": {
+        "role_names": {
+            "Owners", "Owner", "Admin", "Administrator", "Management",
+            "Recruitment Manager", "Driver Dispatcher", "Server Moderators",
+            "Server Moderator", "Moderator",
+        },
+    },
+    "━━ 🏅 DRIVER RANKS & BADGES ━━": {
+        "role_names": set(),
+        "role_ids": {
+            role_id for _, role_id, _ in (
+                PROGRESSION_ROLES + ACHIEVEMENT_ROLES + HALL_OF_FAME_ROLES
+            ) if role_id
+        } | {
+            role_id for role_id in (
+                WEEKLY_CHAMPION_ROLE_ID, DRIVER_OF_THE_MONTH_ROLE_ID,
+            ) if role_id
+        },
+    },
+    "━━ 🤝 PARTNERS & COMMUNITY ━━": {
+        "role_names": {
+            "Alliance Partners", "Alliance Partner", "Community Partner",
+            "Partners",
+        },
+    },
+    "━━ 🎮 INTERESTS & ACCESS ━━": {
+        "role_names": {"Other Games", "New Member", "F1", "Formula 1"},
+    },
+    "━━ 💜 BOOSTERS & EXTRAS ━━": {
+        "role_names": {"Server Booster", "Booster"},
+        "include_boosters": True,
+    },
+    "━━ 🤖 BOTS & INTEGRATIONS ━━": {
+        "role_names": {"Bots", "Bot", "Integrations"},
+        "include_bots": True,
+    },
+    "━━ 🔞 AGE ROLES ━━": {
+        "role_names": {"Adult", "Adolescent", "Teenager", "Teen", "Child"},
+    },
+}
+
+
+def normalise_role_name(value):
+    """Return a stable comparison form for a Discord role name."""
+    return " ".join(
+        unicodedata.normalize("NFKC", str(value)).casefold().split()
+    )
+
+
+def member_matches_role_category(member, configuration):
+    """Return whether a member currently belongs to a divider category."""
+    member_roles = list(getattr(member, "roles", []))
+    member_role_ids = {role.id for role in member_roles}
+    member_role_names = {
+        normalise_role_name(role.name) for role in member_roles
+    }
+    configured_names = {
+        normalise_role_name(name)
+        for name in configuration.get("role_names", set())
+    }
+
+    return bool(
+        member_role_ids & configuration.get("role_ids", set())
+        or member_role_names & configured_names
+        or configuration.get("include_bots", False) and member.bot
+        or configuration.get("include_boosters", False)
+        and member.premium_since is not None
+    )
+
+
+async def sync_member_role_category_dividers(member):
+    """Synchronise all decorative category roles for one guild member."""
+    if member.guild.id != GUILD_ID:
+        return {"added": 0, "removed": 0, "missing": []}
+
+    roles_by_name = {
+        normalise_role_name(role.name): role for role in member.guild.roles
+    }
+    add_roles = []
+    remove_roles = []
+    missing = []
+
+    for divider_name, configuration in ROLE_CATEGORY_DIVIDERS.items():
+        divider = roles_by_name.get(normalise_role_name(divider_name))
+        if divider is None:
+            missing.append(divider_name)
+            continue
+
+        should_have = member_matches_role_category(member, configuration)
+        has_divider = divider in member.roles
+        if should_have and not has_divider:
+            add_roles.append(divider)
+        elif not should_have and has_divider:
+            remove_roles.append(divider)
+
+    if remove_roles:
+        await member.remove_roles(
+            *remove_roles, reason="A&T role category divider sync"
+        )
+    if add_roles:
+        await member.add_roles(
+            *add_roles, reason="A&T role category divider sync"
+        )
+
+    return {
+        "added": len(add_roles),
+        "removed": len(remove_roles),
+        "missing": missing,
+    }
+
+
+async def sync_all_role_category_dividers(guild):
+    """Repair divider roles for every cached member at bot startup."""
+    added = 0
+    removed = 0
+    missing = set()
+    failures = 0
+
+    for member in guild.members:
+        try:
+            result = await sync_member_role_category_dividers(member)
+            added += result["added"]
+            removed += result["removed"]
+            missing.update(result["missing"])
+        except (discord.Forbidden, discord.HTTPException) as error:
+            failures += 1
+            print(f"ROLE DIVIDER SYNC ERROR: {member.id}: {error}")
+
+    print(
+        "Role category divider sync complete: "
+        f"{added} added, {removed} removed, {failures} failed."
+    )
+    if missing:
+        print(
+            "ROLE DIVIDER WARNING: Missing divider role(s): "
+            + ", ".join(sorted(missing))
+        )
+
+
+# --------------------------------------------------
 # TEMPORARY FALLBACK DRIVER MAPPING
 # --------------------------------------------------
 
@@ -2324,6 +2471,11 @@ async def on_ready():
             guild
         )
 
+        try:
+            await sync_all_role_category_dividers(guild)
+        except Exception as error:
+            print(f"ROLE DIVIDER STARTUP SYNC ERROR: {error}")
+
     try:
         synced = await bot.tree.sync()
 
@@ -2342,6 +2494,11 @@ async def on_ready():
 @bot.event
 async def on_member_join(member):
     """Restore earned permanent roles and Active status when a driver returns."""
+    try:
+        await sync_member_role_category_dividers(member)
+    except (discord.Forbidden, discord.HTTPException) as error:
+        print(f"ROLE DIVIDER MEMBER-JOIN SYNC ERROR: {member.id}: {error}")
+
     if member.guild.id != GUILD_ID or db_pool is None:
         return
     async with db_pool.acquire() as connection:
@@ -2372,6 +2529,21 @@ async def on_member_join(member):
         await refresh_driver_leaderboard(member.guild)
     except Exception as error:
         print(f"LEADERBOARD MEMBER-JOIN REFRESH ERROR: {error}")
+
+@bot.event
+async def on_member_update(before, after):
+    """Keep decorative divider roles aligned with functional roles."""
+    before_role_ids = {role.id for role in before.roles}
+    after_role_ids = {role.id for role in after.roles}
+    booster_changed = before.premium_since != after.premium_since
+
+    if before_role_ids == after_role_ids and not booster_changed:
+        return
+
+    try:
+        await sync_member_role_category_dividers(after)
+    except (discord.Forbidden, discord.HTTPException) as error:
+        print(f"ROLE DIVIDER MEMBER-UPDATE ERROR: {after.id}: {error}")
 
 
 @bot.event
