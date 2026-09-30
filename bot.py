@@ -4791,22 +4791,22 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
 
     # Permanent records live beneath the complete badge ladder. Convoy UI is
     # deliberately absent until that project has a production data source.
-    draw.line((1014, 914, 1535, 914), fill=(73, 180, 207, 120), width=1)
-    achievement_icon = load_profile_icon("achievement", (32, 32))
-    profile_composite(card, achievement_icon, (1014, 924))
-    profile_text(draw, (1054, 933), "PERMANENT MILEAGE ACHIEVEMENTS", load_profile_font(13, True), white)
+    draw.line((1014, 904, 1535, 904), fill=(73, 180, 207, 120), width=1)
+    achievement_icon = load_profile_icon("achievement", (28, 28))
+    profile_composite(card, achievement_icon, (1014, 910))
+    profile_text(draw, (1050, 916), "PERMANENT MILEAGE ACHIEVEMENTS", load_profile_font(13, True), white)
     earned_achievements = set(profile["permanent_achievements"])
     for index, (threshold, _, _) in enumerate(ACHIEVEMENT_ROLES):
         short_label = "1M" if threshold == 1000000 else f"{threshold // 1000}K"
         is_earned = threshold in earned_achievements
         centre_x = 1048 + index * 91
-        medallion = load_profile_icon("achievement", (54, 46))
+        medallion = load_profile_icon("achievement", (42, 36))
         if not is_earned:
             medallion = ImageOps.grayscale(medallion).convert("RGBA")
             medallion.putalpha(medallion.getchannel("A").point(lambda alpha: int(alpha * 0.40)))
-        profile_composite(card, medallion, (centre_x - medallion.width // 2, 951))
-        draw.rounded_rectangle((centre_x - 30, 974, centre_x + 30, 998), 8, fill=(4, 18, 28, 220), outline=(*gold[:3], 210) if is_earned else (85, 102, 112, 120), width=1)
-        profile_text(draw, (centre_x, 986), short_label, load_profile_font(12, True), gold if is_earned else muted, anchor="mm", shadow=1)
+        profile_composite(card, medallion, (centre_x - medallion.width // 2, 940))
+        draw.rounded_rectangle((centre_x - 30, 981, centre_x + 30, 1005), 8, fill=(4, 18, 28, 220), outline=(*gold[:3], 210) if is_earned else (85, 102, 112, 120), width=1)
+        profile_text(draw, (centre_x, 993), short_label, load_profile_font(12, True), gold if is_earned else muted, anchor="mm", shadow=1)
 
     if profile["immortal_number"] is not None:
         hall_text = "HALL OF FAME - IMMORTAL"
@@ -4827,9 +4827,9 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
     profile_composite(card, hall_icon, (1022, 1018))
     profile_text(draw, (1100, 1042), hall_text, fit_profile_text(draw, hall_text, 415, 23, True), gold if is_hall_member else white)
     profile_text(draw, (1100, 1073), hall_subtext, fit_profile_text(draw, hall_subtext, 415, 13, True), teal if is_hall_member else muted, shadow=0)
-    profile_text(draw, (1274, 1122), "DRIVEN BEYOND HORIZONS", load_profile_font(13, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (1274, 1144), "TOGETHER WE DRIVE  •  TOGETHER WE CONQUER", load_profile_font(10, True), muted, anchor="ma", shadow=0)
-    profile_text(draw, (1274, 1159), f"LIVE A&T DRIVER RECORD - UPDATED {updated_label}", load_profile_font(10, True), muted, anchor="ma", shadow=0)
+    profile_text(draw, (1274, 1117), "DRIVEN BEYOND HORIZONS", load_profile_font(13, True), ice, anchor="ma", shadow=0)
+    profile_text(draw, (1274, 1137), "TOGETHER WE DRIVE  •  TOGETHER WE CONQUER", load_profile_font(10, True), muted, anchor="ma", shadow=0)
+    profile_text(draw, (1274, 1152), f"LIVE A&T DRIVER RECORD - UPDATED {updated_label}", load_profile_font(10, True), muted, anchor="ma", shadow=0)
 
     # Career statistics are a single dynamic overlay over the permanent art.
     draw.rounded_rectangle((43, 980, 947, 1170), 22, fill=(2, 10, 20, 152), outline=(83, 195, 218, 120), width=1)
