@@ -4167,30 +4167,29 @@ def profile_panel(draw, box, radius=24, outline=(83, 184, 212, 115)):
 
 def profile_prestige_theme(real_miles, hall_of_fame_tier=None):
     """Return one of the seven whole-profile prestige states."""
-    tier = (hall_of_fame_tier or "").casefold()
-    if real_miles >= 1000000 or tier == "immortal":
-        return {"name": "IMMORTAL", "index": 6, "recognition": "1,000,000+ VERIFIED REAL MILES", "accent": (250, 207, 91, 255), "secondary": (91, 242, 231, 255), "glow": (231, 172, 51, 118), "frame": (250, 213, 116, 245), "aurora": (44, 236, 211, 70), "runes": 3}
+    if real_miles >= 1000000:
+        return {"name": "A&T IMMORTAL", "index": 6, "recognition": "1,000,000+ VERIFIED REAL MILES", "accent": (250, 207, 91, 255), "secondary": (91, 242, 231, 255), "glow": (231, 172, 51, 118), "frame": (250, 213, 116, 245), "aurora": (44, 236, 211, 70), "runes": 3}
     if real_miles >= 750000:
         return {"name": "HORIZON ELITE", "index": 5, "recognition": "THE FINAL HORIZON AWAITS.", "accent": (241, 195, 83, 255), "secondary": (78, 228, 244, 255), "glow": (28, 205, 224, 105), "frame": (225, 190, 100, 230), "aurora": (42, 218, 238, 62), "runes": 3}
-    if real_miles >= 500000 or tier == "elite":
-        return {"name": "ELITE", "index": 4, "recognition": "HALF-MILLION HORIZON ELITE", "accent": (238, 190, 78, 255), "secondary": (87, 225, 239, 255), "glow": (38, 203, 204, 86), "frame": (220, 181, 91, 220), "aurora": (35, 200, 213, 52), "runes": 2}
-    if real_miles >= 250000 or tier == "veteran":
-        return {"name": "VETERAN", "index": 3, "recognition": "QUARTER-MILLION VETERAN", "accent": (215, 181, 105, 255), "secondary": (92, 218, 236, 255), "glow": (37, 177, 205, 70), "frame": (137, 207, 217, 215), "aurora": (32, 181, 208, 45), "runes": 2}
+    if real_miles >= 500000:
+        return {"name": "A&T ELITE", "index": 4, "recognition": "HALF-MILLION CLUB", "accent": (238, 190, 78, 255), "secondary": (87, 225, 239, 255), "glow": (38, 203, 204, 86), "frame": (220, 181, 91, 220), "aurora": (35, 200, 213, 52), "runes": 2}
+    if real_miles >= 250000:
+        return {"name": "A&T VETERAN", "index": 3, "recognition": "QUARTER MILLION VETERAN", "accent": (215, 181, 105, 255), "secondary": (92, 218, 236, 255), "glow": (37, 177, 205, 70), "frame": (137, 207, 217, 215), "aurora": (32, 181, 208, 45), "runes": 2}
     if real_miles >= 100000:
-        return {"name": "CENTURION", "index": 2, "recognition": "A&T CENTURION - 100,000+ VERIFIED REAL MILES", "accent": (232, 188, 86, 255), "secondary": (83, 216, 236, 255), "glow": (37, 177, 205, 60), "frame": (91, 194, 216, 210), "aurora": (31, 173, 205, 40), "runes": 2}
+        return {"name": "A&T CENTURION", "index": 2, "recognition": "100K+ VERIFIED REAL MILES", "accent": (232, 188, 86, 255), "secondary": (83, 216, 236, 255), "glow": (37, 177, 205, 60), "frame": (91, 194, 216, 210), "aurora": (31, 173, 205, 40), "runes": 2}
     if real_miles >= 40000:
         return {"name": "40K MILEAGE CLUB", "index": 1, "recognition": "40K MILEAGE CLUB", "accent": (226, 184, 91, 255), "secondary": (79, 215, 235, 255), "glow": (34, 173, 204, 52), "frame": (184, 165, 104, 205), "aurora": (28, 166, 200, 36), "runes": 1}
-    return {"name": "STANDARD", "index": 0, "recognition": "STANDARD A&T DRIVER RECORD", "accent": (181, 205, 214, 255), "secondary": (80, 212, 235, 255), "glow": (32, 160, 194, 40), "frame": (67, 177, 214, 195), "aurora": (24, 151, 188, 30), "runes": 1}
+    return {"name": "A&T VERIFIED DRIVER", "index": 0, "recognition": "A&T VERIFIED DRIVER", "accent": (181, 205, 214, 255), "secondary": (80, 212, 235, 255), "glow": (32, 160, 194, 40), "frame": (67, 177, 214, 195), "aurora": (24, 151, 188, 30), "runes": 1}
 
 
 PROFILE_PREVIEW_STATES = (
-    ("01-standard", 25000, None, None),
+    ("01-standard", 20000, None, None),
     ("02-40k-mileage-club", 57096, None, None),
     ("03-centurion", 125000, None, None),
-    ("04-veteran", 275000, "Veteran", None),
-    ("05-elite", 525000, "Elite", None),
-    ("06-horizon-elite", 775000, "Elite", None),
-    ("07-immortal", 1000000, "Immortal", 999),
+    ("04-veteran", 325000, "Veteran", None),
+    ("05-elite", 625000, "Elite", None),
+    ("06-horizon-elite", 825000, "Elite", None),
+    ("07-immortal", 1050000, "Immortal", 1),
 )
 
 
@@ -4538,6 +4537,37 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
             width=8,
         )
     profile_composite(card, prestige_wash.filter(ImageFilter.GaussianBlur(70)))
+    treatment_level = prestige["index"]
+
+    # Prestige atmosphere is deliberately painted before every information
+    # panel.  This preserves the frozen geometry and readability while making
+    # the seven states recognisable from their silhouette and sky treatment.
+    atmosphere = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    atmosphere_draw = ImageDraw.Draw(atmosphere, "RGBA")
+    if treatment_level == 0:
+        atmosphere_draw.arc((190, -150, 1410, 560), 198, 342, fill=(153, 202, 216, 38), width=3)
+    elif treatment_level == 2:
+        for inset in (0, 22, 44):
+            atmosphere_draw.arc((300 + inset, -160 + inset, 1300 - inset, 510), 205, 335, fill=(232, 188, 86, 31), width=3)
+    elif treatment_level == 3:
+        atmosphere_draw.rectangle((0, 0, width, height), fill=(0, 5, 13, 24))
+        for x in (82, 1518):
+            for y in range(210, 990, 112):
+                atmosphere_draw.polygon(((x, y - 13), (x + 9, y), (x, y + 13), (x - 9, y)), outline=(215, 181, 105, 82))
+    elif treatment_level == 4:
+        atmosphere_draw.arc((-80, 80, 1680, 970), 205, 335, fill=(238, 190, 78, 74), width=7)
+        atmosphere_draw.line((250, 620, 1350, 620), fill=(238, 190, 78, 42), width=3)
+    elif treatment_level >= 5:
+        star_positions = ((126, 178), (246, 86), (388, 230), (520, 72), (1044, 180), (1190, 74), (1348, 218), (1480, 104))
+        for star_x, star_y in star_positions:
+            radius = 3 if treatment_level == 5 else 5
+            atmosphere_draw.line((star_x - radius * 2, star_y, star_x + radius * 2, star_y), fill=(*prestige["secondary"][:3], 115), width=1)
+            atmosphere_draw.line((star_x, star_y - radius * 2, star_x, star_y + radius * 2), fill=(*prestige["accent"][:3], 125), width=1)
+        atmosphere_draw.arc((-130, -260, 1730, 920), 198, 342, fill=(*prestige["accent"][:3], 100), width=7 if treatment_level == 5 else 10)
+        if treatment_level == 6:
+            atmosphere_draw.arc((-70, -205, 1670, 865), 201, 339, fill=(*prestige["secondary"][:3], 116), width=5)
+            atmosphere_draw.ellipse((610, -195, 990, 185), outline=(250, 225, 144, 80), width=5)
+    profile_composite(card, atmosphere)
     draw = ProfileCanvasDraw(card)
 
     white = (238, 246, 249, 255)
@@ -4555,7 +4585,6 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
     # Each prestige tier changes the whole card, not only its label. The
     # progressively denser corner rails and Nordic diamonds are deliberately
     # restrained so the shared A&T composition remains intact.
-    treatment_level = prestige["index"]
     if treatment_level:
         for ornament in range(1, treatment_level + 1):
             y = 188 + ornament * 78
@@ -4633,8 +4662,10 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
     badge_y = 164 + (286 - current_badge.height) // 2
     glow = Image.new("RGBA", (590, 465), (0, 0, 0, 0))
     glow_draw = ImageDraw.Draw(glow, "RGBA")
-    glow_draw.ellipse((50, 15, 540, 450), fill=(24, 190, 221, 145))
-    glow_draw.ellipse((115, 55, 475, 420), fill=(236, 184, 68, 62))
+    cyan_glow_alpha = {0: 92, 1: 145, 2: 150, 3: 126, 4: 158, 5: 178, 6: 195}[treatment_level]
+    gold_glow_alpha = {0: 22, 1: 62, 2: 74, 3: 82, 4: 96, 5: 108, 6: 135}[treatment_level]
+    glow_draw.ellipse((50, 15, 540, 450), fill=(24, 190, 221, cyan_glow_alpha))
+    glow_draw.ellipse((115, 55, 475, 420), fill=(236, 184, 68, gold_glow_alpha))
     profile_composite(card, glow.filter(ImageFilter.GaussianBlur(40)), (364, 118))
     profile_composite(card, current_badge, (badge_x, badge_y))
     profile_text(draw, (hero_x, 160), "CURRENT A&T RANK", load_profile_font(15, True), ice, anchor="ma", shadow=0)
@@ -4779,7 +4810,7 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
             profile_text(
                 draw,
                 (centre_x, top + 15),
-                "YOU ARE HERE",
+                "PATH COMPLETE" if treatment_level == 6 else "YOU ARE HERE",
                 load_profile_font(9, True),
                 gold,
                 anchor="mm",
@@ -4804,21 +4835,38 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
         if not is_earned:
             medallion = ImageOps.grayscale(medallion).convert("RGBA")
             medallion.putalpha(medallion.getchannel("A").point(lambda alpha: int(alpha * 0.40)))
+        elif index:
+            # Higher permanent milestones retain the same local A&T medal
+            # family while gaining increasingly elaborate rings and points.
+            evolved_medallion = Image.new("RGBA", (54, 42), (0, 0, 0, 0))
+            evolved_draw = ImageDraw.Draw(evolved_medallion, "RGBA")
+            evolved_draw.ellipse((8 - index // 2, 2, 46 + index // 2, 40), outline=(*gold[:3], 150 + index * 16), width=1 + index // 2)
+            if index >= 2:
+                evolved_draw.polygon(((27, 0), (31, 6), (27, 10), (23, 6)), fill=(*teal[:3], 205))
+            if index >= 4:
+                evolved_draw.line((3, 21, 51, 21), fill=(*gold[:3], 145), width=2)
+            evolved_medallion.alpha_composite(medallion, ((54 - medallion.width) // 2, (42 - medallion.height) // 2))
+            medallion = evolved_medallion
         profile_composite(card, medallion, (centre_x - medallion.width // 2, 940))
         draw.rounded_rectangle((centre_x - 30, 981, centre_x + 30, 1005), 8, fill=(4, 18, 28, 220), outline=(*gold[:3], 210) if is_earned else (85, 102, 112, 120), width=1)
         profile_text(draw, (centre_x, 993), short_label, load_profile_font(12, True), gold if is_earned else muted, anchor="mm", shadow=1)
 
-    if profile["immortal_number"] is not None:
-        hall_text = "HALL OF FAME - IMMORTAL"
+    hall_tier = (profile["hall_of_fame_tier"] or "").casefold()
+    if hall_tier == "immortal" or profile["immortal_number"] is not None:
+        hall_text = "A&T HALL OF FAME - IMMORTAL"
         registry_prefix = "SAMPLE IMMORTAL REGISTRY" if profile.get("is_preview") else "IMMORTAL REGISTRY"
-        hall_subtext = f"{registry_prefix} #{profile['immortal_number']:03d}"
-    elif real_miles >= 500000 or (profile["hall_of_fame_tier"] or "").casefold() == "elite":
-        hall_text, hall_subtext = "HALL OF FAME - ELITE", "HALF-MILLION LEGEND"
-    elif real_miles >= 250000 or (profile["hall_of_fame_tier"] or "").casefold() == "veteran":
-        hall_text, hall_subtext = "HALL OF FAME - VETERAN", "QUARTER-MILLION INDUCTEE"
+        if profile["immortal_number"] is None:
+            hall_subtext = "PERMANENT IMMORTAL REGISTRY"
+        else:
+            hall_subtext = f"{registry_prefix} #{profile['immortal_number']:03d}"
+    elif hall_tier == "elite":
+        hall_text = "A&T HALL OF FAME - ELITE"
+        hall_subtext = "HORIZON ELITE HONOURS" if treatment_level == 5 else "HALF-MILLION LEGEND"
+    elif hall_tier == "veteran":
+        hall_text, hall_subtext = "A&T HALL OF FAME - VETERAN", "QUARTER-MILLION INDUCTEE"
     else:
         hall_text, hall_subtext = "A&T HALL OF FAME", "NOT YET INDUCTED"
-    is_hall_member = real_miles >= 250000 or bool(profile["hall_of_fame_tier"])
+    is_hall_member = hall_tier in {"veteran", "elite", "immortal"} or profile["immortal_number"] is not None
     draw.rounded_rectangle((1011, 1010, 1537, 1096), 18, fill=(20, 39, 43, 205) if is_hall_member else (5, 19, 31, 185), outline=(*gold[:3], 220) if is_hall_member else (74, 142, 162, 125), width=2)
     hall_icon = load_profile_icon("hall", (68, 68))
     if not is_hall_member:
