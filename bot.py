@@ -355,6 +355,9 @@ PROFILE_PRESTIGE_ATLAS_PATH = (
     Path(__file__).resolve().parent
     / "assets" / "profile" / "prestige" / "at-prestige-insignias.png"
 )
+PROFILE_FONT_DIRECTORY = Path(__file__).resolve().parent / "assets" / "profile" / "fonts"
+PROFILE_FONT_REGULAR_PATH = PROFILE_FONT_DIRECTORY / "LiberationSans-Regular.ttf"
+PROFILE_FONT_BOLD_PATH = PROFILE_FONT_DIRECTORY / "LiberationSans-Bold.ttf"
 
 
 # --------------------------------------------------
@@ -4022,6 +4025,7 @@ def profile_font_candidates(bold=False):
     """Return local-only fonts in broad Unicode coverage order."""
     return (
         (
+            str(PROFILE_FONT_BOLD_PATH),
             "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/opentype/noto/NotoSans-Bold.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
@@ -4031,6 +4035,7 @@ def profile_font_candidates(bold=False):
         )
         if bold
         else (
+            str(PROFILE_FONT_REGULAR_PATH),
             "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/opentype/noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
@@ -4527,17 +4532,11 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
         inset = 31 + rune_index * 7
         draw.line((inset, 165, inset, 1035), fill=(*teal[:3], 70 + rune_index * 15), width=1)
         draw.line((1600 - inset, 165, 1600 - inset, 1035), fill=(*gold[:3], 65 + rune_index * 15), width=1)
-    # Each prestige tier changes the whole card, not only its label.  The
-    # progressively denser corner rails, horizon band and Nordic diamonds are
-    # deliberately restrained so the shared A&T composition remains intact.
+    # Each prestige tier changes the whole card, not only its label. The
+    # progressively denser corner rails and Nordic diamonds are deliberately
+    # restrained so the shared A&T composition remains intact.
     treatment_level = prestige["index"]
     if treatment_level:
-        band_alpha = 18 + treatment_level * 7
-        draw.polygon(
-            ((24, 700), (430, 530), (1170, 530), (1576, 700),
-             (1576, 758), (1125, 588), (475, 588), (24, 758)),
-            fill=(*teal[:3], band_alpha),
-        )
         for ornament in range(1, treatment_level + 1):
             y = 188 + ornament * 78
             size = 7 + ornament
@@ -4582,11 +4581,11 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
 
     safe_discord_name = sanitise_profile_name(discord_name)
     safe_trucksbook_name = sanitise_profile_name(trucksbook_name, "UNLINKED DRIVER")
-    profile_text(draw, (200, 362), "DISCORD DRIVER", load_profile_font(13, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (200, 405), safe_discord_name, fit_profile_text(draw, safe_discord_name, 276, 54, True), white, anchor="ma", shadow=3)
-    draw.line((78, 445, 323, 445), fill=(91, 197, 214, 130), width=1)
-    profile_text(draw, (200, 473), "TRUCKSBOOK DRIVER", load_profile_font(12, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (200, 504), safe_trucksbook_name, fit_profile_text(draw, safe_trucksbook_name, 270, 21, True), muted, anchor="ma")
+    profile_text(draw, (200, 388), safe_discord_name, fit_profile_text(draw, safe_discord_name, 276, 66, True), white, anchor="mm", shadow=3)
+    profile_text(draw, (200, 431), "DISCORD DRIVER", load_profile_font(13, True), ice, anchor="ma", shadow=0)
+    draw.line((78, 455, 323, 455), fill=(91, 197, 214, 130), width=1)
+    profile_text(draw, (200, 480), "TRUCKSBOOK DRIVER", load_profile_font(12, True), ice, anchor="ma", shadow=0)
+    profile_text(draw, (200, 515), safe_trucksbook_name, fit_profile_text(draw, safe_trucksbook_name, 270, 21, True), muted, anchor="ma")
     draw.line((78, 542, 323, 542), fill=(91, 197, 214, 90), width=1)
     identity_verified = load_profile_icon("verified", (45, 45))
     profile_composite(card, identity_verified, (92, 554))
@@ -4613,13 +4612,13 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
         outline=(*teal[:3], 128),
         width=1,
     )
-    profile_text(draw, (hero_x, 505), current_rank_name.upper(), fit_profile_text(draw, current_rank_name.upper(), 510, 76, True), white, anchor="mm", shadow=3)
+    profile_text(draw, (hero_x, 500), current_rank_name.upper(), fit_profile_text(draw, current_rank_name.upper(), 510, 72, True), white, anchor="mm", shadow=3)
     mileage_headline = f"{real_miles:,} VERIFIED REAL MILES"
     profile_text(
         draw,
         (hero_x, 558),
         mileage_headline,
-        fit_profile_text(draw, mileage_headline, 510, 56, True),
+        fit_profile_text(draw, mileage_headline, 510, 54, True),
         gold,
         anchor="mm",
         shadow=3,
