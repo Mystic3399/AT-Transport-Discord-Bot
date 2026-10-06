@@ -2415,11 +2415,11 @@ BOT_STATUSES = [
         type=discord.ActivityType.watching,
         name="🐺 over the A&T fleet"
     ),
-    discord.Game(
-        name="🇪🇺 Euro Truck Simulator 2"
+   discord.Game(
+    name="🚛 Euro Truck Simulator 2"
     ),
     discord.Game(
-        name="🇺🇸 American Truck Simulator"
+    name="🛣️ American Truck Simulator"
     ),
     discord.CustomActivity(
         name="🌌 Driven Beyond Horizons"
@@ -2434,7 +2434,7 @@ BOT_STATUSES = [
     ),
     discord.Activity(
         type=discord.ActivityType.watching,
-        name="🇺🇸 drivers across America"
+        name="🛣️ drivers across America"
     ),
     discord.CustomActivity(
         name="⚙️ A&T Command Systems Online"
