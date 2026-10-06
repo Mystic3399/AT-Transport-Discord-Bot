@@ -2405,47 +2405,47 @@ def check_onboarding_configuration(
 
 BOT_STATUSES = [
     discord.CustomActivity(
-        name="Connecting Everyone Together"
+        name="📡 Connecting Everyone Together"
     ),
     discord.Activity(
         type=discord.ActivityType.watching,
-        name="A&T Transport LTD"
+        name="🚛 A&T Transport LTD"
     ),
     discord.Activity(
         type=discord.ActivityType.watching,
-        name="over the A&T fleet"
+        name="🐺 over the A&T fleet"
     ),
     discord.Game(
-        name="Euro Truck Simulator 2"
+        name="🇪🇺 Euro Truck Simulator 2"
     ),
     discord.Game(
-        name="American Truck Simulator"
+        name="🇺🇸 American Truck Simulator"
     ),
     discord.CustomActivity(
         name="🌌 Driven Beyond Horizons"
     ),
     discord.Activity(
         type=discord.ActivityType.watching,
-        name="A&T deliveries"
+        name="📦 A&T deliveries"
     ),
     discord.Activity(
         type=discord.ActivityType.watching,
-        name="drivers across Europe"
+        name="🗺️ drivers across Europe"
     ),
     discord.Activity(
         type=discord.ActivityType.watching,
-        name="drivers across America"
+        name="🇺🇸 drivers across America"
     ),
     discord.CustomActivity(
         name="⚙️ A&T Command Systems Online"
     ),
     discord.Activity(
         type=discord.ActivityType.watching,
-        name="for the next A&T convoy"
+        name="🏁 for the next A&T convoy"
     ),
     discord.Activity(
         type=discord.ActivityType.watching,
-        name="A&T driver progress"
+        name="📊 A&T driver progress"
     ),
 ]
 
