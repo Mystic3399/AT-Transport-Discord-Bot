@@ -2399,10 +2399,88 @@ def check_onboarding_configuration(
 # --------------------------------------------------
 # BOT STARTUP
 # --------------------------------------------------
+# --------------------------------------------------
+# A&T BOT ROTATING STATUS
+# --------------------------------------------------
 
+BOT_STATUSES = [
+    discord.CustomActivity(
+        name="Connecting Everyone Together"
+    ),
+    discord.Activity(
+        type=discord.ActivityType.watching,
+        name="A&T Transport LTD"
+    ),
+    discord.Activity(
+        type=discord.ActivityType.watching,
+        name="over the A&T fleet"
+    ),
+    discord.Game(
+        name="Euro Truck Simulator 2"
+    ),
+    discord.Game(
+        name="American Truck Simulator"
+    ),
+    discord.CustomActivity(
+        name="🌌 Driven Beyond Horizons"
+    ),
+    discord.Activity(
+        type=discord.ActivityType.watching,
+        name="A&T deliveries"
+    ),
+    discord.Activity(
+        type=discord.ActivityType.watching,
+        name="drivers across Europe"
+    ),
+    discord.Activity(
+        type=discord.ActivityType.watching,
+        name="drivers across America"
+    ),
+    discord.CustomActivity(
+        name="⚙️ A&T Command Systems Online"
+    ),
+    discord.Activity(
+        type=discord.ActivityType.watching,
+        name="for the next A&T convoy"
+    ),
+    discord.Activity(
+        type=discord.ActivityType.watching,
+        name="A&T driver progress"
+    ),
+]
+
+
+@tasks.loop(seconds=60)
+async def rotate_bot_status():
+    """Rotate the A&T Command Discord presence."""
+
+    if not BOT_STATUSES:
+        return
+
+    index = rotate_bot_status.current_loop % len(BOT_STATUSES)
+    activity = BOT_STATUSES[index]
+
+    try:
+        await bot.change_presence(
+            status=discord.Status.online,
+            activity=activity,
+        )
+    except Exception as error:
+        print(
+            f"BOT STATUS UPDATE ERROR: {error}"
+        )
+
+
+@rotate_bot_status.before_loop
+async def before_rotate_bot_status():
+    await bot.wait_until_ready()
+    
 @bot.event
 async def on_ready():
     global db_pool
+
+    if not rotate_bot_status.is_running():
+        rotate_bot_status.start()
 
     if db_pool is None:
         try:
