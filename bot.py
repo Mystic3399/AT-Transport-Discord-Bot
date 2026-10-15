@@ -597,6 +597,16 @@ async def setup_database():
             """
         )
 
+        # Additive migration: keep existing repair candidates and driver totals.
+        await connection.execute(
+            """
+            ALTER TABLE mileage_repair_candidates
+                ADD COLUMN IF NOT EXISTS repair_kind TEXT NOT NULL
+                    DEFAULT 'distance_correction',
+                ADD COLUMN IF NOT EXISTS source_delivered_at TIMESTAMPTZ;
+            """
+        )
+
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS repair_achievement_announcements (
@@ -3267,6 +3277,9 @@ async def mileage_audit(ctx, message_limit: int = 0):
     matched = 0
     staged = 0
     missing_from_database = 0
+    missing_event_jobs_staged = 0
+    unlinked_event_jobs = 0
+    seen_jobs = set()
     channels_scanned = 0
     channels_skipped = 0
     history_limit = message_limit or None
@@ -3300,8 +3313,12 @@ async def mileage_audit(ctx, message_limit: int = 0):
                     if (
                         not is_real_statistics(parsed["statistics"])
                         or parsed["accepted_distance"] is None
+                        or parsed["accepted_distance"] <= 0
                     ):
                         continue
+                    if parsed["job_id"] in seen_jobs:
+                        continue
+                    seen_jobs.add(parsed["job_id"])
 
                     async with db_pool.acquire() as connection:
                         recorded = await connection.fetchrow(
@@ -3309,23 +3326,45 @@ async def mileage_audit(ctx, message_limit: int = 0):
                             SELECT
                                 discord_user_id,
                                 trucksbook_name,
-                                accepted_distance
+                                accepted_distance,
+                                statistics
                             FROM processed_jobs
-                            WHERE job_id = $1
-                              AND LOWER(statistics) = 'real';
+                            WHERE job_id = $1;
                             """,
                             parsed["job_id"],
                         )
+                        actual = int(parsed["accepted_distance"])
+                        repair_kind = "distance_correction"
                         if recorded is None:
                             missing_from_database += 1
+                            # Ordinary missing historical jobs may already be in an
+                            # imported baseline. Only recover explicit Real, WoTr jobs.
+                            if "wotr" not in [x.strip().casefold() for x in
+                                              parsed["statistics"].split(",")]:
+                                continue
+                            name = ((embed.to_dict().get("author") or {})
+                                    .get("name") or "").strip()
+                            # Resolve outside the acquired connection: find_driver_link
+                            # acquires its own connection and must not nest pool leases.
+                        else:
+                            if not is_real_statistics(recorded["statistics"]):
+                                continue
+                            matched += 1
+                    if recorded is None:
+                        user_id = await find_driver_link(name) if name else None
+                        if user_id is None:
+                            unlinked_event_jobs += 1
                             continue
-
-                        matched += 1
-                        actual = int(parsed["accepted_distance"])
+                        credited = 0
+                        repair_kind = "missing_wotr"
+                    else:
+                        user_id = int(recorded["discord_user_id"])
+                        name = recorded["trucksbook_name"]
                         credited = int(recorded["accepted_distance"])
-                        if actual <= credited:
-                            continue
+                    if actual <= credited:
+                        continue
 
+                    async with db_pool.acquire() as connection:
                         await connection.execute(
                             """
                             INSERT INTO mileage_repair_candidates (
@@ -3337,9 +3376,11 @@ async def mileage_audit(ctx, message_limit: int = 0):
                                 missing_distance,
                                 source_channel_id,
                                 source_message_id,
-                                audited_at
+                                audited_at,
+                                repair_kind,
+                                source_delivered_at
                             )
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10)
                             ON CONFLICT (job_id) DO UPDATE SET
                                 discord_user_id = EXCLUDED.discord_user_id,
                                 trucksbook_name = EXCLUDED.trucksbook_name,
@@ -3348,19 +3389,25 @@ async def mileage_audit(ctx, message_limit: int = 0):
                                 missing_distance = EXCLUDED.missing_distance,
                                 source_channel_id = EXCLUDED.source_channel_id,
                                 source_message_id = EXCLUDED.source_message_id,
-                                audited_at = NOW()
+                                audited_at = NOW(),
+                                repair_kind = EXCLUDED.repair_kind,
+                                source_delivered_at = EXCLUDED.source_delivered_at
                             WHERE mileage_repair_candidates.applied_at IS NULL;
                             """,
                             parsed["job_id"],
-                            int(recorded["discord_user_id"]),
-                            recorded["trucksbook_name"],
+                            int(user_id),
+                            name,
                             credited,
                             actual,
                             actual - credited,
                             channel.id,
                             historical_message.id,
+                            repair_kind,
+                            historical_message.created_at,
                         )
                         staged += 1
+                        if repair_kind == "missing_wotr":
+                            missing_event_jobs_staged += 1
 
             channels_scanned += 1
 
@@ -3392,6 +3439,8 @@ async def mileage_audit(ctx, message_limit: int = 0):
         f"Previously processed Real jobs matched: `{matched:,}`\n"
         f"Candidates found/updated this run: `{staged:,}`\n"
         f"Webhook jobs absent from processed_jobs: `{missing_from_database:,}`\n"
+        f"Missing Real, WoTr jobs staged: `{missing_event_jobs_staged:,}`\n"
+        f"Event jobs skipped — driver not linked: `{unlinked_event_jobs:,}`\n"
         f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
         f"`{int(totals['drivers']):,}` drivers\n"
         f"Missing mileage pending: `{int(totals['missing_miles']):,}`\n\n"
@@ -3543,9 +3592,20 @@ async def mileage_apply(ctx, confirmation: str = ""):
                     """,
                     candidate["job_id"],
                 )
-                if (
+                missing_job = candidate["repair_kind"] == "missing_wotr"
+                if missing_job:
+                    # If live delivery or another recovery already inserted it,
+                    # consume the candidate without adding another mile.
+                    if job is not None:
+                        await connection.execute(
+                            "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
+                            "applied_by = $2 WHERE job_id = $1;",
+                            candidate["job_id"], ctx.author.id,
+                        )
+                        continue
+                elif (
                     job is None
-                    or str(job["statistics"]).casefold() != "real"
+                    or not is_real_statistics(job["statistics"])
                     or int(job["discord_user_id"])
                         != int(candidate["discord_user_id"])
                     or int(job["accepted_distance"])
@@ -3569,15 +3629,37 @@ async def mileage_apply(ctx, confirmation: str = ""):
                 )
                 new_total = previous_total + delta
 
-                await connection.execute(
-                    """
-                    UPDATE processed_jobs
-                    SET accepted_distance = $2
-                    WHERE job_id = $1;
-                    """,
-                    candidate["job_id"],
-                    int(candidate["actual_distance"]),
-                )
+                if missing_job:
+                    inserted = await connection.fetchval(
+                        """
+                        INSERT INTO processed_jobs (
+                            job_id, discord_user_id, trucksbook_name,
+                            accepted_distance, statistics, processed_at
+                        ) VALUES ($1, $2, $3, $4, 'Real', COALESCE($5, NOW()))
+                        ON CONFLICT (job_id) DO NOTHING RETURNING job_id;
+                        """,
+                        candidate["job_id"], user_id, candidate["trucksbook_name"],
+                        int(candidate["actual_distance"]),
+                        candidate["source_delivered_at"],
+                    )
+                    if inserted is None:
+                        # A concurrent normal delivery won the unique job ID.
+                        await connection.execute(
+                            "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
+                            "applied_by = $2 WHERE job_id = $1;",
+                            candidate["job_id"], ctx.author.id,
+                        )
+                        continue
+                else:
+                    await connection.execute(
+                        """
+                        UPDATE processed_jobs
+                        SET accepted_distance = $2
+                        WHERE job_id = $1;
+                        """,
+                        candidate["job_id"],
+                        int(candidate["actual_distance"]),
+                    )
                 await connection.execute(
                     """
                     INSERT INTO driver_progress (
@@ -3671,10 +3753,18 @@ async def mileage_apply(ctx, confirmation: str = ""):
     )
 
 
+@wot_recover.error
 @mileage_audit.error
 @mileage_apply.error
 @repair_achievements.error
 async def mileage_repair_command_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.reply(
+            "Use `!mileageaudit` to preview missed event mileage, then "
+            "`!mileageapply CONFIRM` to restore it. No webhook ID is needed.",
+            mention_author=False,
+        )
+        return
     if isinstance(error, commands.MissingPermissions):
         await ctx.reply(
             "❌ Only a server administrator can use mileage repair commands.",
