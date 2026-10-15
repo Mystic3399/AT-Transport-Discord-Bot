@@ -105,4 +105,97 @@ class RecoveryTests(unittest.TestCase):
             self.assertFalse(channel.kwargs['oldest_first'])
         asyncio.run(run())
 
+
+class AuditApplyTests(unittest.TestCase):
+    def test_audit_apply_preserves_totals_and_retry(self):
+        async def run():
+            from datetime import datetime, timezone
+            delivered = datetime(2026, 10, 15, 20, tzinfo=timezone.utc)
+            candidates = {}
+            jobs = {'123': {'discord_user_id': 42, 'trucksbook_name': 'TruckTan',
+                            'accepted_distance': 3, 'statistics': 'Real'}}
+            total = [13]
+            replies = []
+            syncs = []
+            class Lease:
+                async def __aenter__(self): return connection
+                async def __aexit__(self, *args): pass
+            class Transaction:
+                async def __aenter__(self): pass
+                async def __aexit__(self, *args): pass
+            class Connection:
+                def transaction(self): return Transaction()
+                async def fetchrow(self, sql, *args):
+                    if 'FROM processed_jobs' in sql: return jobs.get(args[0])
+                    if 'COUNT(*) AS jobs' in sql:
+                        pending = [c for c in candidates.values() if not c.get('applied')]
+                        return {'jobs': len(pending), 'drivers': len({c['discord_user_id'] for c in pending}), 'missing_miles': sum(c['missing_distance'] for c in pending)}
+                    if 'FROM driver_progress' in sql: return {'real_miles': total[0], 'trucksbook_name': 'TruckTan'}
+                    raise AssertionError(sql)
+                async def fetch(self, sql, *args):
+                    return [c for c in candidates.values() if not c.get('applied')]
+                async def fetchval(self, sql, *args):
+                    if 'SELECT real_miles' in sql: return total[0]
+                    if 'INSERT INTO processed_jobs' in sql:
+                        self.asserted_insert = 'ON CONFLICT (job_id) DO NOTHING' in sql
+                        if args[0] in jobs: return None
+                        jobs[args[0]] = {'discord_user_id': args[1], 'trucksbook_name': args[2], 'accepted_distance': args[3],
+                                         'statistics': 'Real', 'processed_at': args[4]}
+                        return args[0]
+                    raise AssertionError(sql)
+                async def execute(self, sql, *args):
+                    if 'INSERT INTO mileage_repair_candidates' in sql:
+                        if not candidates.get(args[0], {}).get('applied'):
+                            candidates[args[0]] = dict(zip(['job_id','discord_user_id','trucksbook_name','recorded_distance','actual_distance','missing_distance','source_channel_id','source_message_id','repair_kind','source_delivered_at'], args))
+                    elif 'UPDATE mileage_repair_candidates' in sql: candidates[args[0]]['applied'] = True
+                    elif 'INSERT INTO driver_progress' in sql: total[0] += args[2]
+                    elif 'UPDATE processed_jobs' in sql: jobs[args[0]]['accepted_distance'] = args[1]
+                    else: raise AssertionError(sql)
+            connection = Connection()
+            async def reply(*args, **kwargs): replies.append(args[0])
+            async def find(name): return 42 if name == 'TruckTan' else None
+            async def sync(*args, **kwargs): syncs.append(args)
+            async def announce(*args): return (0, 0)
+            event = Embed()
+            unlinked = Embed('125'); unlinked.data['author']['name'] = 'Unknown'
+            class Channel:
+                id = 22
+                def permissions_for(self, _): return SimpleNamespace(view_channel=True, read_message_history=True)
+                def history(self, **kwargs):
+                    async def gen():
+                        for i, e in enumerate([event, event, Embed('123', 'Real', 103), Embed('124', 'Real', 500), unlinked, Embed('126', 'Race, WoTr')]):
+                            yield SimpleNamespace(webhook_id=9, embeds=[e], id=i, created_at=delivered)
+                    return gen()
+            channel = Channel()
+            guild = SimpleNamespace(id=1, me=object(), text_channels=[channel])
+            ctx = SimpleNamespace(guild=guild, reply=reply, send=reply, author=SimpleNamespace(id=99))
+            discord = SimpleNamespace(Forbidden=type('Forbidden', (Exception,), {}), HTTPException=type('HTTPException', (Exception,), {}))
+            ns = dict(NS, db_pool=SimpleNamespace(acquire=Lease), GUILD_ID=1, discord=discord,
+                      find_driver_link=find, PROGRESSION_ROLES=[], sync_member_progression_role=sync,
+                      sync_permanent_system_for_driver=sync, announce_pending_repair_achievements=announce,
+                      refresh_driver_leaderboard=sync)
+            audit = load_function('mileage_audit', ns)
+            apply = load_function('mileage_apply', ns)
+            await audit(ctx)
+            self.assertEqual(total[0], 13)  # preview never credits mileage
+            self.assertEqual(set(candidates), {'68007306', '123'})
+            self.assertEqual(candidates['123']['missing_distance'], 100)
+            self.assertEqual(candidates['68007306']['repair_kind'], 'missing_wotr')
+            self.assertIn('driver not linked: `1`', replies[-1])
+            await apply(ctx)  # explicit confirmation is required
+            self.assertEqual(total[0], 13)
+            await apply(ctx, 'CONFIRM')
+            self.assertEqual(total[0], 216)  # existing 13 + missing 103 + correction 100
+            self.assertEqual(jobs['68007306']['processed_at'], delivered)
+            self.assertTrue(connection.asserted_insert)
+            self.assertGreater(len(syncs), 0)
+            await audit(ctx)
+            await apply(ctx, 'CONFIRM')
+            self.assertEqual(total[0], 216)
+            # If a live delivery wins after audit, consume its candidate with no credit.
+            candidates['68007306']['applied'] = False
+            await apply(ctx, 'CONFIRM')
+            self.assertEqual(total[0], 216)
+        asyncio.run(run())
+
 if __name__ == '__main__': unittest.main()
