@@ -794,6 +794,18 @@ bot = commands.Bot(
 # BASIC HELPERS
 # --------------------------------------------------
 
+def is_real_statistics(statistics):
+    """Accept only verified Real classifications, optionally tagged WoTr.
+
+    TrucksBook event deliveries use 'Real, WoTr'. Never infer validity from
+    a route, cargo name or the WoTr tag alone.
+    """
+    if not isinstance(statistics, str):
+        return False
+    labels = [label.strip().casefold() for label in statistics.split(",")]
+    return sorted(labels) in (["real"], ["real", "wotr"])
+
+
 def extract_integer(value):
     """Parse a non-negative integer with common thousands separators.
 
@@ -2836,9 +2848,7 @@ async def on_message(message):
         # ------------------------------------------
 
         if (
-            not statistics
-            or statistics.lower()
-            != "real"
+            not is_real_statistics(statistics)
         ):
             print(
                 "ACTION: Job ignored. "
@@ -3142,6 +3152,95 @@ def extract_trucksbook_job_from_embed(embed):
     }
 
 
+@bot.command(name="wotrecover")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+@commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
+async def wot_recover(ctx, webhook_id: int, message_limit: int = 1000,
+                      confirmation: str = ""):
+    """Preview/replay missed Real, WoTr jobs in this channel, once per job ID."""
+    if ctx.guild.id != GUILD_ID:
+        return
+    if db_pool is None:
+        await ctx.reply("❌ The database is unavailable.", mention_author=False)
+        return
+    if not 1 <= message_limit <= 100000 or webhook_id <= 0:
+        await ctx.reply("Use a positive TrucksBook webhook ID and a history "
+                        "limit from 1 to 100000.", mention_author=False)
+        return
+    if confirmation not in ("", "CONFIRM"):
+        await ctx.reply("Use no confirmation for a preview, or CONFIRM to apply.",
+                        mention_author=False)
+        return
+    apply = confirmation == "CONFIRM"
+    await ctx.reply(
+        ("🔧 Recovering" if apply else "🔎 Previewing")
+        + " missed Real, WoTr jobs in this channel from the specified webhook.",
+        mention_author=False,
+    )
+    jobs = miles = duplicates = unlinked = failed = 0
+    seen = set()
+    try:
+        async for message in ctx.channel.history(
+            limit=message_limit, before=ctx.message, oldest_first=False
+        ):
+            if message.webhook_id != webhook_id or len(message.embeds) != 1:
+                continue
+            parsed = extract_trucksbook_job_from_embed(message.embeds[0])
+            if not parsed or not is_real_statistics(parsed["statistics"]):
+                continue
+            if "wotr" not in [x.strip().casefold()
+                              for x in parsed["statistics"].split(",")]:
+                continue
+            distance = parsed["accepted_distance"]
+            if distance is None or distance <= 0:
+                continue
+            job_id = parsed["job_id"]
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            async with db_pool.acquire() as connection:
+                exists = await connection.fetchval(
+                    "SELECT 1 FROM processed_jobs WHERE job_id = $1;", job_id
+                )
+            if exists:
+                duplicates += 1
+                continue
+            name = (message.embeds[0].to_dict().get("author") or {}).get("name", "")
+            if not name.strip() or await find_driver_link(name.strip()) is None:
+                unlinked += 1
+                continue
+            if apply:
+                # Reuse normal atomic insertion, totals, roles and achievements.
+                # ON CONFLICT(job_id) protects retries and concurrent live delivery.
+                await on_message(message)
+                async with db_pool.acquire() as connection:
+                    exists = await connection.fetchval(
+                        "SELECT 1 FROM processed_jobs WHERE job_id = $1;", job_id
+                    )
+                if not exists:
+                    failed += 1
+                    continue
+            jobs += 1
+            miles += distance
+    except (discord.Forbidden, discord.HTTPException) as error:
+        await ctx.send("❌ History scan stopped. Check View Channel and Read "
+                       "Message History permissions. Retrying is safe.")
+        print(f"WOT RECOVERY HISTORY ERROR: {error}")
+        return
+    await ctx.send(
+        ("✅ Recovery complete" if apply else "✅ Preview complete — no mileage changed")
+        + f"\nEligible jobs {'processed' if apply else 'found'}: {jobs:,}"
+        + f"\nAccepted miles {'submitted for credit' if apply else 'to recover'}: {miles:,}"
+        + f"\nAlready recorded: {duplicates:,}"
+        + f"\nUnlinked drivers skipped: {unlinked:,}"
+        + f"\nFailed jobs: {failed:,}"
+        + ("" if apply else f"\nAfter verifying the webhook ID and taking a database "
+           f"backup, run `!wotrecover {webhook_id} {message_limit} CONFIRM`."),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 @bot.command(name="mileageaudit")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
@@ -3199,7 +3298,7 @@ async def mileage_audit(ctx, message_limit: int = 0):
                         continue
                     scanned += 1
                     if (
-                        (parsed["statistics"] or "").casefold() != "real"
+                        not is_real_statistics(parsed["statistics"])
                         or parsed["accepted_distance"] is None
                     ):
                         continue
