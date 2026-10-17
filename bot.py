@@ -16,6 +16,7 @@ import discord
 from bs4 import BeautifulSoup
 from discord.ext import commands, tasks
 import trucky_linking
+import trucky_membership_adapter
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -5495,9 +5496,9 @@ async def link_trucky(ctx, account_id: str = None, *, display_name: str = None):
     if db_pool is None:
         await ctx.reply("Driver database unavailable.", mention_author=False)
         return
-    if not account_id or not display_name:
+    if not account_id:
         await ctx.reply(
-            "To request your optional Trucky link, use `!linktrucky ACCOUNT_ID Display Name`. "
+            "To request your optional Trucky link, use `!linktrucky ACCOUNT_ID`. "
             "Find your stable Trucky account ID in your account details. "
             "Management must verify ownership before the account is linked. "
             "For privacy, send this in your private onboarding channel or by DM to management.",
@@ -5505,7 +5506,16 @@ async def link_trucky(ctx, account_id: str = None, *, display_name: str = None):
         )
         return
     try:
-        await trucky_linking.request_link(db_pool, ctx.author.id, account_id, display_name)
+        canonical_name = await trucky_membership_adapter.verify_member(account_id)
+    except (ValueError, trucky_membership_adapter.MembershipUnavailable) as error:
+        await ctx.reply(f'Unable to verify Trucky membership: {error}. No link created.', mention_author=False)
+        return
+    if canonical_name is None:
+        await ctx.reply('Rejected: that Trucky account is not on the active A&T Transport LTD roster.', mention_author=False)
+        return
+    try:
+        await trucky_linking.request_link(db_pool, ctx.author.id, account_id, canonical_name)
+        await trucky_linking.record_membership_check(db_pool, ctx.author.id, True)
     except (ValueError, asyncpg.UniqueViolationError) as error:
         await ctx.reply(f"Could not submit link request: {error}", mention_author=False)
         return
@@ -5513,7 +5523,7 @@ async def link_trucky(ctx, account_id: str = None, *, display_name: str = None):
     await notify_trucky_link_staff(
         ctx.guild, "Trucky account link requested",
         f"Discord: {ctx.author.mention}\nTrucky ID: `{account_id}`\n"
-        f"Display name: {discord.utils.escape_markdown(display_name)}\n"
+        f"Display name: {discord.utils.escape_markdown(canonical_name)}\n"
         f"Review account ownership before `!approvetrucky {ctx.author.id}`.",
     )
 
@@ -5549,6 +5559,23 @@ async def approve_trucky(ctx, member: discord.Member = None):
         return
     if member is None or db_pool is None:
         await ctx.reply("Usage: `!approvetrucky @driver`", mention_author=False)
+        return
+    async with db_pool.acquire() as conn:
+        pending = await conn.fetchrow(
+            "SELECT trucky_account_id FROM trucky_link_requests WHERE discord_user_id=$1 AND status='pending'",
+            member.id,
+        )
+    if pending is None:
+        await ctx.reply("No pending Trucky link request.", mention_author=False)
+        return
+    try:
+        current_name = await trucky_membership_adapter.verify_member(pending["trucky_account_id"])
+    except (ValueError, trucky_membership_adapter.MembershipUnavailable) as error:
+        await ctx.reply(f"Cannot approve while Trucky membership is unavailable: {error}", mention_author=False)
+        return
+    if current_name is None:
+        await trucky_linking.record_membership_check(db_pool, member.id, False)
+        await ctx.reply("Rejected: account is no longer registered with A&T on Trucky.", mention_author=False)
         return
     try:
         req = await trucky_linking.approve_link(db_pool, member.id, ctx.author.id)
