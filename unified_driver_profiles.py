@@ -292,7 +292,8 @@ async def bind_verified_steam(pool, discord_user_id, steam_id64, state_hash, non
                 INSERT INTO unified_steam_links(discord_user_id,steam_id64)
                 VALUES($1,$2)
                 ON CONFLICT(discord_user_id) DO UPDATE SET
-                    steam_id64=EXCLUDED.steam_id64,verified_at=NOW()
+                    verified_at=NOW()
+                WHERE unified_steam_links.steam_id64=EXCLUDED.steam_id64
             """,discord_user_id,steam_id64)
             await conn.execute("""
                 UPDATE unified_steam_auth_states SET consumed_at=NOW()
