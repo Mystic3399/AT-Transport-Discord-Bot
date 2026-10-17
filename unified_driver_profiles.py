@@ -451,7 +451,8 @@ async def record_normalized_provider_job(
                 if (previous is None or previous["discord_user_id"] != discord_user_id
                         or previous["real_miles"] != real
                         or previous["race_miles"] != race
-                        or previous["source_payload"] != json.loads(audit_payload)):
+                        or (json.loads(previous["source_payload"]) if isinstance(previous["source_payload"], str)
+                            else previous["source_payload"]) != json.loads(audit_payload)):
                     raise ValueError("Conflicting duplicate provider job requires review")
                 return False
             return True
