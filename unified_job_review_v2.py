@@ -37,6 +37,8 @@ async def suggest_cross_provider_matches(pool, provider, provider_job_id):
 
     def record(row):
         payload = row["source_payload"] or {}
+        if isinstance(payload, str):
+            payload = json.loads(payload)
         kind = payload.get("mileage_type")
         return {
             "provider": row["provider"],
