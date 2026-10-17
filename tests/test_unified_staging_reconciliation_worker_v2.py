@@ -15,6 +15,22 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
                          "destination": "Paris", "cargo": "Food"},
         }
 
+    async def test_quarantined_observation_cannot_award_with_feed_flags(self):
+        self.incoming.update({
+            "verified_delivery": False,
+            "eligible_for_award": False,
+            "trusted": False,
+        })
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_real_miles",
+                   new_callable=AsyncMock) as award:
+            result = await reconcile_and_stage_real_miles(
+                None, self.incoming, [],
+                provider_feed_complete=True,
+                provider_watermark=self.now + timedelta(minutes=31),
+            )
+            self.assertEqual(result["status"], "unverified_observation")
+            award.assert_not_awaited()
+
     async def test_no_feed_proof_cannot_award(self):
         with patch("unified_staging_reconciliation_worker_v2.award_staging_real_miles",
                    new_callable=AsyncMock) as award:
