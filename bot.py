@@ -7254,8 +7254,8 @@ async def cancel_verification(
 # ONBOARDING COMMAND ERROR HANDLING
 # --------------------------------------------------
 
-@verify_driver.error
-async def verify_driver_error(
+@register_driver.error
+async def register_driver_error(
     ctx,
     error,
 ):
