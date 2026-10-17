@@ -205,6 +205,13 @@ async def approve_provider_claim(pool, discord_user_id, provider, reviewer_id,
             """, discord_user_id, provider)
             if claim is None or claim["status"] != "pending":
                 raise ValueError("No pending claim for that provider")
+            steam_verified = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM unified_steam_links "
+                "WHERE discord_user_id=$1 AND verified_at IS NOT NULL)",
+                discord_user_id,
+            )
+            if not steam_verified:
+                raise ValueError("Verify Steam before provider approval")
             existing = await conn.fetchrow("""
                 SELECT provider_account_id FROM unified_provider_links
                 WHERE discord_user_id=$1 AND provider=$2 FOR UPDATE

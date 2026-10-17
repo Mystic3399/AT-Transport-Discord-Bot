@@ -157,6 +157,11 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         await profiles.begin_registration(self.pool, user, 991234567890123452)
         await profiles.begin_registration(self.pool, other, 991234567890123453)
         await profiles.submit_provider_claim(self.pool, user, "trucky", "209123", "Tester")
+        with self.assertRaisesRegex(ValueError, "Verify Steam"):
+            await profiles.approve_provider_claim(
+                self.pool, user, "trucky", 991234567890123499,
+                membership_confirmed=True, ownership_confirmed=True,
+            )
 
         async def link(who, identity, state, nonce):
             digest = hashlib.sha256(state.encode("ascii")).hexdigest()
