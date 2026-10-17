@@ -77,7 +77,8 @@ async def inspect_member_identity_fields(account_id):
     if not token:
         raise MembershipUnavailable("Trucky API token not configured")
     timeout = aiohttp.ClientTimeout(total=15)
-    headers = {"x-access-token": token, "Accept": "application/json"}
+    headers = {"x-access-token": token, "Accept": "application/json",
+               "User-Agent": "A&T Transport LTD Command Bot"}
     last_page = None
     async with aiohttp.ClientSession(timeout=timeout) as session:
         for page in range(1, MAX_PAGES + 1):
