@@ -6044,6 +6044,31 @@ async def link_steam_for_registration(ctx):
     )
 
 
+@bot.command(name="truckyidentitycheck")
+async def trucky_identity_diagnostics(ctx, account_id: str = None):
+    """Management-only read-only Trucky field inventory; never expose token or IDs."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        return
+    if not member_is_verification_staff(ctx.author):
+        return
+    if not account_id or not account_id.isdecimal():
+        await ctx.reply("Usage: `!truckyidentitycheck 209123`", mention_author=False)
+        return
+    try:
+        details = await trucky_membership_adapter.inspect_member_identity_fields(account_id)
+    except (ValueError, trucky_membership_adapter.MembershipUnavailable) as error:
+        await ctx.reply(f"Identity diagnostic unavailable: {error}", mention_author=False)
+        return
+    field_types = details["field_types"]
+    keys = ", ".join(f"`{key}` ({value})" for key, value in sorted(field_types.items()))
+    await ctx.reply(
+        f"Trucky roster account found: **{details['found']}**. "
+        f"Returned field names/types: {keys or 'none'}. "
+        "**No Steam ID has been trusted or approved by this diagnostic.**",
+        mention_author=False,
+    )
+
+
 @bot.command(name="steamstatus")
 async def steam_registration_status(ctx):
     """Show the applicant whether Steam ownership was verified."""
