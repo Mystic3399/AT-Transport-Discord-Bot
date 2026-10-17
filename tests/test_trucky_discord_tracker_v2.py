@@ -63,6 +63,14 @@ class TruckyDiscordReaderTests(unittest.TestCase):
         ])
         self.assertIsNone(parse_trucky_embed(self.embed))
 
+    def test_reject_zero_distance(self):
+        self.embed["description"] = "0 mi"
+        self.assertIsNone(parse_trucky_embed(self.embed))
+
+    def test_reject_multiple_job_identifiers(self):
+        self.embed["title"] = "Job Completed - #123 Job Completed - #456"
+        self.assertIsNone(parse_trucky_embed(self.embed))
+
     def test_reject_ambiguous_distance(self):
         self.embed["description"] = "129 mi. and 20 km"
         self.assertIsNone(parse_trucky_embed(self.embed))
