@@ -2716,11 +2716,17 @@ async def on_message(message):
                 message, expected_webhook_id=expected_id
             )
             if observed:
+                from trucky_observation_quarantine_v2 import quarantine_trucky_observation
+                quarantine = quarantine_trucky_observation(
+                    observed,
+                    discord_message_id=message.id,
+                    observed_at=message.created_at,
+                )
                 print(
-                    "TRUCKY STAGING OBSERVED: job=%s distance=%s %s type=%s; "
-                    "unverified, no mileage credited"
-                    % (observed["provider_job_id"], observed["distance"],
-                       observed["distance_unit"], observed["mileage_type"])
+                    "TRUCKY QUARANTINED: job=%s miles=%s type=%s status=%s; "
+                    "no driver match, database write, or mileage award"
+                    % (quarantine["provider_job_id"], quarantine["miles"],
+                       quarantine["mileage_type"], quarantine["review_status"])
                 )
         except Exception as error:
             print("TRUCKY STAGING OBSERVATION ERROR: %s" % type(error).__name__)
