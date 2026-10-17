@@ -2511,6 +2511,8 @@ async def on_ready():
         try:
             await setup_database()
             await trucky_linking.install_schema(db_pool)
+            await unified_driver_profiles.install_schema(db_pool)
+            await unified_driver_profiles.backfill_trucksbook_profiles(db_pool)
         except Exception as error:
             print(
                 f"DATABASE ERROR: {error}"
@@ -5940,14 +5942,14 @@ async def register_driver(ctx):
     embed = discord.Embed(
         title="🚛 A&T TRANSPORT LTD — UNIFIED DRIVER REGISTRATION",
         description=(
-            f"Welcome {member.mention}!\\n\\n"
-            "**Choose your tracking provider: TrucksBook, Trucky, or both.**\\n"
-            "Only one verified account is required to activate your A&T Driver Profile.\\n\\n"
-            "**TrucksBook** — Submit `!trucksbook 123456` using your TrucksBook profile ID.\\n"
-            "**Trucky** — Submit `!registertrucky 209123` using your Trucky account ID.\\n\\n"
+            f"Welcome {member.mention}!\n\n"
+            "**Choose your tracking provider: TrucksBook, Trucky, or both.**\n"
+            "Only one verified account is required to activate your A&T Driver Profile.\n\n"
+            "**TrucksBook** — Submit `!trucksbook 123456` using your TrucksBook profile ID.\n"
+            "**Trucky** — Submit `!registertrucky 209123` using your Trucky account ID.\n\n"
             "You may submit both IDs. Each provider requires independent membership "
-            "and ownership verification by A&T Management before activation.\\n\\n"
-            "If you started by mistake, type `!cancel`.\\n"
+            "and ownership verification by A&T Management before activation.\n\n"
+            "If you started by mistake, type `!cancel`.\n"
             "🔒 This channel is private to you and authorised A&T Management."
         ),
         colour=discord.Colour.blue(),
