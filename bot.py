@@ -6037,8 +6037,8 @@ async def link_steam_for_registration(ctx):
         await ctx.reply("Could not create a secure Steam login. Please try later.", mention_author=False)
         return
     await ctx.reply(
-        "🔐 **Verify your Steam account**\\n"
-        f"Sign in with Steam using this one-time link (expires in 10 minutes):\\n{url}\\n"
+        "🔐 **Verify your Steam account**\n"
+        f"Sign in with Steam using this one-time link (expires in 10 minutes):\n{url}\n"
         "Never share this link. Linking Steam alone does not approve a tracking provider.",
         mention_author=False,
     )
