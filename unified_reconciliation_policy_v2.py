@@ -21,7 +21,7 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None)
     if incoming["provider"] == "trucksbook" and incoming["mileage_type"] == "race":
         return "pending"  # TrucksBook race miles are not credited by A&T policy.
     delivered = incoming.get("delivered_at")
-    if delivered is None or delivered.tzinfo is None:
+    if delivered is None or getattr(delivered, "tzinfo", None) is None:
         return "pending"
     if not isinstance(other_provider_jobs, (list, tuple)):
         raise ValueError("Expected other-provider job collection")
@@ -31,8 +31,9 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None)
                 return "duplicate" if candidate.get("credited") is True else "pending"
         except (ValueError, KeyError, TypeError):
             return "pending"
-    if provider_watermark is None or provider_watermark.tzinfo is None:
+    if provider_watermark is None or getattr(provider_watermark, "tzinfo", None) is None:
         return "pending"
-    if provider_watermark < delivered + timedelta(minutes=30):
+    from datetime import timezone
+    if provider_watermark.astimezone(timezone.utc) < delivered.astimezone(timezone.utc) + timedelta(minutes=30):
         return "pending"
     return "creditable"
