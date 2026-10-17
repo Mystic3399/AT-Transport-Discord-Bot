@@ -7,7 +7,7 @@ from datetime import timedelta
 from unified_job_matching_v2 import is_candidate_duplicate
 
 
-def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None):
+def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None, provider_feed_complete=False):
     """Return 'duplicate', 'creditable', or 'pending'.
 
     creditable requires a trusted watermark proving the other provider's
@@ -31,6 +31,9 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None)
                 return "duplicate" if candidate.get("credited") is True else "pending"
         except (ValueError, KeyError, TypeError):
             return "pending"
+    # Time alone does not establish completeness of the other provider feed.
+    if provider_feed_complete is not True:
+        return "pending"
     if provider_watermark is None or getattr(provider_watermark, "tzinfo", None) is None:
         return "pending"
     from datetime import timezone
