@@ -67,6 +67,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_unified_schema_integrity.py' -v
       - name: Run disposable database registration integration tests
         run: python -m unittest discover -s tests -p 'test_registration_database_v2.py' -v
+      - name: Verify staging award schema against disposable PostgreSQL
+        run: python -m unittest discover -s tests -p 'test_staging_award_schema_database_v2.py' -v
       - name: Validate schema against temporary PostgreSQL
         run: |
           python - <<'PY'
