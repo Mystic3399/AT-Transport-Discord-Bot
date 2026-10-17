@@ -81,10 +81,44 @@ CREATE TABLE IF NOT EXISTS unified_job_matches (
  FOREIGN KEY(provider,provider_job_id)
  REFERENCES unified_provider_job_events(provider,provider_job_id)
 );
+CREATE TABLE IF NOT EXISTS unified_trucky_webhook_receipts (
+ receipt_id BIGSERIAL PRIMARY KEY,
+ payload_sha256 TEXT NOT NULL UNIQUE CHECK(payload_sha256 ~ '^[0-9a-f]{64}$'),
+ event_type TEXT NOT NULL,
+ candidate_job_id TEXT,
+ received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ review_status TEXT NOT NULL DEFAULT 'needs_api_verification'
+ CHECK(review_status IN ('needs_api_verification','verified','rejected'))
+);
 """
 async def install_schema(pool):
     async with pool.acquire() as conn:
         await conn.execute(SCHEMA)
+
+async def record_trucky_webhook_receipt(pool, payload_sha256, event_type, candidate_job_id=None):
+    """Persist minimal HMAC-authenticated receipt metadata for later API review.
+
+    This is deliberately not an award path: it stores no driver identity,
+    distance, raw payload, progression total, or role change.
+    """
+    import re
+    if not isinstance(payload_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", payload_sha256):
+        raise ValueError("Invalid payload digest")
+    if not isinstance(event_type, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", event_type):
+        raise ValueError("Invalid Trucky event type")
+    if candidate_job_id is not None:
+        if type(candidate_job_id) not in (str, int) or not str(candidate_job_id).isdecimal() or int(candidate_job_id) <= 0:
+            raise ValueError("Invalid candidate Trucky job ID")
+        candidate_job_id = str(candidate_job_id)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO unified_trucky_webhook_receipts
+                (payload_sha256,event_type,candidate_job_id)
+            VALUES($1,$2,$3)
+            ON CONFLICT(payload_sha256) DO NOTHING
+            RETURNING receipt_id
+        """, payload_sha256, event_type, candidate_job_id)
+        return row["receipt_id"] if row else None
 
 async def backfill_trucksbook_profiles(pool):
     """Idempotent identity backfill; no legacy table changes."""

@@ -67,6 +67,28 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.pool, "trucky", "job-991234560", user, "101", "km"
             )
 
+    async def test_signed_trucky_receipt_stores_no_identity_or_distance(self):
+        digest = hashlib.sha256(b"signed event bytes").hexdigest()
+        receipt_id = await profiles.record_trucky_webhook_receipt(
+            self.pool, digest, "job_completed", 991234560
+        )
+        self.assertIsNotNone(receipt_id)
+        self.assertIsNone(await profiles.record_trucky_webhook_receipt(
+            self.pool, digest, "job_completed", 991234560
+        ))
+        async with self.pool.acquire() as conn:
+            receipt = await conn.fetchrow("""
+                SELECT payload_sha256,event_type,candidate_job_id,review_status
+                FROM unified_trucky_webhook_receipts WHERE receipt_id=$1
+            """, receipt_id)
+            awards = await conn.fetchval(
+                "SELECT COUNT(*) FROM unified_provider_job_events WHERE provider='trucky'"
+            )
+        self.assertEqual(receipt["payload_sha256"], digest)
+        self.assertEqual(receipt["candidate_job_id"], "991234560")
+        self.assertEqual(receipt["review_status"], "needs_api_verification")
+        self.assertEqual(awards, 0)
+
     async def test_repeated_job_with_changed_delivery_time_is_rejected(self):
         from datetime import datetime, timedelta, timezone
         user = 991234567890123490

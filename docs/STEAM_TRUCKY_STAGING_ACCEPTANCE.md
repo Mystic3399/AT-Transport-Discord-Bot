@@ -11,10 +11,20 @@ the live A&T Command Bot until all acceptance checks pass.
 4. Confirm the provider API contract and whether a Steam field represents the
    member's authenticated Steam account. If absent or ambiguous, do not auto-approve.
 
+## HTTP routes in the bot service
+After database setup, additive schema installation and TrucksBook backfill
+succeed, the bot starts an aiohttp listener on Railway's `PORT`. It exposes
+`GET /healthz`, `GET /auth/steam/callback` and `POST /trucky/webhook`. The Steam
+callback uses the bot's PostgreSQL pool. A valid Trucky HMAC is stored only as
+its SHA-256 digest, event name and candidate job ID in
+`unified_trucky_webhook_receipts`; no driver identity or distance is stored,
+and no mileage is awarded. Missing or invalid HMAC is rejected.
+
 ## Steam login
 1. Use an isolated PostgreSQL staging database with additive schema installed.
-2. Configure HTTPS callback URL and realm; route the HTTPS reverse proxy to the
-   staging callback service at `/auth/steam/callback`.
+2. Configure `AT_STEAM_CALLBACK_URL` and `AT_STEAM_REALM` with the HTTPS public
+   origin and `/auth/steam/callback`; point the Steam OpenID return URL to the
+   bot service's generated Railway domain.
 3. Driver uses `/register`, then `!linksteam`, signs in via Steam.
 4. `!steamstatus` must show a verified SteamID64 only after Steam's OpenID
    `check_authentication` validates the assertion.
@@ -52,3 +62,10 @@ Acceptance tests still required:
 
 Never pass `trusted_provider_source=True` based on a public profile, driver
 input, or merely the presence of a field called steam_id.
+
+## Release delta
+The callback and bot now share the same Railway process when `PORT` is
+available. No development Railway domain or callback configuration has been
+applied. Signed Trucky receipts are durably quarantined for independent API
+review, but are not yet joined to an independently fetched completed-job
+record. Therefore the receiver is not a mileage ingestion or award path.

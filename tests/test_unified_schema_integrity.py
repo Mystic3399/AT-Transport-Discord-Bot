@@ -17,6 +17,7 @@ class SchemaIntegrityTests(unittest.TestCase):
             "unified_provider_claims",
             "unified_provider_job_events",
             "unified_job_matches",
+            "unified_trucky_webhook_receipts",
         ):
             self.assertEqual(
                 len(re.findall(r"CREATE TABLE IF NOT EXISTS\s+" + table + r"\s*\(", profiles.SCHEMA)),

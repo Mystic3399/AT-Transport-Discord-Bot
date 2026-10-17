@@ -15,9 +15,11 @@ from aiohttp import web
 import steam_openid_v2
 import unified_driver_profiles
 
+POOL_KEY = web.AppKey("pool", object)
+
 
 async def callback(request):
-    pool = request.app["pool"]
+    pool = request.app[POOL_KEY] if POOL_KEY in request.app else request.app["pool"]
     values = request.query
     if len(values) > 30 or any(len(values.getall(k)) != 1 for k in values):
         raise web.HTTPBadRequest(text="Invalid Steam callback")
@@ -63,7 +65,7 @@ async def callback(request):
 
 async def pool_context(app):
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=5)
-    app["pool"] = pool
+    app[POOL_KEY] = pool
     try:
         yield
     finally:
