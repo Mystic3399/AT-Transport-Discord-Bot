@@ -17,6 +17,12 @@ async def reconcile_and_stage_real_miles(
     An unknown/late opposite-provider feed means pending, not credit.
     Similar route/time records are candidates, not verified shared IDs.
     """
+    # Explicitly quarantined Discord observations must never reach awards,
+    # even when a caller mistakenly supplies complete-feed flags.
+    if (incoming.get("verified_delivery") is False
+            or incoming.get("eligible_for_award") is False
+            or incoming.get("trusted") is False):
+        return {"status": "unverified_observation", "credited_whole_miles": 0}
     decision = classify_delivery(
         incoming, other_provider_jobs,
         provider_watermark=provider_watermark,
