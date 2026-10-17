@@ -395,7 +395,7 @@ async def auto_approve_trucky_if_steam_matches(
 
 async def record_normalized_provider_job(
     pool, provider, provider_job_id, discord_user_id, distance, unit,
-    *, mileage_type="real", delivered_at=None
+    *, mileage_type="real", delivered_at=None, job_metadata=None
 ):
     """Idempotently stage a provider job in canonical miles; do not award mileage.
 
@@ -410,6 +410,9 @@ async def record_normalized_provider_job(
         raise ValueError("Missing provider job ID")
     if mileage_type not in ("real", "race"):
         raise ValueError("Unsupported mileage type")
+    if job_metadata is not None:
+        from unified_job_matching_v2 import _normalized_metadata
+        _normalized_metadata(job_metadata)
     original, canonical_unit, miles = normalize_distance(distance, unit)
     real = miles if mileage_type == "real" else 0
     race = miles if mileage_type == "race" else 0
@@ -418,6 +421,7 @@ async def record_normalized_provider_job(
         "original_unit": canonical_unit,
         "canonical_miles": str(miles),
         "mileage_type": mileage_type,
+        "job_metadata": job_metadata,
     })
     async with pool.acquire() as conn:
         async with conn.transaction():
