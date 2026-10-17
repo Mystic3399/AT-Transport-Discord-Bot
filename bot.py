@@ -18,6 +18,7 @@ from discord.ext import commands, tasks
 import trucky_linking
 import trucky_membership_adapter
 import unified_driver_profiles
+import steam_openid_v2
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -6001,6 +6002,46 @@ async def register_driver(ctx):
     print("--------------------------------")
 
 
+
+
+@bot.command(name="linksteam")
+async def link_steam_for_registration(ctx):
+    """Issue a one-time Steam sign-in URL in the applicant's private channel."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot:
+        return
+    if db_pool is None:
+        await ctx.reply("Registration is temporarily unavailable.", mention_author=False)
+        return
+    verification = await get_verification_by_channel(ctx.channel.id)
+    if verification is None or int(verification["discord_user_id"]) != ctx.author.id:
+        await ctx.reply("Use `!linksteam` in your own private /register channel.", mention_author=False)
+        return
+    callback = os.getenv("AT_STEAM_CALLBACK_URL", "").strip()
+    realm = os.getenv("AT_STEAM_REALM", "").strip()
+    if not callback or not realm:
+        await ctx.reply("Steam linking is not enabled yet. Your existing registration is unaffected.", mention_author=False)
+        return
+    try:
+        from urllib.parse import urlsplit
+        cb, root = urlsplit(callback), urlsplit(realm)
+        if (cb.scheme != "https" or root.scheme != "https"
+                or cb.netloc != root.netloc or cb.path != "/auth/steam/callback"
+                or cb.fragment or cb.username or cb.password):
+            raise ValueError("Steam callback configuration is invalid")
+        return_to = await unified_driver_profiles.create_steam_auth_state(
+            db_pool, ctx.author.id, callback
+        )
+        url = steam_openid_v2.make_login_url(return_to, realm)
+    except Exception as error:
+        print(f"STEAM LINK ERROR: {type(error).__name__}: {error}")
+        await ctx.reply("Could not create a secure Steam login. Please try later.", mention_author=False)
+        return
+    await ctx.reply(
+        "🔐 **Verify your Steam account**\\n"
+        f"Sign in with Steam using this one-time link (expires in 10 minutes):\\n{url}\\n"
+        "Never share this link. Linking Steam alone does not approve a tracking provider.",
+        mention_author=False,
+    )
 
 
 @bot.command(name="registertrucky")
