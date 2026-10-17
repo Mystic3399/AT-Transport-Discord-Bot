@@ -6014,6 +6014,39 @@ async def register_driver(ctx):
 
 
 
+@bot.hybrid_command(name="myregistration", description="Privately view your A&T driver account registration status")
+async def myregistration(ctx):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        return
+    async def respond(message):
+        if ctx.interaction is not None:
+            await ctx.reply(message, ephemeral=True, mention_author=False)
+        else:
+            try:
+                await ctx.author.send(message)
+                await ctx.message.add_reaction("📩")
+            except discord.Forbidden:
+                await ctx.reply("Please enable DMs or use the /myregistration slash command for a private response.", mention_author=False)
+    if db_pool is None:
+        await respond("The driver database is temporarily unavailable. Please try again shortly.")
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            tb = await conn.fetchrow("SELECT trucksbook_name FROM driver_links WHERE discord_user_id=$1", ctx.author.id)
+            tr = await conn.fetchrow("SELECT trucky_account_id, trucky_display_name FROM trucky_driver_links WHERE discord_user_id=$1", ctx.author.id)
+            pending = await conn.fetchrow("SELECT trucky_account_id, status FROM trucky_link_requests WHERE discord_user_id=$1 ORDER BY created_at DESC LIMIT 1", ctx.author.id)
+    except Exception:
+        print("MYREGISTRATION: account lookup failed", flush=True)
+        await respond("Account status is temporarily unavailable. Please contact A&T Management if this continues.")
+        return
+    if not tb:
+        await respond("🚛 **A&T Driver Registration**\\nTrucksBook: Not linked. Use **/register** in <#1553652697184473210> to begin private registration.")
+        return
+    trucky = (f"Linked: {tr['trucky_display_name']} (ID {tr['trucky_account_id']})" if tr else
+              f"Request {pending['status']} (ID {pending['trucky_account_id']})" if pending else "Not linked (optional)")
+    await respond(f"🚛 **Your A&T Driver Registration**\\nTrucksBook: Linked — {tb['trucksbook_name']}\\nTrucky: {trucky}\\nYour existing mileage and progression remain unchanged.")
+
+
 @bot.command(name="verify")
 async def retired_driver_verify(ctx):
     """Legacy driver command: redirect; security verification is separate."""
