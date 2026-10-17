@@ -44,6 +44,26 @@ async def install_staging_awards(pool):
                     "Outdated staging award table: recreate the disposable "
                     "staging database before testing"
                 )
+            unique_key = await conn.fetchval("""
+                SELECT EXISTS(
+                    SELECT 1 FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    JOIN pg_namespace n ON n.oid = t.relnamespace
+                    WHERE n.nspname = current_schema()
+                      AND t.relname = 'unified_staging_award_jobs'
+                      AND c.contype = 'u'
+                      AND (
+                        SELECT array_agg(a.attname ORDER BY a.attname)
+                        FROM unnest(c.conkey) AS k(attnum)
+                        JOIN pg_attribute a
+                          ON a.attrelid = t.oid AND a.attnum = k.attnum
+                      ) = ARRAY['canonical_delivery_key','discord_user_id']::name[]
+                )
+            """)
+            if not unique_key:
+                raise RuntimeError(
+                    "Staging award table lacks canonical journey uniqueness"
+                )
 
 async def award_staging_real_miles(pool, provider, job_id, discord_user_id, miles, *, canonical_delivery_key=None):
     """Award once by provider ID; no production writes or cross-provider promise.
