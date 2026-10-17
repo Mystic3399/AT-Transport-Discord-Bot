@@ -26,6 +26,8 @@ async def reconcile_and_stage_real_miles(
         return {"status": decision, "credited_whole_miles": 0}
     if incoming.get("mileage_type") != "real":
         return {"status": "unsupported_race_award", "credited_whole_miles": 0}
+    # Never treat caller-provided completeness flags as authenticated proof.
+    # This worker is staging-only; production must source them from a trusted feed.
     provider = incoming["provider"]
     job_id = incoming.get("provider_job_id")
     driver_id = incoming["discord_user_id"]
