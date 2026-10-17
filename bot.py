@@ -6089,12 +6089,20 @@ async def approve_unified_provider(ctx, provider: str = None):
 
 
 @bot.command(name="confirmprovider")
-async def confirm_unified_provider(ctx, provider: str = None):
+async def confirm_unified_provider(ctx, provider: str = None, ownership_evidence: str = None):
     """Final staff confirmation after independent ownership evidence review."""
     if ctx.guild is None or ctx.guild.id != GUILD_ID or not member_is_verification_staff(ctx.author):
         return
     if provider != "trucky" or db_pool is None:
-        await ctx.reply("V2 beta supports `!confirmprovider trucky` only.", mention_author=False)
+        await ctx.reply("V2 beta supports Trucky approval only.", mention_author=False)
+        return
+    if ownership_evidence != "OWNERSHIP-CHECKED":
+        await ctx.reply(
+            "Before approval, independently verify account ownership with the applicant. "
+            "Then use `!confirmprovider trucky OWNERSHIP-CHECKED`. "
+            "Do not use this acknowledgement based only on roster membership.",
+            mention_author=False,
+        )
         return
     verification = await get_verification_by_channel(ctx.channel.id)
     if verification is None:
