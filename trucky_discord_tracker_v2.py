@@ -20,12 +20,8 @@ def parse_trucky_embed(embed):
     fields = embed.get("fields") or []
     if not isinstance(fields, list):
         return None
-    text = "\n".join([title, description] + [
-        str(f.get("name") or "") + ": " + str(f.get("value") or "")
-        for f in fields if isinstance(f, dict)
-    ])
     match = JOB_RE.search(title)
-    if not match:
+    if not match or len(JOB_RE.findall(title)) != 1:
         return None
     # The embed layout may change; never guess distance from unrelated numbers.
     # Prefer the dedicated distance field when present; otherwise use the
@@ -42,6 +38,8 @@ def parse_trucky_embed(embed):
     if len(distance_matches) != 1:
         return None
     distance, unit = distance_matches[0]
+    if Decimal(distance) <= 0:
+        return None
     stat_fields = [
         str(f.get("value") or "").strip().lower()
         for f in fields if isinstance(f, dict)
