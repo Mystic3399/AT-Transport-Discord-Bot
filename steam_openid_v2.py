@@ -64,3 +64,14 @@ async def verify_steam_callback(params, expected_return_to):
     if "is_valid:true" not in answer.splitlines():
         raise ValueError("Steam rejected OpenID assertion")
     return match.group(1)
+
+def steam_ids_match(verified_steam_id, provider_steam_id, trusted_provider_source=False):
+    """Only match Steam identities returned by a trusted provider integration."""
+    if not trusted_provider_source:
+        return False
+    return (
+        isinstance(verified_steam_id, str)
+        and isinstance(provider_steam_id, str)
+        and CLAIMED.fullmatch("https://steamcommunity.com/openid/id/" + verified_steam_id) is not None
+        and verified_steam_id == provider_steam_id
+    )
