@@ -60,6 +60,40 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.pool, "trucky", "job-991234560", user, "101", "km"
             )
 
+    async def test_cross_provider_candidate_is_read_only(self):
+        from datetime import datetime, timedelta, timezone
+        from unified_job_review_v2 import suggest_cross_provider_matches
+        user = 991234567890123470
+        now = datetime(2026, 10, 17, 12, tzinfo=timezone.utc)
+        meta = {"game": "ets2", "origin": "London",
+                "destination": "Duisburg", "cargo": "Machinery"}
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO unified_driver_profiles(discord_user_id) VALUES($1)
+                ON CONFLICT DO NOTHING
+            """, user)
+            for provider, account in (("trucky", "991234570"),
+                                      ("trucksbook", "991234571")):
+                await conn.execute("""
+                    INSERT INTO unified_provider_links
+                        (provider,provider_account_id,discord_user_id,verified_at)
+                    VALUES($1,$2,$3,NOW()) ON CONFLICT DO NOTHING
+                """, provider, account, user)
+        await profiles.record_normalized_provider_job(
+            self.pool, "trucky", "match-trucky-991234570", user,
+            "100", "km", delivered_at=now, job_metadata=meta)
+        await profiles.record_normalized_provider_job(
+            self.pool, "trucksbook", "match-trucksbook-991234571", user,
+            "62.14", "mi", delivered_at=now + timedelta(minutes=10),
+            job_metadata=meta)
+        matches = await suggest_cross_provider_matches(
+            self.pool, "trucky", "match-trucky-991234570")
+        self.assertEqual(matches, [("trucksbook", "match-trucksbook-991234571")])
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval(
+                "SELECT COUNT(*) FROM unified_job_matches WHERE provider_job_id LIKE 'match-%'"
+            ), 0)
+
     async def test_steam_replay_account_switch_and_trucky_gate(self):
         user = 991234567890123450
         other = 991234567890123451
