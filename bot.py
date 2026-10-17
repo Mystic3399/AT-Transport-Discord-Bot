@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from discord.ext import commands, tasks
 import trucky_linking
 import trucky_membership_adapter
+import unified_driver_profiles
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -5881,6 +5882,10 @@ async def register_driver(ctx):
             member.id,
             verification_channel.id,
         )
+        # V2 shadow-write: do not activate or modify legacy mileage.
+        await unified_driver_profiles.begin_registration(
+            db_pool, member.id, verification_channel.id
+        )
 
     except Exception as error:
         print(
@@ -5933,35 +5938,17 @@ async def register_driver(ctx):
     # ------------------------------------------
 
     embed = discord.Embed(
-        title=(
-            "🚛 A&T TRANSPORT LTD — "
-            "DRIVER VERIFICATION"
-        ),
+        title="🚛 A&T TRANSPORT LTD — UNIFIED DRIVER REGISTRATION",
         description=(
-            f"Welcome {member.mention}.\n\n"
-            "This private channel has been created "
-            "to link your Discord account with your "
-            "TrucksBook driver profile.\n\n"
-            "**Step 1 — Find your TrucksBook User ID**\n"
-            "Open your TrucksBook profile. Your User "
-            "ID is the number at the end of your "
-            "profile URL.\n\n"
-            "Example:\n"
-            "`trucksbook.eu/profile/123456`\n\n"
-            "The User ID in this example is "
-            "`123456`.\n\n"
-            "**Step 2 — Submit the ID**\n"
-            "Type:\n"
-            "`!trucksbook 123456`\n\n"
-            "Replace `123456` with your own "
-            "TrucksBook User ID.\n\n"
-            "After submission, the account will "
-            "move to the verification stage.\n\n"
-            "If you started this by mistake, type:\n"
-            "`!cancel`\n\n"
-            "🔒 **This channel is private.** "
-            "Only you and authorised A&T "
-            "Management can see it."
+            f"Welcome {member.mention}!\\n\\n"
+            "**Choose your tracking provider: TrucksBook, Trucky, or both.**\\n"
+            "Only one verified account is required to activate your A&T Driver Profile.\\n\\n"
+            "**TrucksBook** — Submit `!trucksbook 123456` using your TrucksBook profile ID.\\n"
+            "**Trucky** — Submit `!registertrucky 209123` using your Trucky account ID.\\n\\n"
+            "You may submit both IDs. Each provider requires independent membership "
+            "and ownership verification by A&T Management before activation.\\n\\n"
+            "If you started by mistake, type `!cancel`.\\n"
+            "🔒 This channel is private to you and authorised A&T Management."
         ),
         colour=discord.Colour.blue(),
     )
@@ -5995,7 +5982,7 @@ async def register_driver(ctx):
             f"**Discord ID:** `{member.id}`\n"
             f"**Channel:** "
             f"{verification_channel.mention}\n"
-            "**Status:** Pending TrucksBook ID"
+            "**Status:** Pending provider verification"
         ),
     )
 
@@ -6012,6 +5999,44 @@ async def register_driver(ctx):
     print("--------------------------------")
 
 
+
+
+@bot.command(name="registertrucky")
+async def register_trucky_in_channel(ctx, account_id: str = None):
+    """V2 beta: record an unverified Trucky claim inside the existing private channel."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot:
+        return
+    if db_pool is None:
+        await ctx.reply("Registration database is unavailable.", mention_author=False)
+        return
+    verification = await get_verification_by_channel(ctx.channel.id)
+    if verification is None or int(verification["discord_user_id"]) != ctx.author.id:
+        await ctx.reply("Use this command in your own private /register channel.", mention_author=False)
+        return
+    if not account_id or not account_id.isdigit():
+        await ctx.reply("Please use `!registertrucky 209123` with your numeric Trucky ID.", mention_author=False)
+        return
+    try:
+        canonical_name = await trucky_membership_adapter.verify_member(account_id)
+        if canonical_name is None:
+            await ctx.reply("This account is not on the active A&T Trucky roster.", mention_author=False)
+            return
+        await unified_driver_profiles.submit_provider_claim(
+            db_pool, ctx.author.id, "trucky", account_id, canonical_name
+        )
+    except (ValueError, trucky_membership_adapter.MembershipUnavailable) as error:
+        await ctx.reply(f"Trucky verification unavailable: {error}. No claim approved.", mention_author=False)
+        return
+    except Exception as error:
+        print(f"V2 TRUCKY CLAIM ERROR: {type(error).__name__}: {error}")
+        await ctx.reply("Could not record your Trucky claim. Please contact management.", mention_author=False)
+        return
+    await ctx.reply(
+        f"Trucky account **{canonical_name}** (ID `{account_id}`) recorded as pending. "
+        "A&T Management must verify ownership before it can activate your profile. "
+        "No mileage has been imported.",
+        mention_author=False,
+    )
 
 
 @bot.hybrid_command(name="myregistration", description="Privately view your A&T driver account registration status")
