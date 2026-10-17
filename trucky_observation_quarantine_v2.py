@@ -17,7 +17,7 @@ def quarantine_trucky_observation(observed, *, discord_message_id, observed_at):
         raise ValueError("Invalid Trucky job ID")
     if type(discord_message_id) is not int or discord_message_id <= 0:
         raise ValueError("Invalid Discord message ID")
-    if (not isinstance(observed_at, datetime) or observed_at.tzinfo is None\n            or observed_at.utcoffset() is None):
+    if not isinstance(observed_at, datetime) or observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise ValueError("Timezone-aware observation time required")
     kind = observed.get("mileage_type")
     if kind not in ("real", "race"):
