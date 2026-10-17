@@ -6221,7 +6221,7 @@ async def register_trucky_in_channel(ctx, account_id: str = None):
         return
     await ctx.reply(
         f"Trucky account **{canonical_name}** (ID `{account_id}`) recorded as pending. "
-        "Complete a Trucky job within 30 minutes. A&T will link it only after a "
+        "Complete a Trucky job whenever you're ready; there is no deadline. A&T will link it only after a "
         "signed Trucky event carries the same Steam ID you verified with Steam OpenID "
         "and the authenticated Trucky roster still confirms A&T membership. "
         "No mileage has been imported.",
