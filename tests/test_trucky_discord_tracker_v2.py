@@ -51,6 +51,18 @@ class TruckyDiscordReaderTests(unittest.TestCase):
         self.embed["description"] = "Job Completed - #27805272; 129 mi"
         self.assertIsNone(parse_trucky_embed(self.embed))
 
+    def test_dedicated_distance_field(self):
+        self.embed["description"] = "Oslo to Hamar"
+        self.embed["fields"].append({"name": "Distance", "value": "129 mi"})
+        self.assertEqual(parse_trucky_embed(self.embed)["distance"], "129")
+
+    def test_reject_multiple_distance_fields(self):
+        self.embed["fields"].extend([
+            {"name": "Distance", "value": "129 mi"},
+            {"name": "Total Distance", "value": "129 mi"},
+        ])
+        self.assertIsNone(parse_trucky_embed(self.embed))
+
     def test_reject_ambiguous_distance(self):
         self.embed["description"] = "129 mi. and 20 km"
         self.assertIsNone(parse_trucky_embed(self.embed))
