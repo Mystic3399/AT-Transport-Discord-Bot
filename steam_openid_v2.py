@@ -11,7 +11,7 @@ import aiohttp
 ENDPOINT = "https://steamcommunity.com/openid/login"
 NAMESPACE = "http://specs.openid.net/auth/2.0"
 IDENTIFIER_SELECT = NAMESPACE + "/identifier_select"
-CLAIMED = re.compile(r"^https?://steamcommunity\.com/openid/id/(7656119[0-9]{10})$")
+CLAIMED = re.compile(r"^https://steamcommunity\.com/openid/id/(7656119[0-9]{10})$")
 
 
 def make_login_url(return_to, realm):
@@ -20,7 +20,9 @@ def make_login_url(return_to, realm):
     root = urlsplit(realm)
     if callback.scheme != "https" or root.scheme != "https":
         raise ValueError("Steam callbacks require HTTPS")
-    if callback.netloc != root.netloc or not callback.path.startswith("/"):
+    if (callback.netloc != root.netloc or callback.username or callback.password
+            or root.username or root.password or callback.fragment
+            or callback.path != "/auth/steam/callback"):
         raise ValueError("Steam callback must use the configured site origin")
     return ENDPOINT + "?" + urlencode({
         "openid.ns": NAMESPACE,
