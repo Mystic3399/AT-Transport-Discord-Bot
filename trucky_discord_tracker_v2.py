@@ -24,11 +24,11 @@ def parse_trucky_embed(embed):
         str(f.get("name") or "") + ": " + str(f.get("value") or "")
         for f in fields if isinstance(f, dict)
     ])
-    match = JOB_RE.search(text)
+    match = JOB_RE.search(title)
     if not match:
         return None
     # The embed layout may change; never guess distance from unrelated numbers.
-    distance_matches = DISTANCE_RE.findall(text)
+    distance_matches = DISTANCE_RE.findall(description)
     if len(distance_matches) != 1:
         return None
     distance, unit = distance_matches[0]
