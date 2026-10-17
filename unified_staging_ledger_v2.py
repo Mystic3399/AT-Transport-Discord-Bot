@@ -66,32 +66,12 @@ async def staging_totals(pool, discord_user_id):
         """, discord_user_id)
         return dict(row)
 
-async def auto_credit_unmatched_job(pool, provider, job_id):
-    """Automatically credit only when complete metadata rules out a cross-provider match.
+async def queue_provider_job_for_reconciliation(pool, provider, job_id):
+    """Queue a job without awarding mileage or requiring routine staff approval.
 
-    Ambiguous jobs stay uncredited for review; never touch legacy driver totals.
+    A separate, trusted reconciliation worker must establish duplicate status
+    and the other provider's event watermark before crediting a delivery.
     """
-    from unified_job_review_v2 import suggest_cross_provider_matches
     if provider not in ("trucky", "trucksbook") or not isinstance(job_id, str) or not job_id:
         raise ValueError("Invalid job reference")
-    async with pool.acquire() as conn:
-        event = await conn.fetchrow("""
-            SELECT discord_user_id,delivered_at,source_payload
-            FROM unified_provider_job_events
-            WHERE provider=$1 AND provider_job_id=$2
-        """, provider, job_id)
-    if event is None:
-        raise ValueError("Unknown provider job")
-    import json
-    payload = event["source_payload"]
-    if isinstance(payload, str):
-        payload = json.loads(payload)
-    if not isinstance(payload, dict) or not payload.get("job_metadata") or event["delivered_at"] is None:
-        return await stage_decision(pool, provider, job_id, "review")
-    candidates = await suggest_cross_provider_matches(pool, provider, job_id)
-    # A matching event requires human reconciliation; no duplicate credit.
-    if candidates:
-        return await stage_decision(pool, provider, job_id, "review")
-    # A no-match decision is not yet safe to auto-credit: the other provider
-    # may deliver the same job later. Leave pending for reconciliation.
     return await stage_decision(pool, provider, job_id, "review")
