@@ -99,6 +99,15 @@ class StagingAwardTests(unittest.IsolatedAsyncioTestCase):
                 "1.12345678901", canonical_delivery_key="journey-1")
         self.assertEqual(conn.whole, 0)
 
+    async def test_invalid_mileage_rejected_before_database_write(self):
+        for amount in ("NaN", "Infinity", "-1", "0", "not-a-number", None):
+            with self.subTest(amount=amount):
+                conn = _Connection()
+                with self.assertRaises(ValueError):
+                    await award_staging_real_miles(_Pool(conn), "trucky", "job-a",
+                        123, amount, canonical_delivery_key="journey-1")
+                self.assertEqual(conn.whole, 0)
+
     async def test_driver_mismatch_rejected(self):
         conn = _Connection()
         conn.current = "5"
