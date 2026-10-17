@@ -35,6 +35,7 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
         return "pending"
     if not isinstance(other_provider_jobs, (list, tuple)):
         raise ValueError("Expected other-provider job collection")
+    has_uncredited_match = False
     for candidate in other_provider_jobs:
         try:
             # A candidate from the wrong provider or driver is not evidence
@@ -42,9 +43,13 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
             if candidate.get("provider") == incoming["provider"]:
                 return "pending"
             if is_candidate_duplicate(incoming, candidate):
-                return "duplicate" if candidate.get("credited") is True else "pending"
+                if candidate.get("credited") is True:
+                    return "duplicate"
+                has_uncredited_match = True
         except (ValueError, KeyError, TypeError):
             return "pending"
+    if has_uncredited_match:
+        return "pending"
     # Time alone does not establish completeness of the other provider feed.
     if provider_feed_complete is not True:
         return "pending"
