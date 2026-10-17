@@ -6126,8 +6126,14 @@ async def link_steam_for_registration(ctx):
 async def trucky_identity_diagnostics(ctx, account_id: str = None):
     """Management-only read-only Trucky field inventory; never expose token or IDs."""
     if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        await ctx.reply("This diagnostic is only available in the configured staging server.", mention_author=False)
         return
     if not member_is_verification_staff(ctx.author):
+        await ctx.reply(
+            "This diagnostic requires a configured A&T verification-staff role. "
+            "Ask the staging administrator to configure VERIFICATION_STAFF_ROLE_IDS for this server.",
+            mention_author=False,
+        )
         return
     if not account_id or not account_id.isdecimal():
         await ctx.reply("Usage: `!truckyidentitycheck 209123`", mention_author=False)
