@@ -40,6 +40,22 @@ class QuarantineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.observe()
 
+    def test_rejects_boolean_message_id(self):
+        with self.assertRaises(ValueError):
+            quarantine_trucky_observation(
+                self.event, discord_message_id=True, observed_at=self.now
+            )
+
+    def test_rejects_missing_driver_name(self):
+        self.event["display_name_unverified"] = ""
+        with self.assertRaises(ValueError):
+            self.observe()
+
+    def test_rejects_unrecognised_provider(self):
+        self.event["provider"] = "trucksbook"
+        with self.assertRaises(ValueError):
+            self.observe()
+
     def test_requires_timezone(self):
         with self.assertRaises(ValueError):
             quarantine_trucky_observation(
