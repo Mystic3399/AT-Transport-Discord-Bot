@@ -6128,8 +6128,9 @@ async def register_trucky_in_channel(ctx, account_id: str = None):
         return
     await ctx.reply(
         f"Trucky account **{canonical_name}** (ID `{account_id}`) recorded as pending. "
-        "A&T Management must verify ownership before it can activate your profile. "
-        "No mileage has been imported.",
+        "Use `!linksteam` to verify your Steam account, then `!steamstatus` to check it. "
+        "Automatic linking will only become available when Trucky Steam identity "
+        "matching has passed staging checks. No mileage has been imported.",
         mention_author=False,
     )
 
