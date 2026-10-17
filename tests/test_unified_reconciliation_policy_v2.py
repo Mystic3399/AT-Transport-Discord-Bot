@@ -15,13 +15,17 @@ class ReconciliationTests(unittest.TestCase):
     def test_missing_watermark_never_credits(self):
         self.assertEqual(classify_delivery(BASE, []), "pending")
 
+    def test_clock_alone_cannot_prove_provider_completeness(self):
+        self.assertEqual(classify_delivery(BASE, [],
+            provider_watermark=TIME + timedelta(hours=1)), "pending")
+
     def test_complete_other_feed_allows_unique_job(self):
         self.assertEqual(classify_delivery(BASE, [],
-            provider_watermark=TIME + timedelta(hours=1)), "creditable")
+            provider_watermark=TIME + timedelta(hours=1), provider_feed_complete=True), "creditable")
 
     def test_incomplete_other_feed_stays_pending(self):
         self.assertEqual(classify_delivery(BASE, [],
-            provider_watermark=TIME + timedelta(minutes=20)), "pending")
+            provider_watermark=TIME + timedelta(minutes=20), provider_feed_complete=True), "pending")
 
     def test_matching_job_must_have_been_credited_to_skip(self):
         other = {**BASE, "provider": "trucksbook"}
@@ -33,7 +37,7 @@ class ReconciliationTests(unittest.TestCase):
     def test_watermark_in_different_timezone(self):
         from datetime import timezone
         watermark = (TIME + timedelta(hours=1)).astimezone(timezone(timedelta(hours=2)))
-        self.assertEqual(classify_delivery(BASE, [], provider_watermark=watermark), "creditable")
+        self.assertEqual(classify_delivery(BASE, [], provider_watermark=watermark, provider_feed_complete=True), "creditable")
 
     def test_trucksbook_race_not_eligible(self):
         self.assertEqual(classify_delivery({**BASE, "provider": "trucksbook",
@@ -42,7 +46,7 @@ class ReconciliationTests(unittest.TestCase):
     def test_different_driver_is_not_duplicate(self):
         other = {**BASE, "provider": "trucksbook", "discord_user_id": 999, "credited": True}
         self.assertEqual(classify_delivery(BASE, [other],
-            provider_watermark=TIME + timedelta(hours=1)), "creditable")
+            provider_watermark=TIME + timedelta(hours=1), provider_feed_complete=True), "creditable")
 
 
 if __name__ == "__main__":
