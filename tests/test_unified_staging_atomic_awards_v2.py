@@ -1,0 +1,77 @@
+import unittest
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
+from unified_staging_atomic_awards_v2 import award_staging_real_miles
+
+
+class _Connection:
+    def __init__(self):
+        self.whole = 0
+        self.fraction = Decimal("0")
+        self.inserted = set()
+        self.current = None
+
+    def transaction(self):
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=None)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+    async def fetchrow(self, query, *args):
+        if "FROM unified_provider_job_events" in query:
+            return {"discord_user_id":123, "real_miles":Decimal(str(self.current)),
+                    "race_miles":Decimal("0")}
+        if "FROM unified_staging_award_carry" in query:
+            return {"whole_miles":self.whole,"fractional_miles":self.fraction}
+        raise AssertionError(query)
+
+    async def fetchval(self, query, *args):
+        key = (args[0], args[1])
+        if key in self.inserted:
+            return None
+        self.inserted.add(key)
+        return args[1]
+
+    async def execute(self, query, *args):
+        if "UPDATE unified_staging_award_carry" in query:
+            self.whole += args[1]
+            self.fraction = args[2]
+        return "OK"
+
+
+class _Pool:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def acquire(self):
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=self.conn)
+        cm.__aexit__ = AsyncMock(return_value=False)
+        return cm
+
+
+class StagingAwardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_duplicate_provider_id_and_fractional_carry(self):
+        conn = _Connection()
+        pool = _Pool(conn)
+        conn.current = "0.65"
+        first = await award_staging_real_miles(pool, "trucky", "job-a", 123, "0.65")
+        self.assertEqual(first["credited_whole_miles"], 0)
+        conn.current = "0.55"
+        second = await award_staging_real_miles(pool, "trucky", "job-b", 123, "0.55")
+        self.assertEqual(second["credited_whole_miles"], 1)
+        self.assertEqual(second["fractional_miles"], "0.20")
+        conn.current = "0.65"
+        duplicate = await award_staging_real_miles(pool, "trucky", "job-a", 123, "0.65")
+        self.assertEqual(duplicate["status"], "duplicate_provider_job")
+        self.assertEqual(conn.whole, 1)
+
+    async def test_driver_mismatch_rejected(self):
+        conn = _Connection()
+        conn.current = "5"
+        with self.assertRaises(ValueError):
+            await award_staging_real_miles(_Pool(conn), "trucky", "job-a", 999, "5")
+
+
+if __name__ == "__main__":
+    unittest.main()
