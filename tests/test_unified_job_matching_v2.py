@@ -37,6 +37,12 @@ class MatchingTests(unittest.TestCase):
                     BASE, {**BASE, "provider": "trucksbook", **changed}
                 ))
 
+    def test_unknown_mileage_classification_never_matches(self):
+        self.assertFalse(is_candidate_duplicate(
+            {**BASE, "mileage_type": None},
+            {**BASE, "provider": "trucksbook", "mileage_type": None}
+        ))
+
     def test_missing_metadata_fails_closed(self):
         with self.assertRaises(ValueError):
             is_candidate_duplicate(BASE, {**BASE, "provider": "trucksbook",
