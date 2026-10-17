@@ -513,3 +513,26 @@ async def bind_verified_steam(pool, discord_user_id, steam_id64, state_hash, non
                 UPDATE unified_steam_auth_states SET consumed_at=NOW()
                 WHERE state_hash=$1
             """,state_hash)
+
+async def create_steam_auth_state(pool, discord_user_id, callback_base, ttl_minutes=10):
+    """Persist one-time opaque browser state, returning its URL-safe raw token."""
+    import secrets
+    import hashlib
+    from urllib.parse import urlsplit, urlencode, urlunsplit, parse_qsl
+    parsed = urlsplit(callback_base)
+    if parsed.scheme != "https" or not parsed.netloc:
+        raise ValueError("HTTPS callback required")
+    if ttl_minutes < 1 or ttl_minutes > 15:
+        raise ValueError("Invalid Steam login TTL")
+    token = secrets.token_urlsafe(32)
+    token_hash = hashlib.sha256(token.encode("ascii")).hexdigest()
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["state"] = token
+    expected_return_to = urlunsplit((parsed.scheme,parsed.netloc,parsed.path,urlencode(query),""))
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO unified_steam_auth_states
+                (state_hash,discord_user_id,expected_return_to,expires_at)
+            VALUES($1,$2,$3,NOW()+($4 * INTERVAL '1 minute'))
+        """,token_hash,discord_user_id,expected_return_to,ttl_minutes)
+    return expected_return_to
