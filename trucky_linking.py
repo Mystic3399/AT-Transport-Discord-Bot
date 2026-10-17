@@ -21,8 +21,13 @@ CREATE TABLE IF NOT EXISTS trucky_link_requests (
     status TEXT NOT NULL DEFAULT 'pending'
         CHECK (status IN ('pending','approved','rejected','cancelled')),
     reviewed_by BIGINT,
-    reviewed_at TIMESTAMPTZ
+    reviewed_at TIMESTAMPTZ,
+    membership_status TEXT NOT NULL DEFAULT 'unverified'
+        CHECK (membership_status IN ('unverified','confirmed','not_member')),
+    membership_checked_at TIMESTAMPTZ
 );
+ALTER TABLE trucky_link_requests ADD COLUMN IF NOT EXISTS membership_status TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE trucky_link_requests ADD COLUMN IF NOT EXISTS membership_checked_at TIMESTAMPTZ;
 CREATE UNIQUE INDEX IF NOT EXISTS unique_pending_trucky_account
     ON trucky_link_requests (trucky_account_id) WHERE status = 'pending';
 """
@@ -66,6 +71,7 @@ async def request_link(pool, discord_user_id, account_id, display_name):
                      trucky_account_id=EXCLUDED.trucky_account_id,
                      trucky_display_name=EXCLUDED.trucky_display_name,
                      status='pending',reviewed_by=NULL,reviewed_at=NULL,
+                     membership_status='unverified',membership_checked_at=NULL,
                      requested_at=NOW()""",
                 discord_user_id, account_id, display_name,
             )
@@ -82,6 +88,8 @@ async def approve_link(pool, discord_user_id, moderator_id):
             )
             if req is None:
                 raise ValueError("No pending Trucky request")
+            if req['membership_status'] != 'confirmed':
+                raise ValueError('Trucky A&T company membership has not been verified')
             await conn.execute(
                 """INSERT INTO trucky_driver_links
                    (discord_user_id,trucky_account_id,trucky_display_name,verified_by)
@@ -106,3 +114,25 @@ async def reject_link(pool, discord_user_id, moderator_id):
             discord_user_id, moderator_id,
         )
         return result == "UPDATE 1"
+
+
+async def record_membership_check(pool, discord_user_id, is_member):
+    """Record a result only after an authenticated Trucky company API lookup.
+
+    Caller must be trusted backend integration code, never a Discord command.
+    A non-member is rejected. API failures must not call this function.
+    """
+    status = "confirmed" if is_member else "not_member"
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """SELECT status FROM trucky_link_requests
+                   WHERE discord_user_id=$1 FOR UPDATE""", discord_user_id)
+            if row is None or row["status"] != "pending":
+                raise ValueError("No pending request")
+            await conn.execute(
+                """UPDATE trucky_link_requests
+                   SET membership_status=$2,membership_checked_at=NOW(),
+                       status=CASE WHEN $2='not_member' THEN 'rejected' ELSE status END
+                   WHERE discord_user_id=$1""", discord_user_id, status)
+    return status
