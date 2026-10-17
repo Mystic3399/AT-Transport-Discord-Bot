@@ -497,6 +497,12 @@ async def bind_verified_steam(pool, discord_user_id, steam_id64, state_hash, non
             """,nonce)
             if nonce_result != "INSERT 0 1":
                 raise ValueError("Steam OpenID response was already used")
+            existing_steam = await conn.fetchval("""
+                SELECT steam_id64 FROM unified_steam_links
+                WHERE discord_user_id=$1 FOR UPDATE
+            """,discord_user_id)
+            if existing_steam is not None and existing_steam != steam_id64:
+                raise ValueError("Steam account change requires exception review")
             other = await conn.fetchval("""
                 SELECT discord_user_id FROM unified_steam_links
                 WHERE steam_id64=$1 FOR UPDATE
