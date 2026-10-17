@@ -1,13 +1,15 @@
 import unittest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
-from unified_staging_atomic_awards_v2 import award_staging_real_miles
+from unified_staging_atomic_awards_v2 import award_staging_miles, award_staging_real_miles
 
 
 class _Connection:
     def __init__(self):
         self.whole = 0
         self.fraction = Decimal("0")
+        self.race_whole = 0
+        self.race_fraction = Decimal("0")
         self.inserted = set()
         self.canonical = set()
         self.saved = {}
@@ -22,27 +24,35 @@ class _Connection:
     async def fetchrow(self, query, *args):
         if "FROM unified_provider_job_events" in query:
             return {"discord_user_id":123, "real_miles":Decimal(str(self.current)),
-                    "race_miles":Decimal("0")}
+                    "race_miles":Decimal(str(getattr(self, "current_race", "0")))}
         if "FROM unified_staging_award_jobs" in query:
             return self.saved.get((args[0], args[1]))
         if "FROM unified_staging_award_carry" in query:
-            return {"whole_miles":self.whole,"fractional_miles":self.fraction}
+            race = "race_fractional_miles" in query
+            return {"whole_miles":self.race_whole if race else self.whole,
+                    "fractional_miles":self.race_fraction if race else self.fraction,
+                    "race_whole_miles":self.race_whole,
+                    "race_fractional_miles":self.race_fraction}
         raise AssertionError(query)
 
     async def fetchval(self, query, *args):
         key = (args[0], args[1])
-        if key in self.inserted or (args[2], args[4]) in self.canonical:
+        if key in self.inserted or (args[2], args[5]) in self.canonical:
             return None
         self.inserted.add(key)
-        self.canonical.add((args[2], args[4]))
+        self.canonical.add((args[2], args[5]))
         self.saved[key] = {"discord_user_id":args[2], "miles":args[3],
-                           "canonical_delivery_key":args[4]}
+                           "mileage_type":args[4], "canonical_delivery_key":args[5]}
         return args[1]
 
     async def execute(self, query, *args):
         if "UPDATE unified_staging_award_carry" in query:
-            self.whole += args[1]
-            self.fraction = args[2]
+            if "race_whole_miles" in query:
+                self.race_whole += args[1]
+                self.race_fraction = args[2]
+            else:
+                self.whole += args[1]
+                self.fraction = args[2]
         return "OK"
 
 
@@ -113,6 +123,29 @@ class StagingAwardTests(unittest.IsolatedAsyncioTestCase):
         conn.current = "5"
         with self.assertRaises(ValueError):
             await award_staging_real_miles(_Pool(conn), "trucky", "job-a", 999, "5", canonical_delivery_key="delivery-a")
+
+    async def test_trucky_race_miles_have_independent_fractional_carry(self):
+        conn = _Connection()
+        pool = _Pool(conn)
+        conn.current = "0"
+        conn.current_race = "0.65"
+        first = await award_staging_miles(pool, "trucky", "race-a", 123, "0.65",
+            mileage_type="race", canonical_delivery_key="race-delivery-a")
+        self.assertEqual(first["credited_race_miles"], 0)
+        conn.current_race = "0.55"
+        second = await award_staging_miles(pool, "trucky", "race-b", 123, "0.55",
+            mileage_type="race", canonical_delivery_key="race-delivery-b")
+        self.assertEqual(second["credited_race_miles"], 1)
+        self.assertEqual(second["fractional_miles"], "0.20")
+        self.assertEqual(conn.whole, 0)
+        self.assertEqual(conn.race_whole, 1)
+
+    async def test_trucksbook_race_miles_are_rejected(self):
+        conn = _Connection()
+        with self.assertRaises(ValueError):
+            await award_staging_miles(_Pool(conn), "trucksbook", "race-a", 123, "5",
+                mileage_type="race", canonical_delivery_key="race-delivery-a")
+        self.assertEqual(conn.race_whole, 0)
 
 
 if __name__ == "__main__":

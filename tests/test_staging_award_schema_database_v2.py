@@ -5,6 +5,7 @@ Run only against a database explicitly marked disposable.
 import os
 import unittest
 from decimal import Decimal
+from decimal import Decimal
 
 try:
     import asyncpg
@@ -12,7 +13,8 @@ except ImportError:
     asyncpg = None
 
 from unified_driver_profiles import SCHEMA as PROFILE_SCHEMA
-from unified_staging_atomic_awards_v2 import install_staging_awards
+from unified_staging_atomic_awards_v2 import install_staging_awards, award_staging_miles
+from unified_driver_profiles import record_normalized_provider_job
 
 @unittest.skipUnless(
     asyncpg is not None
@@ -40,6 +42,45 @@ class StagingSchemaDatabaseTests(unittest.IsolatedAsyncioTestCase):
                   AND c.contype='u'
             """)
         self.assertGreaterEqual(found, 1)
+
+    async def test_trucky_race_awards_use_independent_postgres_carry(self):
+        user = 991234567890123440
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO unified_driver_profiles(discord_user_id)
+                VALUES($1) ON CONFLICT DO NOTHING
+            """, user)
+            await conn.execute("""
+                INSERT INTO unified_provider_links
+                    (provider,provider_account_id,discord_user_id,verified_at)
+                VALUES('trucky','991234567890123441',$1,NOW())
+                ON CONFLICT DO NOTHING
+            """, user)
+        await install_staging_awards(self.pool)
+        await record_normalized_provider_job(
+            self.pool, "trucky", "race-991234567890123441", user,
+            "100", "km", mileage_type="race")
+        result = await award_staging_miles(
+            self.pool, "trucky", "race-991234567890123441", user, "62.14",
+            mileage_type="race",
+            canonical_delivery_key="provider:trucky:race-991234567890123441")
+        self.assertEqual(result["credited_race_miles"], 62)
+        self.assertEqual(result["fractional_miles"], "0.14")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT whole_miles,fractional_miles,race_whole_miles,
+                       race_fractional_miles
+                FROM unified_staging_award_carry WHERE discord_user_id=$1
+            """, user)
+        self.assertEqual(row["whole_miles"], 0)
+        self.assertEqual(row["fractional_miles"], Decimal("0"))
+        self.assertEqual(row["race_whole_miles"], 62)
+        self.assertEqual(row["race_fractional_miles"], Decimal("0.14"))
+        duplicate = await award_staging_miles(
+            self.pool, "trucky", "race-991234567890123441", user, "62.14",
+            mileage_type="race",
+            canonical_delivery_key="provider:trucky:race-991234567890123441")
+        self.assertEqual(duplicate["status"], "duplicate_provider_job")
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,9 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
-from unified_staging_reconciliation_worker_v2 import reconcile_and_stage_real_miles
+from unified_staging_reconciliation_worker_v2 import (
+    reconcile_and_stage_miles, reconcile_and_stage_real_miles,
+)
 
 
 class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
@@ -21,9 +23,9 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
             "eligible_for_award": False,
             "trusted": False,
         })
-        with patch("unified_staging_reconciliation_worker_v2.award_staging_real_miles",
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:
-            result = await reconcile_and_stage_real_miles(
+            result = await reconcile_and_stage_miles(
                 None, self.incoming, [],
                 provider_feed_complete=True,
                 provider_watermark=self.now + timedelta(minutes=31),
@@ -32,17 +34,17 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
             award.assert_not_awaited()
 
     async def test_no_feed_proof_cannot_award(self):
-        with patch("unified_staging_reconciliation_worker_v2.award_staging_real_miles",
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:
-            result = await reconcile_and_stage_real_miles(None, self.incoming, [])
+            result = await reconcile_and_stage_miles(None, self.incoming, [])
             self.assertEqual(result["status"], "pending")
             award.assert_not_awaited()
 
     async def test_complete_feed_allows_staging_only(self):
-        with patch("unified_staging_reconciliation_worker_v2.award_staging_real_miles",
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:
             award.return_value = {"status": "staging_awarded", "credited_whole_miles": 60}
-            result = await reconcile_and_stage_real_miles(
+            result = await reconcile_and_stage_miles(
                 None, self.incoming, [],
                 provider_feed_complete=True,
                 provider_watermark=self.now + timedelta(minutes=31),
@@ -52,14 +54,39 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
                              "provider:trucky:t-100")
 
     async def test_unverified_shared_identity_never_awards(self):
-        with patch("unified_staging_reconciliation_worker_v2.award_staging_real_miles",
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:
             with self.assertRaises(ValueError):
-                await reconcile_and_stage_real_miles(
+                await reconcile_and_stage_miles(
                     None, self.incoming, [], provider_feed_complete=True,
                     provider_watermark=self.now + timedelta(minutes=31),
                     shared_journey_id="shared-100",
                 )
+            award.assert_not_awaited()
+
+    async def test_trucky_race_miles_reach_separate_staging_ledger(self):
+        self.incoming.update({"mileage_type": "race", "miles": "75"})
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
+                   new_callable=AsyncMock) as award:
+            award.return_value = {"status": "staging_awarded", "credited_race_miles": 75}
+            result = await reconcile_and_stage_miles(
+                None, self.incoming, [],
+                provider_feed_complete=True,
+                provider_watermark=self.now + timedelta(minutes=31),
+            )
+            self.assertEqual(result["status"], "staging_awarded")
+            self.assertEqual(award.await_args.kwargs["mileage_type"], "race")
+
+    async def test_trucksbook_race_miles_never_reach_staging_award(self):
+        self.incoming.update({"provider": "trucksbook", "mileage_type": "race"})
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
+                   new_callable=AsyncMock) as award:
+            result = await reconcile_and_stage_miles(
+                None, self.incoming, [],
+                provider_feed_complete=True,
+                provider_watermark=self.now + timedelta(minutes=31),
+            )
+            self.assertEqual(result["status"], "pending")
             award.assert_not_awaited()
 
 

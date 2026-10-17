@@ -4,10 +4,10 @@ This module never modifies production mileage or Discord roles.
 """
 from unified_reconciliation_policy_v2 import classify_delivery
 from unified_canonical_journey_v2 import canonical_delivery_key
-from unified_staging_atomic_awards_v2 import award_staging_real_miles
+from unified_staging_atomic_awards_v2 import award_staging_miles
 
 
-async def reconcile_and_stage_real_miles(
+async def reconcile_and_stage_miles(
     pool, incoming, other_provider_jobs, *,
     provider_watermark=None, provider_feed_complete=False,
     shared_journey_id=None, shared_id_verified=False
@@ -30,8 +30,6 @@ async def reconcile_and_stage_real_miles(
     )
     if decision != "creditable":
         return {"status": decision, "credited_whole_miles": 0}
-    if incoming.get("mileage_type") != "real":
-        return {"status": "unsupported_race_award", "credited_whole_miles": 0}
     # Never treat caller-provided completeness flags as authenticated proof.
     # This worker is staging-only; production must source them from a trusted feed.
     provider = incoming["provider"]
@@ -42,7 +40,16 @@ async def reconcile_and_stage_real_miles(
         shared_journey_id=shared_journey_id,
         shared_id_verified=shared_id_verified,
     )
-    return await award_staging_real_miles(
+    return await award_staging_miles(
         pool, provider, job_id, driver_id, incoming["miles"],
+        mileage_type=incoming["mileage_type"],
         canonical_delivery_key=key,
     )
+
+
+async def reconcile_and_stage_real_miles(*args, **kwargs):
+    """Backward-compatible alias for existing real-mile callers."""
+    incoming = args[1] if len(args) > 1 else kwargs.get("incoming", {})
+    if incoming.get("mileage_type") != "real":
+        return {"status": "unsupported_race_award", "credited_whole_miles": 0}
+    return await reconcile_and_stage_miles(*args, **kwargs)

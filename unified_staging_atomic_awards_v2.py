@@ -11,13 +11,17 @@ CREATE TABLE IF NOT EXISTS unified_staging_award_carry (
  discord_user_id BIGINT PRIMARY KEY REFERENCES unified_driver_profiles(discord_user_id),
  whole_miles BIGINT NOT NULL DEFAULT 0 CHECK(whole_miles>=0),
  fractional_miles NUMERIC(20,10) NOT NULL DEFAULT 0
-    CHECK(fractional_miles>=0 AND fractional_miles<1)
+    CHECK(fractional_miles>=0 AND fractional_miles<1),
+ race_whole_miles BIGINT NOT NULL DEFAULT 0 CHECK(race_whole_miles>=0),
+ race_fractional_miles NUMERIC(20,10) NOT NULL DEFAULT 0
+    CHECK(race_fractional_miles>=0 AND race_fractional_miles<1)
 );
 CREATE TABLE IF NOT EXISTS unified_staging_award_jobs (
  provider TEXT NOT NULL CHECK(provider IN ('trucksbook','trucky')),
  provider_job_id TEXT NOT NULL,
  discord_user_id BIGINT NOT NULL REFERENCES unified_driver_profiles(discord_user_id),
  miles NUMERIC(20,10) NOT NULL CHECK(miles>0),
+ mileage_type TEXT NOT NULL DEFAULT 'real' CHECK(mileage_type IN ('real','race')),
  canonical_delivery_key TEXT NOT NULL,
  UNIQUE(discord_user_id,canonical_delivery_key),
  PRIMARY KEY(provider,provider_job_id),
@@ -31,6 +35,20 @@ async def install_staging_awards(pool):
     async with pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute(SCHEMA)
+            # These are additive staging-only upgrades; existing real-mile
+            # carry and award records default to the real progression class.
+            await conn.execute("""
+                ALTER TABLE unified_staging_award_carry
+                    ADD COLUMN IF NOT EXISTS race_whole_miles BIGINT NOT NULL DEFAULT 0
+                        CHECK(race_whole_miles>=0),
+                    ADD COLUMN IF NOT EXISTS race_fractional_miles NUMERIC(20,10) NOT NULL DEFAULT 0
+                        CHECK(race_fractional_miles>=0 AND race_fractional_miles<1)
+            """)
+            await conn.execute("""
+                ALTER TABLE unified_staging_award_jobs
+                    ADD COLUMN IF NOT EXISTS mileage_type TEXT NOT NULL DEFAULT 'real'
+                        CHECK(mileage_type IN ('real','race'))
+            """)
             has_key = await conn.fetchval("""
                 SELECT EXISTS(
                     SELECT 1 FROM information_schema.columns
@@ -65,15 +83,20 @@ async def install_staging_awards(pool):
                     "Staging award table lacks canonical journey uniqueness"
                 )
 
-async def award_staging_real_miles(pool, provider, job_id, discord_user_id, miles, *, canonical_delivery_key=None):
-    """Award once by provider ID; no production writes or cross-provider promise.
+async def award_staging_miles(pool, provider, job_id, discord_user_id, miles, *,
+                              mileage_type="real", canonical_delivery_key=None):
+    """Stage real or Trucky race miles with separate carry and deduplication.
 
     Call only after trusted reconciliation has independently marked a job
     creditable. A second provider's matching job still needs canonical
-    deduplication before this function may be used.
+    deduplication before this function may be used. No production writes occur.
     """
     if provider not in ("trucksbook", "trucky"):
         raise ValueError("Unsupported provider")
+    if mileage_type not in ("real", "race"):
+        raise ValueError("Unsupported mileage type")
+    if provider == "trucksbook" and mileage_type == "race":
+        raise ValueError("TrucksBook race miles are not eligible under A&T policy")
     if not isinstance(job_id, str) or not job_id:
         raise ValueError("Invalid provider job ID")
     if type(discord_user_id) is not int or discord_user_id <= 0:
@@ -100,44 +123,65 @@ async def award_staging_real_miles(pool, provider, job_id, discord_user_id, mile
             """, provider, job_id)
             if event is None or event["discord_user_id"] != discord_user_id:
                 raise ValueError("Provider job missing or driver mismatch")
-            if Decimal(str(event["real_miles"])) != Decimal(str(miles)) or Decimal(str(event["race_miles"])) != 0:
-                raise ValueError("Staged award differs from recorded real job")
+            expected_real = Decimal(str(miles)) if mileage_type == "real" else Decimal("0")
+            expected_race = Decimal(str(miles)) if mileage_type == "race" else Decimal("0")
+            if (Decimal(str(event["real_miles"])) != expected_real
+                    or Decimal(str(event["race_miles"])) != expected_race):
+                raise ValueError("Staged award differs from recorded provider job")
             await conn.execute("""
                 INSERT INTO unified_staging_award_carry(discord_user_id)
                 VALUES($1) ON CONFLICT(discord_user_id) DO NOTHING
             """, discord_user_id)
-            carry = await conn.fetchrow("""
-                SELECT whole_miles,fractional_miles
+            whole_column, fraction_column = (
+                ("whole_miles", "fractional_miles") if mileage_type == "real"
+                else ("race_whole_miles", "race_fractional_miles")
+            )
+            carry = await conn.fetchrow(f"""
+                SELECT {whole_column} AS whole_miles,
+                       {fraction_column} AS fractional_miles
                 FROM unified_staging_award_carry
                 WHERE discord_user_id=$1 FOR UPDATE
             """, discord_user_id)
             previous = await conn.fetchrow("""
-                SELECT discord_user_id,miles,canonical_delivery_key
+                SELECT discord_user_id,miles,mileage_type,canonical_delivery_key
                 FROM unified_staging_award_jobs
                 WHERE provider=$1 AND provider_job_id=$2
             """, provider, job_id)
             if previous is not None:
                 if (previous["discord_user_id"] != discord_user_id
                         or Decimal(str(previous["miles"])) != Decimal(str(miles))
+                        or previous["mileage_type"] != mileage_type
                         or previous["canonical_delivery_key"] != canonical_delivery_key):
                     raise ValueError("Conflicting provider job replay")
                 return {"status":"duplicate_provider_job", "whole_miles":carry["whole_miles"],
                         "fractional_miles":str(carry["fractional_miles"])}
             inserted = await conn.fetchval("""
                 INSERT INTO unified_staging_award_jobs
-                    (provider,provider_job_id,discord_user_id,miles,canonical_delivery_key)
-                VALUES($1,$2,$3,$4,$5)
+                    (provider,provider_job_id,discord_user_id,miles,mileage_type,canonical_delivery_key)
+                VALUES($1,$2,$3,$4,$5,$6)
                 ON CONFLICT DO NOTHING
                 RETURNING provider_job_id
-            """, provider, job_id, discord_user_id, Decimal(str(miles)), canonical_delivery_key)
+            """, provider, job_id, discord_user_id, Decimal(str(miles)), mileage_type, canonical_delivery_key)
             if inserted is None:
                 return {"status":"duplicate_delivery_or_provider_job", "whole_miles":carry["whole_miles"],
                         "fractional_miles":str(carry["fractional_miles"])}
             whole, remainder = accumulate_miles(carry["fractional_miles"], miles)
-            await conn.execute("""
+            await conn.execute(f"""
                 UPDATE unified_staging_award_carry
-                SET whole_miles=whole_miles+$2,fractional_miles=$3
+                SET {whole_column}={whole_column}+$2,
+                    {fraction_column}=$3
                 WHERE discord_user_id=$1
             """, discord_user_id, whole, remainder)
-            return {"status":"staging_awarded", "credited_whole_miles":whole,
+            return {"status":"staging_awarded", "mileage_type":mileage_type,
+                    "credited_whole_miles":whole,
+                    f"credited_{mileage_type}_miles":whole,
                     "fractional_miles":str(remainder)}
+
+
+async def award_staging_real_miles(pool, provider, job_id, discord_user_id, miles, *,
+                                   canonical_delivery_key=None):
+    """Backward-compatible real-mile staging API."""
+    return await award_staging_miles(
+        pool, provider, job_id, discord_user_id, miles,
+        mileage_type="real", canonical_delivery_key=canonical_delivery_key,
+    )
