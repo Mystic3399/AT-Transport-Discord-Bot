@@ -12,6 +12,26 @@ BASE = {
 
 
 class ReconciliationTests(unittest.TestCase):
+    def test_untrusted_discord_job_never_creditable(self):
+        for key in ("trusted", "verified_delivery", "eligible_for_award"):
+            with self.subTest(key=key):
+                event = {**BASE, key: False}
+                self.assertEqual(classify_delivery(
+                    event, [], provider_watermark=TIME + timedelta(hours=1),
+                    provider_feed_complete=True), "pending")
+
+    def test_unknown_candidate_provider_blocks_award(self):
+        other = {**BASE, "provider": "unknown"}
+        self.assertEqual(classify_delivery(
+            BASE, [other], provider_watermark=TIME + timedelta(hours=1),
+            provider_feed_complete=True), "pending")
+
+    def test_boolean_discord_id_is_not_driver(self):
+        event = {**BASE, "discord_user_id": True}
+        self.assertEqual(classify_delivery(
+            event, [], provider_watermark=TIME + timedelta(hours=1),
+            provider_feed_complete=True), "pending")
+
     def test_missing_watermark_never_credits(self):
         self.assertEqual(classify_delivery(BASE, []), "pending")
 
