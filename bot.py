@@ -3980,7 +3980,23 @@ async def save_existing_driver_verification_channel(discord_user_id, channel_id)
             """,
             discord_user_id, channel_id,
         )
-    return result == "UPDATE 1"
+    if result == "UPDATE 1":
+        return True
+    # Legacy driver_links may predate the driver_verifications table.
+    # Create only the missing verification row; never overwrite an existing one.
+    async with db_pool.acquire() as connection:
+        await connection.execute(
+            """
+            INSERT INTO driver_verifications (
+                discord_user_id, verification_channel_id, status, created_at
+            )
+            VALUES ($1, $2, 'pending', NOW())
+            ON CONFLICT (discord_user_id) DO UPDATE
+            SET verification_channel_id = EXCLUDED.verification_channel_id
+            """,
+            discord_user_id, channel_id,
+        )
+    return True
 
 
 async def save_new_verification(
