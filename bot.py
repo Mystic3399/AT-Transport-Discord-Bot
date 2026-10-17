@@ -6580,6 +6580,16 @@ async def submit_trucksbook(
         )
         return
 
+    # V2 shadow claim: reuse the successfully checked TrucksBook account.
+    # Existing TrucksBook approval remains authoritative during beta.
+    try:
+        await unified_driver_profiles.submit_provider_claim(
+            db_pool, applicant_id, "trucksbook", str(numeric_id), profile_name
+        )
+    except Exception as error:
+        print(f"V2 TRUCKSBOOK SHADOW CLAIM ERROR: {type(error).__name__}: {error}")
+        # Do not invalidate the established legacy verification flow.
+
     # ------------------------------------------
     # REMOVE CHECKING MESSAGE
     # ------------------------------------------
