@@ -174,6 +174,55 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT COUNT(*) FROM unified_job_matches WHERE provider_job_id LIKE 'match-%'"
             ), 0)
 
+    async def test_pending_claim_has_no_deadline_and_late_signed_job_links(self):
+        from datetime import timedelta
+        user = 991234567890123550
+        steam = "76561198000000550"
+        account = "991234550"
+        job_id = "991234551"
+        await profiles.begin_registration(self.pool, user, 991234567890123552)
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO unified_steam_links(discord_user_id,steam_id64,verified_at)
+                VALUES($1,$2,NOW()) ON CONFLICT(discord_user_id) DO UPDATE
+                SET steam_id64=EXCLUDED.steam_id64,verified_at=NOW()
+            """, user, steam)
+        await profiles.submit_provider_claim(self.pool, user, "trucky", account, "Late Tester")
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                UPDATE unified_provider_claims
+                SET submitted_at=NOW()-INTERVAL '3 days'
+                WHERE discord_user_id=$1 AND provider='trucky'
+            """, user)
+            claim = await conn.fetchrow("""
+                SELECT expires_at,status FROM unified_provider_claims
+                WHERE discord_user_id=$1 AND provider='trucky'
+            """, user)
+        self.assertIsNone(claim["expires_at"])
+        self.assertEqual(claim["status"], "pending")
+        digest = hashlib.sha256(b"late-signed-job-991234551").hexdigest()
+        await profiles.record_trucky_webhook_receipt(
+            self.pool, digest, "job_completed", job_id)
+        linked = await profiles.auto_approve_trucky_if_steam_matches(
+            self.pool, user, account, steam,
+            trusted_provider_source=True, membership_confirmed=True,
+            provider_job_id=job_id, payload_sha256=digest,
+            completed_at=datetime.now(timezone.utc),
+        )
+        self.assertEqual(linked, user)
+
+    async def test_trucksbook_claim_does_not_expire(self):
+        user = 991234567890123560
+        await profiles.begin_registration(self.pool, user, 991234567890123562)
+        await profiles.submit_provider_claim(self.pool, user, "trucksbook", "991234560")
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT expires_at,status FROM unified_provider_claims
+                WHERE discord_user_id=$1 AND provider='trucksbook'
+            """, user)
+        self.assertIsNone(row["expires_at"])
+        self.assertEqual(row["status"], "pending")
+
     async def test_steam_replay_account_switch_and_trucky_gate(self):
         user = 991234567890123450
         other = 991234567890123451
