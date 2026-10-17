@@ -5971,10 +5971,12 @@ async def register_driver(ctx):
             f"Welcome {member.mention}!\n\n"
             "**Choose your tracking provider: TrucksBook, Trucky, or both.**\n"
             "Only one verified account is required to activate your A&T Driver Profile.\n\n"
+            "First verify your identity with `!linksteam`.\n"
             "**TrucksBook** — Submit `!trucksbook 123456` using your TrucksBook profile ID.\n"
             "**Trucky** — Submit `!registertrucky 209123` using your Trucky account ID.\n\n"
             "You may submit both IDs. Each provider requires independent membership "
-            "and ownership verification by A&T Management before activation.\n\n"
+            "and ownership verification by A&T Management before activation.\n"
+            "Steam verification is required before a new provider claim can be approved.\n\n"
             "If you started by mistake, type `!cancel`.\n"
             "🔒 This channel is private to you and authorised A&T Management."
         ),
