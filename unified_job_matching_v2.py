@@ -38,6 +38,8 @@ def is_candidate_duplicate(first, second, *, max_minutes=30, max_miles_delta="5.
         return False
     if first["discord_user_id"] != second["discord_user_id"]:
         return False
+    if first["mileage_type"] not in ("real", "race"):
+        return False
     if first["mileage_type"] != second["mileage_type"]:
         return False
     if _normalized_metadata(first["metadata"]) != _normalized_metadata(second["metadata"]):
