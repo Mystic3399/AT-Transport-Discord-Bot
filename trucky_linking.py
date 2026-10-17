@@ -43,7 +43,7 @@ async def install_schema(pool):
 async def request_link(pool, discord_user_id, account_id, display_name):
     if not valid_account_id(account_id):
         raise ValueError("Invalid Trucky account ID")
-    if not display_name or len(display_name) > 120:
+    if not isinstance(display_name, str) or not display_name.strip() or len(display_name) > 120:
         raise ValueError("Invalid display name")
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -62,6 +62,12 @@ async def request_link(pool, discord_user_id, account_id, display_name):
                 account_id,
             ):
                 raise ValueError("Trucky account already linked to another driver")
+            conflicting_request = await conn.fetchval(
+                """SELECT discord_user_id FROM trucky_link_requests
+                   WHERE trucky_account_id=$1 AND status='pending'
+                     AND discord_user_id<>$2""", account_id, discord_user_id)
+            if conflicting_request is not None:
+                raise ValueError('This Trucky account has another pending claim')
             await conn.execute(
                 """INSERT INTO trucky_link_requests
                    (discord_user_id,trucky_account_id,trucky_display_name,status,
@@ -90,6 +96,8 @@ async def approve_link(pool, discord_user_id, moderator_id):
                 raise ValueError("No pending Trucky request")
             if req['membership_status'] != 'confirmed':
                 raise ValueError('Trucky A&T company membership has not been verified')
+            # Membership confirmation does not establish Discord ownership.
+            # Staff must separately verify the claimant controls the account.
             await conn.execute(
                 """INSERT INTO trucky_driver_links
                    (discord_user_id,trucky_account_id,trucky_display_name,verified_by)
