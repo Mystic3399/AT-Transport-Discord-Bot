@@ -7318,10 +7318,9 @@ async def confirm_verification(
 
     try:
         role_result = (
-            await sync_member_progression_role(
+            await sync_unified_driver_roles(
                 ctx.guild,
                 applicant_id,
-                final_real_miles,
             )
         )
 
