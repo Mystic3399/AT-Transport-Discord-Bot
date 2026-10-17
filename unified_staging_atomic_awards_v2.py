@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS unified_staging_award_jobs (
  provider_job_id TEXT NOT NULL,
  discord_user_id BIGINT NOT NULL REFERENCES unified_driver_profiles(discord_user_id),
  miles NUMERIC(20,10) NOT NULL CHECK(miles>0),
+ canonical_delivery_key TEXT NOT NULL,
+ UNIQUE(discord_user_id,canonical_delivery_key),
  PRIMARY KEY(provider,provider_job_id),
  FOREIGN KEY(provider,provider_job_id)
  REFERENCES unified_provider_job_events(provider,provider_job_id)
@@ -29,7 +31,7 @@ async def install_staging_awards(pool):
         await conn.execute(SCHEMA)
 
 
-async def award_staging_real_miles(pool, provider, job_id, discord_user_id, miles):
+async def award_staging_real_miles(pool, provider, job_id, discord_user_id, miles, *, canonical_delivery_key=None):
     """Award once by provider ID; no production writes or cross-provider promise.
 
     Call only after trusted reconciliation has independently marked a job
@@ -42,6 +44,8 @@ async def award_staging_real_miles(pool, provider, job_id, discord_user_id, mile
         raise ValueError("Invalid provider job ID")
     if type(discord_user_id) is not int or discord_user_id <= 0:
         raise ValueError("Invalid Discord driver")
+    if not isinstance(canonical_delivery_key, str) or not canonical_delivery_key.strip():
+        raise ValueError('Trusted canonical delivery key required')
     # Validation before entering the transaction prevents invalid carry writes.
     accumulate_miles("0", miles)
     async with pool.acquire() as conn:
@@ -66,13 +70,13 @@ async def award_staging_real_miles(pool, provider, job_id, discord_user_id, mile
             """, discord_user_id)
             inserted = await conn.fetchval("""
                 INSERT INTO unified_staging_award_jobs
-                    (provider,provider_job_id,discord_user_id,miles)
-                VALUES($1,$2,$3,$4)
-                ON CONFLICT(provider,provider_job_id) DO NOTHING
+                    (provider,provider_job_id,discord_user_id,miles,canonical_delivery_key)
+                VALUES($1,$2,$3,$4,$5)
+                ON CONFLICT DO NOTHING
                 RETURNING provider_job_id
-            """, provider, job_id, discord_user_id, Decimal(str(miles)))
+            """, provider, job_id, discord_user_id, Decimal(str(miles)), canonical_delivery_key)
             if inserted is None:
-                return {"status":"duplicate_provider_job", "whole_miles":carry["whole_miles"],
+                return {"status":"duplicate_delivery_or_provider_job", "whole_miles":carry["whole_miles"],
                         "fractional_miles":str(carry["fractional_miles"])}
             whole, remainder = accumulate_miles(carry["fractional_miles"], miles)
             await conn.execute("""
