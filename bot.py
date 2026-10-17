@@ -860,6 +860,10 @@ bot = ATCommandBot(
     intents=intents,
 )
 
+@bot.check
+async def restrict_commands_to_configured_guild(ctx):
+    return ctx.guild is not None and ctx.guild.id == GUILD_ID
+
 
 # --------------------------------------------------
 # BASIC HELPERS
@@ -2766,6 +2770,8 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_message(message):
+    if message.guild is None or message.guild.id != GUILD_ID:
+        return
     # Staging observation only: no mileage, roles, or production DB writes.
     # Configure the rotated Trucky webhook ID in TRUCKY_TRACKER_WEBHOOK_ID.
     if message.channel.id == 1541473951899852800:
