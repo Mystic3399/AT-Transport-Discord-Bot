@@ -38,7 +38,7 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install aiohttp asyncpg
       - name: Compile isolated V2 modules
-        run: python -m py_compile unified_driver_profiles.py steam_openid_v2.py steam_callback_v2.py trucky_membership_adapter.py unified_distance_units.py distance_normalization_v2.py unified_job_matching_v2.py unified_job_review_v2.py staging_readiness_v2.py unified_staging_ledger_v2.py unified_reconciliation_policy_v2.py unified_legacy_mileage_bridge_v2.py unified_fractional_mileage_v2.py unified_staging_atomic_awards_v2.py
+        run: python -m py_compile unified_driver_profiles.py steam_openid_v2.py steam_callback_v2.py trucky_membership_adapter.py unified_distance_units.py distance_normalization_v2.py unified_job_matching_v2.py unified_job_review_v2.py staging_readiness_v2.py unified_staging_ledger_v2.py unified_reconciliation_policy_v2.py unified_legacy_mileage_bridge_v2.py unified_fractional_mileage_v2.py unified_staging_atomic_awards_v2.py unified_canonical_journey_v2.py
       - name: Run isolated unit tests
         run: python -m unittest discover -s tests -p 'test_*steam*.py' -v
       - name: Check provider distance normalization
@@ -55,6 +55,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_unified_fractional_mileage_v2.py' -v
       - name: Check atomic staging mileage awards
         run: python -m unittest discover -s tests -p 'test_unified_staging_atomic_awards_v2.py' -v
+      - name: Check canonical journey identity
+        run: python -m unittest discover -s tests -p 'test_unified_canonical_journey_v2.py' -v
       - name: Check kilometre-to-mile conversion
         run: python -m unittest discover -s tests -p 'test_unified_distance_units.py' -v
       - name: Check shared Trucky and TrucksBook role eligibility
