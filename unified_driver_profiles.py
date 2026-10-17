@@ -288,13 +288,15 @@ async def bind_verified_steam(pool, discord_user_id, steam_id64, state_hash, non
             """,steam_id64)
             if other is not None and other != discord_user_id:
                 raise ValueError("Steam account already linked to another Discord user")
-            await conn.execute("""
+            bind_result = await conn.execute("""
                 INSERT INTO unified_steam_links(discord_user_id,steam_id64)
                 VALUES($1,$2)
                 ON CONFLICT(discord_user_id) DO UPDATE SET
                     verified_at=NOW()
                 WHERE unified_steam_links.steam_id64=EXCLUDED.steam_id64
             """,discord_user_id,steam_id64)
+            if bind_result not in ("INSERT 0 1", "UPDATE 1"):
+                raise ValueError("Steam identity changed during verification")
             await conn.execute("""
                 UPDATE unified_steam_auth_states SET consumed_at=NOW()
                 WHERE state_hash=$1
