@@ -466,8 +466,10 @@ async def auto_approve_trucky_if_steam_matches(
                     raise ValueError("Approved Trucky link is inconsistent")
                 return discord_user_id
             valid_window = await conn.fetchval("""
-                SELECT $1 >= $2 AND $1 <= NOW() + INTERVAL '2 minutes'
-                   AND $3 > NOW() AND $1 < $3
+                SELECT $1::TIMESTAMPTZ >= $2::TIMESTAMPTZ
+                   AND $1::TIMESTAMPTZ <= NOW() + INTERVAL '2 minutes'
+                   AND $3::TIMESTAMPTZ > NOW()
+                   AND $1::TIMESTAMPTZ < $3::TIMESTAMPTZ
             """, completed_at, claim["submitted_at"], claim["expires_at"])
             if not valid_window:
                 raise ValueError("Signed Trucky job is outside the active link window")

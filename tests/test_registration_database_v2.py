@@ -74,9 +74,10 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.pool, digest, "job_completed", 991234560
         )
         self.assertIsNotNone(receipt_id)
-        self.assertIsNone(await profiles.record_trucky_webhook_receipt(
+        duplicate_receipt_id = await profiles.record_trucky_webhook_receipt(
             self.pool, digest, "job_completed", 991234560
-        ))
+        )
+        self.assertEqual(duplicate_receipt_id, receipt_id)
         async with self.pool.acquire() as conn:
             receipt = await conn.fetchrow("""
                 SELECT payload_sha256,event_type,candidate_job_id,review_status
