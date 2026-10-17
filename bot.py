@@ -5639,10 +5639,10 @@ async def driver_links_overview(ctx):
 
 
 @bot.hybrid_command(
-    name="verify",
-    description="Start private A&T driver verification",
+    name="register",
+    description="Start private A&T TrucksBook driver registration",
 )
-async def verify_driver(ctx):
+async def register_driver(ctx):
     async def onboarding_reply(message, **kwargs):
         if ctx.interaction is not None:
             kwargs["ephemeral"] = True
@@ -6005,6 +6005,21 @@ async def verify_driver(ctx):
     )
     print("--------------------------------")
 
+
+
+
+@bot.command(name="verify")
+async def retired_driver_verify(ctx):
+    """Legacy driver command: redirect; security verification is separate."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        return
+    if ctx.channel.id == ONBOARDING_CHANNEL_ID:
+        await ctx.reply(
+            "Driver onboarding has moved to `/register`. "
+            "Use the slash command to receive a private response. "
+            "Security verification uses `!verify` in the Security Verification channel.",
+            mention_author=False,
+        )
 
 @bot.command(
     name="trucksbook"
