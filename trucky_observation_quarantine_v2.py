@@ -15,9 +15,9 @@ def quarantine_trucky_observation(observed, *, discord_message_id, observed_at):
     job_id = observed.get("provider_job_id")
     if not isinstance(job_id, str) or not job_id.isdecimal() or int(job_id) <= 0:
         raise ValueError("Invalid Trucky job ID")
-    if not isinstance(discord_message_id, int) or discord_message_id <= 0:
+    if type(discord_message_id) is not int or discord_message_id <= 0:
         raise ValueError("Invalid Discord message ID")
-    if not isinstance(observed_at, datetime) or observed_at.tzinfo is None:
+    if (not isinstance(observed_at, datetime) or observed_at.tzinfo is None\n            or observed_at.utcoffset() is None):
         raise ValueError("Timezone-aware observation time required")
     kind = observed.get("mileage_type")
     if kind not in ("real", "race"):
