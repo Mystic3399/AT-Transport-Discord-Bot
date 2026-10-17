@@ -5635,10 +5635,16 @@ async def driver_links_overview(ctx):
         await ctx.reply(chunk, mention_author=False)
 
 
-@bot.command(
-    name="verify"
+@bot.hybrid_command(
+    name="verify",
+    description="Start private A&T driver verification",
 )
 async def verify_driver(ctx):
+    async def onboarding_reply(message, **kwargs):
+        if ctx.interaction is not None:
+            kwargs["ephemeral"] = True
+        return await ctx.reply(message, **kwargs)
+
     # Command must be used in the permanent
     # driver onboarding channel.
 
@@ -5649,7 +5655,7 @@ async def verify_driver(ctx):
         return
 
     if ctx.channel.id != ONBOARDING_CHANNEL_ID:
-        await ctx.reply(
+        await onboarding_reply(
             "Please use the A&T driver onboarding "
             "channel to start verification.",
             mention_author=False,
@@ -5662,7 +5668,7 @@ async def verify_driver(ctx):
         return
 
     if db_pool is None:
-        await ctx.reply(
+        await onboarding_reply(
             "The A&T verification database is "
             "currently unavailable. Please try "
             "again shortly.",
@@ -5677,7 +5683,7 @@ async def verify_driver(ctx):
     if await driver_already_linked(
         member.id
     ):
-        await ctx.reply(
+        await onboarding_reply(
             (
                 f"{member.mention}, your Discord "
                 "account is already linked to an "
@@ -5717,7 +5723,7 @@ async def verify_driver(ctx):
             )
 
             if existing_channel:
-                await ctx.reply(
+                await onboarding_reply(
                     (
                         f"{member.mention}, you already "
                         "have an active verification: "
@@ -5743,7 +5749,7 @@ async def verify_driver(ctx):
         category,
         discord.CategoryChannel,
     ):
-        await ctx.reply(
+        await onboarding_reply(
             (
                 "A&T verification is not currently "
                 "available because the verification "
@@ -5826,7 +5832,7 @@ async def verify_driver(ctx):
         )
 
     except discord.Forbidden:
-        await ctx.reply(
+        await onboarding_reply(
             (
                 "I could not create your private "
                 "verification channel. A&T "
@@ -5842,7 +5848,7 @@ async def verify_driver(ctx):
         return
 
     except discord.HTTPException as error:
-        await ctx.reply(
+        await onboarding_reply(
             (
                 "Discord could not create your "
                 "verification channel. Please try "
@@ -5883,7 +5889,7 @@ async def verify_driver(ctx):
         except discord.HTTPException:
             pass
 
-        await ctx.reply(
+        await onboarding_reply(
             (
                 "Your verification could not be "
                 "started because of a database "
@@ -5904,7 +5910,7 @@ async def verify_driver(ctx):
         except discord.HTTPException:
             pass
 
-        await ctx.reply(
+        await onboarding_reply(
             (
                 "The A&T verification database "
                 "is currently unavailable."
@@ -5963,7 +5969,7 @@ async def verify_driver(ctx):
         embed=embed,
     )
 
-    await ctx.reply(
+    await onboarding_reply(
         (
             f"{member.mention}, your private "
             "verification channel has been created: "
