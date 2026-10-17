@@ -19,7 +19,7 @@ class SchemaIntegrityTests(unittest.TestCase):
             "unified_job_matches",
         ):
             self.assertEqual(
-                len(re.findall(r"CREATE TABLE IF NOT EXISTS\\s+" + table + r"\\s*\\(", profiles.SCHEMA)),
+                len(re.findall(r"CREATE TABLE IF NOT EXISTS\s+" + table + r"\s*\(", profiles.SCHEMA)),
                 1, table,
             )
 
