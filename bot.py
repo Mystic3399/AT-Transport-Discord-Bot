@@ -2705,6 +2705,25 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_message(message):
+    # Staging observation only: no mileage, roles, or production DB writes.
+    # Configure the rotated Trucky webhook ID in TRUCKY_TRACKER_WEBHOOK_ID.
+    if message.channel.id == 1541473951899852800:
+        try:
+            from trucky_discord_tracker_v2 import inspect_trucky_message
+            expected = os.getenv("TRUCKY_TRACKER_WEBHOOK_ID", "").strip()
+            expected_id = int(expected) if expected.isdecimal() else 0
+            observed = inspect_trucky_message(
+                message, expected_webhook_id=expected_id
+            )
+            if observed:
+                print(
+                    "TRUCKY STAGING OBSERVED: job=%s distance=%s %s type=%s; "
+                    "unverified, no mileage credited"
+                    % (observed["provider_job_id"], observed["distance"],
+                       observed["distance_unit"], observed["mileage_type"])
+                )
+        except Exception as error:
+            print("TRUCKY STAGING OBSERVATION ERROR: %s" % type(error).__name__)
     if message.webhook_id is None:
         await bot.process_commands(
             message
