@@ -37,6 +37,15 @@ class VerifiedJobCandidateTests(unittest.TestCase):
     def test_missing_distance_rejected(self):
         self.assertIsNone(self.candidate({**BASE, "real_driven_distance_km": None}))
 
+    def test_unparseable_timestamp_rejected(self):
+        self.assertIsNone(self.candidate({**BASE, "completed_at": "not-a-timestamp"}))
+
+    def test_naive_timestamp_rejected(self):
+        self.assertIsNone(self.candidate({**BASE, "completed_at": "2026-10-17T12:00:00"}))
+
+    def test_future_timestamp_rejected(self):
+        self.assertIsNone(self.candidate({**BASE, "completed_at": "2099-10-17T12:00:00Z"}))
+
     def test_wrong_units_rejected(self):
         self.assertIsNone(self.candidate({**BASE, "distance_unit": "mi"}))
 
