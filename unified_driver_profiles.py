@@ -499,7 +499,7 @@ async def bind_verified_steam(pool, discord_user_id, steam_id64, state_hash, non
                 raise ValueError("Steam OpenID response was already used")
             other = await conn.fetchval("""
                 SELECT discord_user_id FROM unified_steam_links
-                WHERE steam_id64=$1
+                WHERE steam_id64=$1 FOR UPDATE
             """,steam_id64)
             if other is not None and other != discord_user_id:
                 raise ValueError("Steam account already linked to another Discord user")
