@@ -5,7 +5,6 @@ Run only against a database explicitly marked disposable.
 import os
 import unittest
 from decimal import Decimal
-from decimal import Decimal
 
 try:
     import asyncpg
@@ -65,7 +64,7 @@ class StagingSchemaDatabaseTests(unittest.IsolatedAsyncioTestCase):
             mileage_type="race",
             canonical_delivery_key="provider:trucky:race-991234567890123441")
         self.assertEqual(result["credited_race_miles"], 62)
-        self.assertEqual(result["fractional_miles"], "0.14")
+        self.assertEqual(Decimal(result["fractional_miles"]), Decimal("0.14"))
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT whole_miles,fractional_miles,race_whole_miles,
