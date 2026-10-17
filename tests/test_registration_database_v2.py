@@ -1,6 +1,7 @@
 """Database integration tests for V2 registration; uses disposable TEST_DATABASE_URL only."""
 import asyncio
 import hashlib
+import json
 import os
 import unittest
 
@@ -59,8 +60,8 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         from decimal import Decimal
         self.assertEqual(row["real_miles"], Decimal("62.14"))
         self.assertEqual(row["race_miles"], Decimal("0"))
-        self.assertEqual(row["source_payload"]["original_unit"], "km")
-        self.assertEqual(row["source_payload"]["original_distance"], "100")
+        self.assertEqual(json.loads(row["source_payload"])["original_unit"], "km")
+        self.assertEqual(json.loads(row["source_payload"])["original_distance"], "100")
         with self.assertRaises(ValueError):
             await profiles.record_normalized_provider_job(
                 self.pool, "trucky", "job-991234560", user, "101", "km"
