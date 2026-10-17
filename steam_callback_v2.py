@@ -5,6 +5,7 @@ as the staging bot. Set DATABASE_URL, AT_STEAM_CALLBACK_URL, AT_STEAM_REALM.
 Do not expose this service publicly before reviewing reverse-proxy settings.
 """
 import hashlib
+import re
 import os
 from urllib.parse import urlsplit
 
@@ -21,9 +22,9 @@ async def callback(request):
     if len(values) > 30 or any(len(values.getall(k)) != 1 for k in values):
         raise web.HTTPBadRequest(text="Invalid Steam callback")
     state = values.get("state", "")
-    if len(state) < 32 or len(state) > 128:
-        raise web.HTTPBadRequest(text="Missing authentication state")
-    state_hash = hashlib.sha256(state.encode("ascii", errors="ignore")).hexdigest()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", state):
+        raise web.HTTPBadRequest(text="Missing or malformed authentication state")
+    state_hash = hashlib.sha256(state.encode("ascii")).hexdigest()
     async with pool.acquire() as conn:
         record = await conn.fetchrow("""
             SELECT discord_user_id,expected_return_to,
@@ -40,7 +41,8 @@ async def callback(request):
             or expected_parts.path != configured_parts.path
             or expected_parts.path != "/auth/steam/callback"):
         raise web.HTTPBadRequest(text="Unexpected callback origin or route")
-    if values.get("openid.return_to") != expected:
+    if (values.get("openid.return_to") != expected
+            or values.get("openid.return_to", "").count("state=") != 1):
         raise web.HTTPBadRequest(text="Steam callback mismatch")
     try:
         steam_id = await steam_openid_v2.verify_steam_callback(
