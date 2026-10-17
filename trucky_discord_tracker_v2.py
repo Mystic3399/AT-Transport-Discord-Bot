@@ -28,7 +28,17 @@ def parse_trucky_embed(embed):
     if not match:
         return None
     # The embed layout may change; never guess distance from unrelated numbers.
-    distance_matches = DISTANCE_RE.findall(description)
+    # Prefer the dedicated distance field when present; otherwise use the
+    # description only. Never add numbers from unrelated embed fields.
+    distance_fields = [
+        str(f.get("value") or "")
+        for f in fields if isinstance(f, dict)
+        and "distance" in str(f.get("name") or "").lower()
+    ]
+    if len(distance_fields) > 1:
+        return None
+    distance_source = distance_fields[0] if distance_fields else description
+    distance_matches = DISTANCE_RE.findall(distance_source)
     if len(distance_matches) != 1:
         return None
     distance, unit = distance_matches[0]
