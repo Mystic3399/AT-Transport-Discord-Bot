@@ -43,6 +43,8 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_*steam*.py' -v
       - name: Check provider distance normalization
         run: python -m unittest discover -s tests -p 'test_distance_normalization_v2.py' -v
+      - name: Check cross-provider duplicate candidate matching
+        run: python -m unittest discover -s tests -p 'test_unified_job_matching_v2.py' -v
       - name: Check kilometre-to-mile conversion
         run: python -m unittest discover -s tests -p 'test_unified_distance_units.py' -v
       - name: Check shared Trucky and TrucksBook role eligibility
