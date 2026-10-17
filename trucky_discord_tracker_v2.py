@@ -35,7 +35,7 @@ def parse_trucky_embed(embed):
     stat_fields = [
         str(f.get("value") or "").strip().lower()
         for f in fields if isinstance(f, dict)
-        and str(f.get("name") or "").strip().lower() in ("stats type", "statistics")
+        and any(label in str(f.get("name") or "").lower()\n                for label in ("stats type", "statistics"))
     ]
     if len(stat_fields) != 1 or stat_fields[0] not in ("real miles", "race miles"):
         return None
