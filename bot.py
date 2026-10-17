@@ -6044,6 +6044,33 @@ async def link_steam_for_registration(ctx):
     )
 
 
+@bot.command(name="steamstatus")
+async def steam_registration_status(ctx):
+    """Show the applicant whether Steam ownership was verified."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    verification = await get_verification_by_channel(ctx.channel.id)
+    if verification is None or int(verification["discord_user_id"]) != ctx.author.id:
+        await ctx.reply("Use this in your own private /register channel.", mention_author=False)
+        return
+    async with db_pool.acquire() as conn:
+        steam_id = await conn.fetchval(
+            "SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1",
+            ctx.author.id,
+        )
+    if steam_id:
+        await ctx.reply(
+            f"✅ Steam identity verified and linked: `{steam_id}`. "
+            "Provider account verification is still required.",
+            mention_author=False,
+        )
+    else:
+        await ctx.reply(
+            "⏳ Steam is not linked yet. Use `!linksteam` to verify your Steam account.",
+            mention_author=False,
+        )
+
+
 @bot.command(name="registertrucky")
 async def register_trucky_in_channel(ctx, account_id: str = None):
     """V2 beta: record an unverified Trucky claim inside the existing private channel."""
