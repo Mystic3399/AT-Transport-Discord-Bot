@@ -5,6 +5,8 @@ This adapter does not award mileage or trust a user-submitted account ID.
 from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
+from unified_reconciliation_policy_v2 import classify_delivery
+
 TRUCKY_COMPANY_ID = 49041
 
 
@@ -51,3 +53,28 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
         "eligible_for_award": False,
         "trusted": False,
     }
+
+
+
+def review_trucky_job_against_other_provider(
+    job, *, verified_provider_account_id, discord_user_id,
+    other_provider_jobs, provider_watermark=None, provider_feed_complete=False
+):
+    """Read-only cross-provider decision. Never returns an award instruction.
+
+    A caller cannot establish authenticated feed completeness simply by
+    passing flags. The result remains pending even for a creditable policy
+    decision until independent feed and ownership verification is implemented.
+    """
+    candidate = normalize_verified_trucky_job(
+        job, verified_provider_account_id=verified_provider_account_id,
+        discord_user_id=discord_user_id,
+    )
+    if candidate is None:
+        return {"status": "rejected", "awardable": False}
+    decision = classify_delivery(
+        candidate, other_provider_jobs,
+        provider_watermark=provider_watermark,
+        provider_feed_complete=provider_feed_complete,
+    )
+    return {"status": decision, "awardable": False}
