@@ -6,7 +6,7 @@ Do not expose this service publicly before reviewing reverse-proxy settings.
 """
 import hashlib
 import os
-from urllib.parse import urlsplit, parse_qs
+from urllib.parse import urlsplit
 
 import asyncpg
 from aiohttp import web
@@ -34,8 +34,12 @@ async def callback(request):
         raise web.HTTPBadRequest(text="Steam login expired or already used")
     expected = record["expected_return_to"]
     configured = os.environ["AT_STEAM_CALLBACK_URL"]
-    if urlsplit(expected).path != urlsplit(configured).path:
-        raise web.HTTPBadRequest(text="Unexpected callback route")
+    expected_parts, configured_parts = urlsplit(expected), urlsplit(configured)
+    if (expected_parts.scheme != "https" or configured_parts.scheme != "https"
+            or expected_parts.netloc != configured_parts.netloc
+            or expected_parts.path != configured_parts.path
+            or expected_parts.path != "/auth/steam/callback"):
+        raise web.HTTPBadRequest(text="Unexpected callback origin or route")
     if values.get("openid.return_to") != expected:
         raise web.HTTPBadRequest(text="Steam callback mismatch")
     try:
