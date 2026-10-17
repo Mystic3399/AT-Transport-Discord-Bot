@@ -536,3 +536,72 @@ async def create_steam_auth_state(pool, discord_user_id, callback_base, ttl_minu
             VALUES($1,$2,$3,NOW()+($4 * INTERVAL '1 minute'))
         """,token_hash,discord_user_id,expected_return_to,ttl_minutes)
     return expected_return_to
+
+async def auto_approve_trucky_if_steam_matches(
+    pool, discord_user_id, account_id, provider_steam_id,
+    *, trusted_provider_source=False, membership_confirmed=False
+):
+    """Atomic Trucky activation only after independent trusted Steam ID evidence.
+
+    This method does not fetch Trucky data. Caller MUST validate the Trucky API
+    response provenance, current A&T membership, and exact account ID first.
+    No role or mileage mutations happen here.
+    """
+    import steam_openid_v2
+    if not membership_confirmed or not trusted_provider_source:
+        raise ValueError("Authenticated Trucky membership and Steam evidence required")
+    if not isinstance(account_id, str) or not account_id.isdecimal():
+        raise ValueError("Invalid Trucky account ID")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            steam = await conn.fetchval("""
+                SELECT steam_id64 FROM unified_steam_links
+                WHERE discord_user_id=$1
+            """, discord_user_id)
+            if not steam_openid_v2.steam_ids_match(
+                steam, provider_steam_id, trusted_provider_source
+            ):
+                raise ValueError("Steam identity mismatch or unverified Steam account")
+            claim = await conn.fetchrow("""
+                SELECT provider_account_id,provider_display_name,status
+                FROM unified_provider_claims
+                WHERE discord_user_id=$1 AND provider='trucky' FOR UPDATE
+            """, discord_user_id)
+            if claim is None or claim["status"] != "pending":
+                raise ValueError("No pending Trucky registration claim")
+            if claim["provider_account_id"] != account_id:
+                raise ValueError("Trucky account differs from pending claim")
+            linked = await conn.fetchrow("""
+                SELECT provider_account_id FROM unified_provider_links
+                WHERE discord_user_id=$1 AND provider='trucky' FOR UPDATE
+            """, discord_user_id)
+            if linked and linked["provider_account_id"] != account_id:
+                raise ValueError("Different Trucky account already linked")
+            result = await conn.execute("""
+                INSERT INTO unified_provider_links
+                    (provider,provider_account_id,discord_user_id,
+                     provider_display_name,verified_at)
+                VALUES('trucky',$1,$2,$3,NOW())
+                ON CONFLICT(provider,provider_account_id) DO UPDATE SET
+                    provider_display_name=EXCLUDED.provider_display_name
+                WHERE unified_provider_links.discord_user_id=EXCLUDED.discord_user_id
+            """, account_id,discord_user_id,claim["provider_display_name"])
+            if result not in ("INSERT 0 1", "UPDATE 1"):
+                raise ValueError("Trucky account already claimed by another driver")
+            await conn.execute("""
+                UPDATE unified_provider_claims
+                SET status='approved',membership_confirmed=TRUE,
+                    ownership_confirmed=TRUE,reviewed_at=NOW()
+                WHERE discord_user_id=$1 AND provider='trucky'
+            """,discord_user_id)
+            await conn.execute("""
+                UPDATE unified_driver_profiles
+                SET status='active',activated_at=COALESCE(activated_at,NOW())
+                WHERE discord_user_id=$1
+            """,discord_user_id)
+            await conn.execute("""
+                UPDATE unified_registration_sessions
+                SET status='approved',updated_at=NOW()
+                WHERE discord_user_id=$1
+            """,discord_user_id)
+            return account_id
