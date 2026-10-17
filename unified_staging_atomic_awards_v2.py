@@ -68,6 +68,18 @@ async def award_staging_real_miles(pool, provider, job_id, discord_user_id, mile
                 FROM unified_staging_award_carry
                 WHERE discord_user_id=$1 FOR UPDATE
             """, discord_user_id)
+            previous = await conn.fetchrow("""
+                SELECT discord_user_id,miles,canonical_delivery_key
+                FROM unified_staging_award_jobs
+                WHERE provider=$1 AND provider_job_id=$2
+            """, provider, job_id)
+            if previous is not None:
+                if (previous["discord_user_id"] != discord_user_id
+                        or Decimal(str(previous["miles"])) != Decimal(str(miles))
+                        or previous["canonical_delivery_key"] != canonical_delivery_key):
+                    raise ValueError("Conflicting provider job replay")
+                return {"status":"duplicate_provider_job", "whole_miles":carry["whole_miles"],
+                        "fractional_miles":str(carry["fractional_miles"])}
             inserted = await conn.fetchval("""
                 INSERT INTO unified_staging_award_jobs
                     (provider,provider_job_id,discord_user_id,miles,canonical_delivery_key)
