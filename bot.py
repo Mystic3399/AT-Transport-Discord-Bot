@@ -2770,7 +2770,10 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_message(message):
-    if message.guild is None or message.guild.id != GUILD_ID:
+    message_guild = getattr(message, "guild", None)
+    if message_guild is not None and message_guild.id != GUILD_ID:
+        return
+    if message_guild is None and getattr(message, "webhook_id", None) is None:
         return
     # Staging observation only: no mileage, roles, or production DB writes.
     # Configure the rotated Trucky webhook ID in TRUCKY_TRACKER_WEBHOOK_ID.
