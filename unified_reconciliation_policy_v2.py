@@ -16,6 +16,8 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
     """
     if incoming.get("provider") not in ("trucky", "trucksbook"):
         raise ValueError("Unsupported provider")
+    if not isinstance(incoming.get("discord_user_id"), int) or incoming["discord_user_id"] <= 0:
+        return "pending"
     if incoming.get("mileage_type") not in ("real", "race"):
         return "pending"
     if incoming["provider"] == "trucksbook" and incoming["mileage_type"] == "race":
@@ -27,6 +29,10 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
         raise ValueError("Expected other-provider job collection")
     for candidate in other_provider_jobs:
         try:
+            # A candidate from the wrong provider or driver is not evidence
+            # that the opposite provider feed has been completely inspected.
+            if candidate.get("provider") == incoming["provider"]:
+                return "pending"
             if is_candidate_duplicate(incoming, candidate):
                 return "duplicate" if candidate.get("credited") is True else "pending"
         except (ValueError, KeyError, TypeError):
