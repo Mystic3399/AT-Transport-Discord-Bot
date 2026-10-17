@@ -49,7 +49,11 @@ async def fetch_trucky_jobs_page(page=1):
 
 
 def inspect_jobs_response_shape(payload):
-    """Safe schema diagnostic: expose keys/types only, not private job values."""
+    """Safe schema diagnostic: expose keys/types only, not private job values.
+
+    Nested driver fields matter for proving provider identity. Report their
+    names and Python types, but never values (including IDs or display names).
+    """
     if isinstance(payload, list):
         records = payload
         outer_keys = []
@@ -62,11 +66,23 @@ def inspect_jobs_response_shape(payload):
         return {"outer_keys": outer_keys, "record_count": None,
                 "first_record_types": {}, "verified_delivery": False}
     sample = records[0] if records else {}
+    nested_types = {}
+    if isinstance(sample, dict):
+        for field in ("driver", "game"):
+            value = sample.get(field)
+            if isinstance(value, dict):
+                nested_types[field] = {
+                    str(key): type(item).__name__
+                    for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+                }
+            else:
+                nested_types[field] = type(value).__name__
     return {
         "outer_keys": outer_keys,
         "record_count": len(records),
         "first_record_types": {
             str(key): type(value).__name__ for key, value in sample.items()
         } if isinstance(sample, dict) else {},
+        "first_record_nested_types": nested_types,
         "verified_delivery": False,
     }

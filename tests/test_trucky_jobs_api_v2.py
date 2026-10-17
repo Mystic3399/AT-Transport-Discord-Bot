@@ -20,14 +20,21 @@ class TruckyJobsApiTests(unittest.IsolatedAsyncioTestCase):
 
     def test_shape_inspection_does_not_claim_verified_delivery(self):
         response = {
-            "data": [{"id": 27805272, "secret": "do-not-display"}],
+            "data": [{"id": 27805272, "secret": "do-not-display",
+                      "driver": {"id": 456, "steam_id": "private"},
+                      "game": {"name": "ETS2"}}],
             "current_page": 1,
         }
         result = inspect_jobs_response_shape(response)
         self.assertFalse(result["verified_delivery"])
         self.assertEqual(result["record_count"], 1)
         self.assertEqual(result["first_record_types"]["id"], "int")
+        self.assertEqual(result["first_record_nested_types"]["driver"],
+                         {"id": "int", "steam_id": "str"})
+        self.assertEqual(result["first_record_nested_types"]["game"],
+                         {"name": "str"})
         self.assertNotIn("do-not-display", repr(result))
+        self.assertNotIn("private", repr(result))
 
 
 if __name__ == "__main__":
