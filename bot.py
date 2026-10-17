@@ -7065,6 +7065,71 @@ async def confirm_verification(
                 )
 
                 # ----------------------------------
+                # V2: ATOMIC UNIFIED TRUCKSBOOK LINK
+                # ----------------------------------
+                # Same transaction as the authoritative legacy link.
+                # If this fails, both registrations roll back.
+                await connection.execute(
+                    """
+                    INSERT INTO unified_driver_profiles
+                        (discord_user_id,status,activated_at)
+                    VALUES ($1,'active',NOW())
+                    ON CONFLICT(discord_user_id) DO UPDATE SET
+                        status='active',
+                        activated_at=COALESCE(
+                            unified_driver_profiles.activated_at,NOW()
+                        );
+                    """,
+                    applicant_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO unified_provider_links
+                        (provider,provider_account_id,discord_user_id,
+                         provider_display_name,verified_at,verified_by)
+                    VALUES ('trucksbook',$1,$2,$3,NOW(),$4)
+                    ON CONFLICT(provider,provider_account_id) DO NOTHING;
+                    """,
+                    str(trucksbook_user_id),
+                    applicant_id,
+                    link_name,
+                    ctx.author.id,
+                )
+                v2_owner = await connection.fetchval(
+                    """
+                    SELECT discord_user_id FROM unified_provider_links
+                    WHERE provider='trucksbook' AND provider_account_id=$1
+                      AND verified_at IS NOT NULL;
+                    """,
+                    str(trucksbook_user_id),
+                )
+                if v2_owner != applicant_id:
+                    raise RuntimeError(
+                        "Unified TrucksBook account belongs to another driver."
+                    )
+                await connection.execute(
+                    """
+                    UPDATE unified_provider_claims
+                    SET status='approved',membership_confirmed=TRUE,
+                        ownership_confirmed=TRUE,reviewed_by=$2,
+                        reviewed_at=NOW()
+                    WHERE discord_user_id=$1 AND provider='trucksbook'
+                      AND provider_account_id=$3 AND status='pending';
+                    """,
+                    applicant_id,
+                    ctx.author.id,
+                    str(trucksbook_user_id),
+                )
+                await connection.execute(
+                    """
+                    UPDATE unified_registration_sessions
+                    SET status='approved',updated_at=NOW()
+                    WHERE discord_user_id=$1;
+                    """,
+                    applicant_id,
+                )
+
+                # ----------------------------------
                 # COMPLETE VERIFICATION
                 # ----------------------------------
 
