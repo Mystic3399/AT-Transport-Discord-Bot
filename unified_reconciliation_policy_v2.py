@@ -17,9 +17,9 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
     """
     if incoming.get("provider") not in ("trucky", "trucksbook"):
         raise ValueError("Unsupported provider")
-    if not isinstance(incoming.get("discord_user_id"), int) or incoming["discord_user_id"] <= 0:
+    if type(incoming.get("discord_user_id")) is not int or incoming["discord_user_id"] <= 0:
         return "pending"
-    if incoming.get("mileage_type") not in ("real", "race"):
+    if (incoming.get("trusted") is False or incoming.get("verified_delivery") is False\n            or incoming.get("eligible_for_award") is False):\n        return "pending"\n    if incoming.get("mileage_type") not in ("real", "race"):
         return "pending"
     if incoming["provider"] == "trucksbook" and incoming["mileage_type"] == "race":
         return "pending"  # TrucksBook race miles are not credited by A&T policy.
@@ -40,7 +40,7 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
         try:
             # A candidate from the wrong provider or driver is not evidence
             # that the opposite provider feed has been completely inspected.
-            if candidate.get("provider") == incoming["provider"]:
+            if candidate.get("provider") not in ("trucky", "trucksbook") or candidate.get("provider") == incoming["provider"]:
                 return "pending"
             if is_candidate_duplicate(incoming, candidate):
                 if candidate.get("credited") is True:
