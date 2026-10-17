@@ -27,9 +27,23 @@ CREATE TABLE IF NOT EXISTS unified_staging_award_jobs (
 """
 
 async def install_staging_awards(pool):
+    """Install current schema; refuse older unsafe staging tables."""
     async with pool.acquire() as conn:
-        await conn.execute(SCHEMA)
-
+        async with conn.transaction():
+            await conn.execute(SCHEMA)
+            has_key = await conn.fetchval("""
+                SELECT EXISTS(
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'unified_staging_award_jobs'
+                      AND column_name = 'canonical_delivery_key'
+                )
+            """)
+            if not has_key:
+                raise RuntimeError(
+                    "Outdated staging award table: recreate the disposable "
+                    "staging database before testing"
+                )
 
 async def award_staging_real_miles(pool, provider, job_id, discord_user_id, miles, *, canonical_delivery_key=None):
     """Award once by provider ID; no production writes or cross-provider promise.
