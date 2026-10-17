@@ -40,6 +40,20 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 GUILD_ID = int(os.getenv("GUILD_ID"))
 
+# Fail closed in isolated staging before any bot connection, DB setup, or
+# background task can interact with Discord. Production is unaffected.
+if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+    staging_guild = os.getenv("STAGING_GUILD_ID", "").strip()
+    if not staging_guild.isdecimal() or int(staging_guild) <= 0:
+        raise RuntimeError("Staging requires a valid STAGING_GUILD_ID")
+    if GUILD_ID != int(staging_guild):
+        raise RuntimeError("Staging GUILD_ID must equal STAGING_GUILD_ID")
+    if not os.getenv("DISCORD_TOKEN", "").strip():
+        raise RuntimeError("Staging requires DISCORD_TOKEN")
+    if not DATABASE_URL:
+        raise RuntimeError("Staging requires isolated DATABASE_URL")
+
+
 
 def optional_snowflake_env(variable_name):
     """Read an optional Discord ID without making bot startup fragile."""
