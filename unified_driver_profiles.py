@@ -87,6 +87,18 @@ async def backfill_trucksbook_profiles(pool):
                 FROM driver_links WHERE trucksbook_user_id IS NOT NULL
                 ON CONFLICT(provider,provider_account_id) DO NOTHING
             """)
+            # Reject conflicting pre-existing provider ownership rather than
+            # silently treating a partial migration as successful.
+            conflicts = await conn.fetchval("""
+                SELECT COUNT(*) FROM driver_links legacy
+                JOIN unified_provider_links v2
+                  ON v2.provider='trucksbook'
+                 AND v2.provider_account_id=legacy.trucksbook_user_id::text
+                WHERE legacy.trucksbook_user_id IS NOT NULL
+                  AND v2.discord_user_id<>legacy.discord_user_id
+            """)
+            if conflicts:
+                raise ValueError("Conflicting TrucksBook ownership during V2 backfill")
 
 async def has_verified_provider(pool, discord_user_id):
     async with pool.acquire() as conn:
