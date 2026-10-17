@@ -2569,6 +2569,10 @@ async def on_ready():
     if not rotate_bot_status.is_running():
         rotate_bot_status.start()
 
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        if len(bot.guilds) != 1 or bot.guilds[0].id != GUILD_ID:
+            raise RuntimeError("Staging bot must belong only to the configured test guild")
+
     if db_pool is None:
         try:
             await setup_database()
