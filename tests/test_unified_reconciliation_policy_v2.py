@@ -43,6 +43,14 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(classify_delivery({**BASE, "provider": "trucksbook",
             "mileage_type": "race"}, [], provider_watermark=TIME + timedelta(hours=1)), "pending")
 
+    def test_missing_driver_identity_never_credits(self):
+        self.assertEqual(classify_delivery({**BASE, "discord_user_id": None}, [],
+            provider_watermark=TIME + timedelta(hours=1), provider_feed_complete=True), "pending")
+
+    def test_same_provider_candidate_fails_closed(self):
+        self.assertEqual(classify_delivery(BASE, [BASE],
+            provider_watermark=TIME + timedelta(hours=1), provider_feed_complete=True), "pending")
+
     def test_different_driver_is_not_duplicate(self):
         other = {**BASE, "provider": "trucksbook", "discord_user_id": 999, "credited": True}
         self.assertEqual(classify_delivery(BASE, [other],
