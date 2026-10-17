@@ -444,13 +444,14 @@ async def record_normalized_provider_job(
             """, provider,provider_job_id,discord_user_id,real,race,delivered_at,audit_payload)
             if result == "INSERT 0 0":
                 previous = await conn.fetchrow("""
-                    SELECT discord_user_id,real_miles,race_miles,source_payload
+                    SELECT discord_user_id,real_miles,race_miles,delivered_at,source_payload
                     FROM unified_provider_job_events
                     WHERE provider=$1 AND provider_job_id=$2
                 """, provider,provider_job_id)
                 if (previous is None or previous["discord_user_id"] != discord_user_id
                         or previous["real_miles"] != real
                         or previous["race_miles"] != race
+                        or previous["delivered_at"] != delivered_at
                         or (json.loads(previous["source_payload"]) if isinstance(previous["source_payload"], str)
                             else previous["source_payload"]) != json.loads(audit_payload)):
                     raise ValueError("Conflicting duplicate provider job requires review")
