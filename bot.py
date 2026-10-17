@@ -2598,17 +2598,17 @@ async def on_ready():
             print(f"ROLE DIVIDER STARTUP SYNC ERROR: {error}")
 
     try:
-        synced = await bot.tree.sync()
-
-        # Register the driver onboarding slash command immediately in our
-        # home server; global Discord command propagation may take time.
+        # Keep the commands server-scoped only to avoid duplicate entries
+        # from simultaneous global and guild registrations.
         home_guild = discord.Object(id=GUILD_ID)
         bot.tree.copy_global_to(guild=home_guild)
         guild_synced = await bot.tree.sync(guild=home_guild)
+        bot.tree.clear_commands(guild=None)
+        global_synced = await bot.tree.sync()
 
         print(
-            f"Synced {len(synced)} global slash command(s) "
-            f"and {len(guild_synced)} home-server slash command(s)."
+            f"Synced {len(guild_synced)} home-server slash command(s) "
+            f"and {len(global_synced)} global slash command(s)."
         )
 
     except Exception as error:
