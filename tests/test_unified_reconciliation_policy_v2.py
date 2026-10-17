@@ -43,6 +43,16 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(classify_delivery({**BASE, "provider": "trucksbook",
             "mileage_type": "race"}, [], provider_watermark=TIME + timedelta(hours=1)), "pending")
 
+    def test_incomplete_metadata_never_credits(self):
+        self.assertEqual(classify_delivery({**BASE, "metadata": {"game": "ets2"}}, [],
+            provider_watermark=TIME + timedelta(hours=1), provider_feed_complete=True), "pending")
+
+    def test_invalid_miles_never_credits(self):
+        for miles in ("0", "-2", "NaN", "Infinity", None):
+            with self.subTest(miles=miles):
+                self.assertEqual(classify_delivery({**BASE, "miles": miles}, [],
+                    provider_watermark=TIME + timedelta(hours=1), provider_feed_complete=True), "pending")
+
     def test_missing_driver_identity_never_credits(self):
         self.assertEqual(classify_delivery({**BASE, "discord_user_id": None}, [],
             provider_watermark=TIME + timedelta(hours=1), provider_feed_complete=True), "pending")
