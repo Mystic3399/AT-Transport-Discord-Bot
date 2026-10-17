@@ -47,9 +47,14 @@ async def award_staging_real_miles(pool, provider, job_id, discord_user_id, mile
     if not isinstance(canonical_delivery_key, str) or not canonical_delivery_key.strip():
         raise ValueError('Trusted canonical delivery key required')
     # Reject precision loss: NUMERIC(20,10) must represent the mileage exactly.
-    validated_miles = Decimal(str(miles))
-    if validated_miles.as_tuple().exponent < -10 and validated_miles != validated_miles.quantize(Decimal('0.0000000001')):
-        raise ValueError('Mileage exceeds staging ledger precision')
+    try:
+        validated_miles = Decimal(str(miles))
+        if not validated_miles.is_finite() or validated_miles <= 0:
+            raise ValueError("Mileage must be positive and finite")
+        if validated_miles != validated_miles.quantize(Decimal("0.0000000001")):
+            raise ValueError("Mileage exceeds staging ledger precision")
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise ValueError("Invalid staging mileage precision or amount") from exc
     # Validation before entering the transaction prevents invalid carry writes.
     accumulate_miles("0", miles)
     async with pool.acquire() as conn:
