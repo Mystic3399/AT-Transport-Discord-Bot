@@ -2,7 +2,11 @@ import hashlib
 import hmac
 import json
 import unittest
-from trucky_signed_webhook_v2 import verify_trucky_webhook, InvalidTruckyWebhook
+from datetime import timezone
+from trucky_signed_webhook_v2 import (
+    verify_trucky_webhook, extract_trucky_identity_evidence,
+    InvalidTruckyWebhook,
+)
 
 
 class SignedWebhookTests(unittest.TestCase):
@@ -45,6 +49,48 @@ class SignedWebhookTests(unittest.TestCase):
         body = b'{ "event": "job_completed", "data": {"id": 27805272} }'
         with self.assertRaises(InvalidTruckyWebhook):
             verify_trucky_webhook(body, self.signature, self.secret)
+
+    def test_extracts_documented_signed_driver_steam_identity(self):
+        evidence = extract_trucky_identity_evidence({
+            "id": 27805272,
+            "user_id": 123456,
+            "completed_at": "2026-10-17T20:00:00Z",
+            "driver": {
+                "id": 123456,
+                "steam_profile": {"steam_id": "76561198000000000"},
+            },
+        })
+        self.assertEqual(evidence["provider_job_id"], "27805272")
+        self.assertEqual(evidence["trucky_account_id"], "123456")
+        self.assertEqual(evidence["steam_id64"], "76561198000000000")
+        self.assertEqual(evidence["completed_at"].tzinfo, timezone.utc)
+
+    def test_rejects_driver_id_mismatch(self):
+        with self.assertRaisesRegex(InvalidTruckyWebhook, "ambiguous"):
+            extract_trucky_identity_evidence({
+                "id": 27805272, "user_id": 123457,
+                "completed_at": "2026-10-17T20:00:00Z",
+                "driver": {"id": 123456,
+                           "steam_profile": {"steam_id": "76561198000000000"}},
+            })
+
+    def test_rejects_missing_or_invalid_steam_identity(self):
+        for steam_id in (None, "7656119800000000", "not-a-steam-id"):
+            with self.subTest(steam_id=steam_id):
+                with self.assertRaises(InvalidTruckyWebhook):
+                    extract_trucky_identity_evidence({
+                        "id": 27805272, "completed_at": "2026-10-17T20:00:00Z",
+                        "driver": {"id": 123456,
+                                   "steam_profile": {"steam_id": steam_id}},
+                    })
+
+    def test_rejects_incomplete_or_timezone_naive_job(self):
+        base = {"id": 27805272, "driver": {"id": 123456,
+                 "steam_profile": {"steam_id": "76561198000000000"}}}
+        for timestamp in (None, "not-a-date", "2026-10-17T20:00:00"):
+            with self.subTest(timestamp=timestamp):
+                with self.assertRaises(InvalidTruckyWebhook):
+                    extract_trucky_identity_evidence({**base, "completed_at": timestamp})
 
 
 if __name__ == "__main__":

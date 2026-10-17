@@ -3,7 +3,7 @@ import hmac
 import json
 import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 from aiohttp.test_utils import TestClient, TestServer
 from trucky_staging_receiver_v2 import create_staging_app, create_integrations_app
 
@@ -102,13 +102,66 @@ class IntegratedReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 202)
         self.assertEqual(await response.json(), {
             "status": "authenticated_pending_api_verification",
-            "receipt_recorded": True, "mileage_awarded": False})
+            "receipt_recorded": True, "mileage_awarded": False,
+            "identity_status": "pending_identity_verification"})
         digest, event, candidate = self.pool.connection.args
         self.assertEqual(digest, hashlib.sha256(body).hexdigest())
         self.assertEqual(event, "job_completed")
         self.assertEqual(candidate, "991234560")
         self.assertNotIn("sensitive", repr(self.pool.connection.args))
         self.assertNotIn("888", repr(self.pool.connection.args))
+
+    async def test_signed_completion_checks_roster_and_links_matching_steam(self):
+        user_id = 987654321012345678
+        body = json.dumps({"event": "job_completed", "data": {
+            "id": 27805272,
+            "user_id": 123456,
+            "completed_at": "2026-10-17T20:00:00Z",
+            "driver": {"id": 123456,
+                       "steam_profile": {"steam_id": "76561198000000000"}},
+        }}).encode()
+        signature = hmac.new(b"staging-test-secret", body, hashlib.sha256).hexdigest()
+        callback = AsyncMock()
+        with patch("trucky_membership_adapter.verify_member", new=AsyncMock(return_value="A&T Driver")) as roster, \
+             patch("unified_driver_profiles.record_trucky_webhook_receipt", new=AsyncMock(return_value=7)), \
+             patch("unified_driver_profiles.auto_approve_trucky_if_steam_matches", new=AsyncMock(return_value=user_id)) as link:
+            app = create_integrations_app(self.pool, on_trucky_linked=callback)
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/trucky/webhook", data=body,
+                    headers={"X-Signature-SHA256": signature},
+                )
+                self.assertEqual(response.status, 202)
+                self.assertEqual((await response.json())["identity_status"], "identity_linked")
+            finally:
+                await client.close()
+            roster.assert_awaited_once_with("123456")
+            self.assertEqual(link.await_args.kwargs["provider_steam_id"], "76561198000000000")
+            self.assertTrue(link.await_args.kwargs["trusted_provider_source"])
+            self.assertTrue(link.await_args.kwargs["membership_confirmed"])
+            callback.assert_awaited_once_with(user_id)
+
+    async def test_signed_completion_without_active_roster_member_stays_unlinked(self):
+        body = json.dumps({"event": "job_completed", "data": {
+            "id": 27805273,
+            "user_id": 123456,
+            "completed_at": "2026-10-17T20:00:00Z",
+            "driver": {"id": 123456,
+                       "steam_profile": {"steam_id": "76561198000000000"}},
+        }}).encode()
+        signature = hmac.new(b"staging-test-secret", body, hashlib.sha256).hexdigest()
+        with patch("trucky_membership_adapter.verify_member", new=AsyncMock(return_value=None)), \
+             patch("unified_driver_profiles.record_trucky_webhook_receipt", new=AsyncMock(return_value=8)), \
+             patch("unified_driver_profiles.auto_approve_trucky_if_steam_matches", new=AsyncMock()) as link:
+            response = await self.client.post(
+                "/trucky/webhook", data=body,
+                headers={"X-Signature-SHA256": signature},
+            )
+        self.assertEqual(response.status, 202)
+        self.assertEqual((await response.json())["identity_status"], "not_active_company_member")
+        link.assert_not_awaited()
 
 
 if __name__ == "__main__":

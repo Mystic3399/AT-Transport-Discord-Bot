@@ -31,41 +31,48 @@ and no mileage is awarded. Missing or invalid HMAC is rejected.
 5. Reject expired states, repeated state/nonce, a Steam account claimed by a
    second Discord user, foreign callback origins, and invalid assertions.
 
-## Automated registration gate
-- Steam ownership verification **and** exact SteamID64 equality against a
-  trustworthy provider-owned account field **and** current A&T membership
-  must all pass before automated provider activation.
-- Neither the public Trucky ID nor membership roster alone proves ownership.
-- TrucksBook identity extraction is not yet established; keep legacy flow.
-- Driver progression/mileage for Trucky-only drivers is not yet complete.
-- Preserve all existing mileage and ranks. Do not deploy or migrate live data.
+## Steam-to-Trucky verification
+- The authenticated company-member record has a Trucky member ID and profile
+  fields but no Steam identity. Company membership alone is not ownership proof.
+- Trucky's documented signed API `job_completed` event includes a driver user
+  reference with `steam_profile.steam_id`. The receiver accepts a link only
+  when the HMAC is valid, the driver/job IDs and timezone-aware completion time
+  are present and unambiguous, that SteamID64 matches the driver's Steam
+  OpenID link, the Trucky account remains on A&T's authenticated active roster,
+  and the matching account claim is still pending within its 30-minute window.
+- Claims cannot be approved by moderator acknowledgement. Trucky account and
+  Steam identities remain unique across driver profiles. Replayed events are
+  idempotent and can retry a post-link Discord role sync.
+- The signed event is used only for identity proof. No mileage is awarded by
+  this route; job ingestion and cross-provider reconciliation remain separate
+  fail-closed gates.
+- TrucksBook retains its existing registration and mileage path.
 
 ## Current limitations
-The standalone callback and Discord bot are not deployed together; provider
-Steam field provenance and end-to-end tests are not verified. The old
-`!confirmprovider` management beta path must not be enabled as a substitute
-for Steam-backed automated verification.
+The successful staging job probe confirmed the company roster has no Steam
+field. The Trucky webhook identity field names are documented, but a live
+signed job event has not yet been observed in isolated staging. Staging still
+needs a public receiver endpoint, isolated PostgreSQL, Steam callback settings,
+and a staging-scoped Trucky webhook secret before the entire browser-to-bot
+flow can be accepted.
 
 ## Atomic automatic approval gate (development)
-The `auto_approve_trucky_if_steam_matches` database function is implemented,
-but has no production caller. It must only be called with trusted provider Steam
-data, independently verified current A&T membership, and a matching pending
-Trucky claim. It does not assign Discord roles or ingest mileage.
+The receiver now calls `auto_approve_trucky_if_steam_matches` only after HMAC,
+payload, active membership and Steam identity checks. The transaction verifies
+the job receipt, claim expiry, Steam ownership, and provider/account uniqueness
+before activating the unified profile. It does not ingest mileage.
 
-Acceptance tests still required:
-- Correct Steam identity + matching Trucky ID + current membership: approve.
-- Incorrect Steam identity: no provider link or active profile.
-- Reused Trucky ID owned by a different Discord user: reject.
-- Missing trusted Steam field: reject and flag exception.
-- Concurrent claims: one winner only; no partial activation.
-- Existing TrucksBook mileage and progression: unchanged.
+Automated acceptance tests cover signed identity parsing, invalid signatures,
+missing/mismatched Steam IDs, active-roster gating, ownership mismatch, claim
+expiry, account uniqueness, and idempotent replay. Staging acceptance still
+requires one genuine signed Trucky event and a real Steam OpenID login against
+an isolated PostgreSQL database.
 
 Never pass `trusted_provider_source=True` based on a public profile, driver
 input, or merely the presence of a field called steam_id.
 
 ## Release delta
-The callback and bot now share the same Railway process when `PORT` is
-available. No development Railway domain or callback configuration has been
-applied. Signed Trucky receipts are durably quarantined for independent API
-review, but are not yet joined to an independently fetched completed-job
-record. Therefore the receiver is not a mileage ingestion or award path.
+The callback and bot share the same Railway process when `PORT` is available.
+No production deployment or data change is authorized by these staging checks.
+Trucky mileage remains disabled until the live signed event schema and
+cross-provider duplicate reconciliation pass staging acceptance.

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import unittest
+from datetime import datetime, timezone
 
 import asyncpg
 
@@ -179,8 +180,7 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         second_steam = "76561198000000001"
         await profiles.begin_registration(self.pool, user, 991234567890123452)
         await profiles.begin_registration(self.pool, other, 991234567890123453)
-        await profiles.submit_provider_claim(self.pool, user, "trucky", "209123", "Tester")
-        with self.assertRaisesRegex(ValueError, "Verify Steam"):
+        with self.assertRaisesRegex(ValueError, "signed job event"):
             await profiles.approve_provider_claim(
                 self.pool, user, "trucky", 991234567890123499,
                 membership_confirmed=True, ownership_confirmed=True,
@@ -197,6 +197,7 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await profiles.bind_verified_steam(self.pool, who, identity, digest, nonce)
 
         await link(user, steam, "state-first", "nonce-first")
+        await profiles.submit_provider_claim(self.pool, user, "trucky", "209123", "Tester")
         with self.assertRaises(ValueError):
             await profiles.bind_verified_steam(
                 self.pool, user, steam,
@@ -206,15 +207,24 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await link(user, second_steam, "state-second", "nonce-second")
         with self.assertRaises(ValueError):
             await link(other, steam, "state-third", "nonce-third")
+        receipt = hashlib.sha256(b"signed-trucky-job-receipt").hexdigest()
+        job_id = "987654321"
+        await profiles.record_trucky_webhook_receipt(
+            self.pool, receipt, "job_completed", job_id
+        )
         with self.assertRaises(ValueError):
             await profiles.auto_approve_trucky_if_steam_matches(
                 self.pool, user, "209123", steam,
-                trusted_provider_source=False, membership_confirmed=True
+                trusted_provider_source=False, membership_confirmed=True,
+                provider_job_id=job_id, payload_sha256=receipt,
+                completed_at=datetime.now(timezone.utc),
             )
         with self.assertRaises(ValueError):
             await profiles.auto_approve_trucky_if_steam_matches(
                 self.pool, user, "209123", second_steam,
-                trusted_provider_source=True, membership_confirmed=True
+                trusted_provider_source=True, membership_confirmed=True,
+                provider_job_id=job_id, payload_sha256=receipt,
+                completed_at=datetime.now(timezone.utc),
             )
         async with self.pool.acquire() as conn:
             status = await conn.fetchval(
@@ -223,9 +233,18 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status, "pending")
         approved = await profiles.auto_approve_trucky_if_steam_matches(
             self.pool, user, "209123", steam,
-            trusted_provider_source=True, membership_confirmed=True
+            trusted_provider_source=True, membership_confirmed=True,
+            provider_job_id=job_id, payload_sha256=receipt,
+            completed_at=datetime.now(timezone.utc),
         )
-        self.assertEqual(approved, "209123")
+        self.assertEqual(approved, user)
+        replayed = await profiles.auto_approve_trucky_if_steam_matches(
+            self.pool, None, "209123", steam,
+            trusted_provider_source=True, membership_confirmed=True,
+            provider_job_id=job_id, payload_sha256=receipt,
+            completed_at=datetime.now(timezone.utc),
+        )
+        self.assertEqual(replayed, user)
         async with self.pool.acquire() as conn:
             self.assertEqual(await conn.fetchval(
                 "SELECT status FROM unified_driver_profiles WHERE discord_user_id=$1", user
@@ -234,6 +253,28 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT status FROM unified_provider_claims WHERE discord_user_id=$1 AND provider='trucky'",
                 user
             ), "approved")
+            self.assertEqual(await conn.fetchval(
+                "SELECT COUNT(*) FROM unified_provider_links WHERE provider='trucky' AND provider_account_id='209123'"
+            ), 1)
+
+        await link(other, second_steam, "state-expired", "nonce-expired")
+        await profiles.submit_provider_claim(self.pool, other, "trucky", "209124", "Tester Two")
+        async with self.pool.acquire() as conn:
+            await conn.execute("""UPDATE unified_provider_claims
+                SET submitted_at=NOW()-INTERVAL '1 hour',
+                    expires_at=NOW()-INTERVAL '30 minutes'
+                WHERE discord_user_id=$1 AND provider='trucky'""", other)
+        expired_receipt = hashlib.sha256(b"expired-trucky-receipt").hexdigest()
+        await profiles.record_trucky_webhook_receipt(
+            self.pool, expired_receipt, "job_completed", "987654322"
+        )
+        with self.assertRaisesRegex(ValueError, "outside the active link window"):
+            await profiles.auto_approve_trucky_if_steam_matches(
+                self.pool, None, "209124", second_steam,
+                trusted_provider_source=True, membership_confirmed=True,
+                provider_job_id="987654322", payload_sha256=expired_receipt,
+                completed_at=datetime.now(timezone.utc),
+            )
 
 
 if __name__ == "__main__":

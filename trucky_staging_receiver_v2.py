@@ -7,7 +7,12 @@ stored or applied. The same receiver can be mounted by the bot's HTTP service.
 import hashlib
 import os
 from aiohttp import web
-from trucky_signed_webhook_v2 import verify_trucky_webhook, InvalidTruckyWebhook
+from trucky_signed_webhook_v2 import (
+    verify_trucky_webhook, extract_trucky_identity_evidence,
+    InvalidTruckyWebhook,
+)
+
+ON_TRUCKY_LINKED_KEY = web.AppKey("on_trucky_linked", object)
 
 
 async def receive_trucky_webhook(request):
@@ -35,13 +40,60 @@ async def receive_trucky_webhook(request):
         if type(candidate) not in (str, int) or not str(candidate).isdecimal() or int(candidate) <= 0:
             candidate = None
         import unified_driver_profiles
+        evidence = None
+        try:
+            evidence = extract_trucky_identity_evidence(data)
+            candidate = evidence["provider_job_id"]
+        except InvalidTruckyWebhook:
+            # Receipt is retained for audit, but malformed identity data can
+            # never approve a link or reach a mileage award path.
+            pass
         receipt_id = await unified_driver_profiles.record_trucky_webhook_receipt(
             pool, hashlib.sha256(raw).hexdigest(), verified["event"], candidate
         )
+        link_status = "pending_identity_verification"
+        if evidence is not None:
+            import trucky_membership_adapter
+            try:
+                canonical_name = await trucky_membership_adapter.verify_member(
+                    evidence["trucky_account_id"]
+                )
+                if canonical_name is None:
+                    link_status = "not_active_company_member"
+                else:
+                    discord_user_id = await unified_driver_profiles.auto_approve_trucky_if_steam_matches(
+                        pool,
+                        discord_user_id=None,
+                        account_id=evidence["trucky_account_id"],
+                        provider_steam_id=evidence["steam_id64"],
+                        trusted_provider_source=True,
+                        membership_confirmed=True,
+                        provider_job_id=evidence["provider_job_id"],
+                        payload_sha256=hashlib.sha256(raw).hexdigest(),
+                        completed_at=evidence["completed_at"],
+                    )
+                    link_status = "identity_linked"
+                    callback = request.app.get(ON_TRUCKY_LINKED_KEY)
+                    if callback is not None:
+                        try:
+                            await callback(discord_user_id)
+                        except Exception as role_error:
+                            print(
+                                "TRUCKY LINK ROLE SYNC FAILED: "
+                                f"{type(role_error).__name__}", flush=True
+                            )
+                            link_status = "identity_linked_role_sync_pending"
+            except trucky_membership_adapter.MembershipUnavailable:
+                link_status = "membership_check_unavailable"
+            except ValueError:
+                # Account/Steam mismatch, absent or expired claim, replay, and
+                # ownership conflicts all remain unlinked and unactioned.
+                link_status = "identity_not_verified"
         return web.json_response({
             "status": "authenticated_pending_api_verification",
             "receipt_recorded": receipt_id is not None,
             "mileage_awarded": False,
+            "identity_status": link_status,
         }, status=202)
     # Isolated schema-capture mode remains stateless.
     return web.json_response({"status": "authenticated_pending_schema_verification"})
@@ -53,7 +105,7 @@ def create_staging_app():
     return app
 
 
-def create_integrations_app(pool):
+def create_integrations_app(pool, on_trucky_linked=None):
     """Expose health, Steam, and authenticated Trucky routes on bot service."""
     import steam_callback_v2
 
@@ -62,6 +114,8 @@ def create_integrations_app(pool):
 
     app = web.Application(client_max_size=1024 * 1024)
     app[steam_callback_v2.POOL_KEY] = pool
+    if on_trucky_linked is not None:
+        app[ON_TRUCKY_LINKED_KEY] = on_trucky_linked
     app.router.add_get("/healthz", health)
     app.router.add_get("/auth/steam/callback", steam_callback_v2.callback)
     app.router.add_post("/trucky/webhook", receive_trucky_webhook)

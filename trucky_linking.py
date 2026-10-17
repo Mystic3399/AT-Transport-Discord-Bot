@@ -83,35 +83,10 @@ async def request_link(pool, discord_user_id, account_id, display_name):
             )
 
 async def approve_link(pool, discord_user_id, moderator_id):
-    if discord_user_id == moderator_id:
-        raise ValueError("A driver cannot approve their own link")
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            req = await conn.fetchrow(
-                """SELECT * FROM trucky_link_requests
-                   WHERE discord_user_id=$1 AND status='pending' FOR UPDATE""",
-                discord_user_id,
-            )
-            if req is None:
-                raise ValueError("No pending Trucky request")
-            if req['membership_status'] != 'confirmed':
-                raise ValueError('Trucky A&T company membership has not been verified')
-            # Membership confirmation does not establish Discord ownership.
-            # Staff must separately verify the claimant controls the account.
-            await conn.execute(
-                """INSERT INTO trucky_driver_links
-                   (discord_user_id,trucky_account_id,trucky_display_name,verified_by)
-                   VALUES($1,$2,$3,$4)""",
-                discord_user_id, req["trucky_account_id"],
-                req["trucky_display_name"], moderator_id,
-            )
-            await conn.execute(
-                """UPDATE trucky_link_requests
-                   SET status='approved', reviewed_by=$2, reviewed_at=NOW()
-                   WHERE discord_user_id=$1""",
-                discord_user_id, moderator_id,
-            )
-            return dict(req)
+    raise ValueError(
+        "Manual Trucky approvals are disabled; ownership requires a signed Trucky "
+        "completion event matching a Steam OpenID identity"
+    )
 
 async def reject_link(pool, discord_user_id, moderator_id):
     async with pool.acquire() as conn:
