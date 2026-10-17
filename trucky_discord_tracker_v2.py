@@ -8,7 +8,7 @@ from decimal import Decimal
 
 TRACKER_CHANNEL_ID = 1541473951899852800
 JOB_RE = re.compile(r"Job Completed\s*-\s*#(\d+)", re.I)
-DISTANCE_RE = re.compile(r"(?<!\d)(\d+(?:\.\d+)?)\s*(mi\.?|miles?|km|kilomet(?:er|re)s?)\b", re.I)
+DISTANCE_RE = re.compile(r"(?<![\\d.])(\\d+(?:\\.\\d+)?)\\s*(kilomet(?:er|re)s?|miles?|km|mi)(?=\\b|\\.)", re.I)
 
 
 def parse_trucky_embed(embed):
