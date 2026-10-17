@@ -30,6 +30,11 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(classify_delivery(BASE, [{**other, "credited": True}],
             provider_watermark=watermark), "duplicate")
 
+    def test_watermark_in_different_timezone(self):
+        from datetime import timezone
+        watermark = (TIME + timedelta(hours=1)).astimezone(timezone(timedelta(hours=2)))
+        self.assertEqual(classify_delivery(BASE, [], provider_watermark=watermark), "creditable")
+
     def test_trucksbook_race_not_eligible(self):
         self.assertEqual(classify_delivery({**BASE, "provider": "trucksbook",
             "mileage_type": "race"}, [], provider_watermark=TIME + timedelta(hours=1)), "pending")
