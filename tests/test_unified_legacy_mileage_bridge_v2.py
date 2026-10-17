@@ -24,6 +24,20 @@ class LegacyBridgeTests(unittest.TestCase):
         self.assertEqual(result["status"], "fractional_miles_pending")
         self.assertEqual(result["legacy_award_miles"], 0)
 
+    def test_fractional_miles_are_carried_without_loss(self):
+        first = preview_legacy_real_miles({**JOB, "miles": "0.65"}, [],
+            fractional_carry="0", **READY)
+        self.assertEqual(first["legacy_award_miles"], 0)
+        self.assertEqual(first["fractional_carry_after"], "0.65")
+        second = preview_legacy_real_miles({**JOB, "miles": "0.55"}, [],
+            fractional_carry=first["fractional_carry_after"], **READY)
+        self.assertEqual(second["legacy_award_miles"], 1)
+        self.assertEqual(second["fractional_carry_after"], "0.20")
+
+    def test_invalid_fractional_carry_fails_closed(self):
+        self.assertEqual(preview_legacy_real_miles(JOB, [],
+            fractional_carry="1.5", **READY)["status"], "pending")
+
     def test_no_verified_feed_completeness_means_no_credit(self):
         self.assertEqual(preview_legacy_real_miles(JOB, [],
             provider_watermark=READY["provider_watermark"])["legacy_award_miles"], 0)
