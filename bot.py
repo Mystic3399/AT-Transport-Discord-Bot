@@ -6041,6 +6041,96 @@ async def register_trucky_in_channel(ctx, account_id: str = None):
     )
 
 
+@bot.command(name="approveprovider")
+async def approve_unified_provider(ctx, provider: str = None):
+    """Management-only V2 beta approval within the applicant's private channel."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        return
+    if not member_is_verification_staff(ctx.author):
+        await ctx.reply("Only authorised A&T Management can approve accounts.", mention_author=False)
+        return
+    if provider not in ("trucksbook", "trucky"):
+        await ctx.reply("Use `!approveprovider trucksbook` or `!approveprovider trucky` in the applicant's private channel.", mention_author=False)
+        return
+    if db_pool is None:
+        await ctx.reply("Registration database unavailable.", mention_author=False)
+        return
+    verification = await get_verification_by_channel(ctx.channel.id)
+    if verification is None:
+        await ctx.reply("Use this command in the applicant's private verification channel.", mention_author=False)
+        return
+    applicant_id = int(verification["discord_user_id"])
+    if applicant_id == ctx.author.id:
+        await ctx.reply("You cannot approve your own account.", mention_author=False)
+        return
+    claim = await unified_driver_profiles.get_pending_claim(db_pool, applicant_id, provider)
+    if claim is None or claim["status"] != "pending":
+        await ctx.reply("No pending V2 claim for that provider.", mention_author=False)
+        return
+    # This beta approval is intentionally restricted to Trucky.
+    # TrucksBook must continue through its existing verification/approval flow.
+    if provider == "trucksbook":
+        await ctx.reply("Use the existing TrucksBook verification process until V2 migration tests pass.", mention_author=False)
+        return
+    try:
+        current_name = await trucky_membership_adapter.verify_member(claim["provider_account_id"])
+    except (ValueError, trucky_membership_adapter.MembershipUnavailable) as error:
+        await ctx.reply(f"Cannot approve: Trucky membership check unavailable: {error}", mention_author=False)
+        return
+    if current_name is None:
+        await ctx.reply("Cannot approve: account is not on the active A&T Trucky roster.", mention_author=False)
+        return
+    await ctx.reply(
+        "Before approval, management must independently confirm account ownership. "
+        "The roster check alone is not proof. Use `!confirmprovider trucky` "
+        "only after completing that check.",
+        mention_author=False,
+    )
+
+
+@bot.command(name="confirmprovider")
+async def confirm_unified_provider(ctx, provider: str = None):
+    """Final staff confirmation after independent ownership evidence review."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or not member_is_verification_staff(ctx.author):
+        return
+    if provider != "trucky" or db_pool is None:
+        await ctx.reply("V2 beta supports `!confirmprovider trucky` only.", mention_author=False)
+        return
+    verification = await get_verification_by_channel(ctx.channel.id)
+    if verification is None:
+        await ctx.reply("Use the applicant's private verification channel.", mention_author=False)
+        return
+    applicant_id = int(verification["discord_user_id"])
+    if applicant_id == ctx.author.id:
+        await ctx.reply("Self-approval is not allowed.", mention_author=False)
+        return
+    claim = await unified_driver_profiles.get_pending_claim(db_pool, applicant_id, provider)
+    if claim is None or claim["status"] != "pending":
+        await ctx.reply("No pending Trucky claim.", mention_author=False)
+        return
+    try:
+        current_name = await trucky_membership_adapter.verify_member(claim["provider_account_id"])
+        if current_name is None:
+            await ctx.reply("Account is not on A&T's Trucky roster; approval denied.", mention_author=False)
+            return
+        await unified_driver_profiles.approve_provider_claim(
+            db_pool, applicant_id, provider, ctx.author.id,
+            membership_confirmed=True, ownership_confirmed=True
+        )
+    except (ValueError, trucky_membership_adapter.MembershipUnavailable, asyncpg.UniqueViolationError) as error:
+        await ctx.reply(f"Approval failed: {error}", mention_author=False)
+        return
+    except Exception as error:
+        print(f"V2 APPROVAL ERROR: {type(error).__name__}: {error}")
+        await ctx.reply("Approval could not be completed; contact management.", mention_author=False)
+        return
+    await ctx.reply(
+        f"Trucky verified for <@{applicant_id}>. V2 profile marked active. "
+        "Legacy mileage and driver roles were not changed.",
+        mention_author=False,
+    )
+
+
 @bot.hybrid_command(name="myregistration", description="Privately view your A&T driver account registration status")
 async def myregistration(ctx):
     if ctx.guild is None or ctx.guild.id != GUILD_ID:
