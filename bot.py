@@ -6034,7 +6034,7 @@ async def myregistration(ctx):
         async with db_pool.acquire() as conn:
             tb = await conn.fetchrow("SELECT trucksbook_name FROM driver_links WHERE discord_user_id=$1", ctx.author.id)
             tr = await conn.fetchrow("SELECT trucky_account_id, trucky_display_name FROM trucky_driver_links WHERE discord_user_id=$1", ctx.author.id)
-            pending = await conn.fetchrow("SELECT trucky_account_id, status FROM trucky_link_requests WHERE discord_user_id=$1 ORDER BY created_at DESC LIMIT 1", ctx.author.id)
+            pending = await conn.fetchrow("SELECT trucky_account_id, status FROM trucky_link_requests WHERE discord_user_id=$1 ORDER BY requested_at DESC LIMIT 1", ctx.author.id)
     except Exception:
         print("MYREGISTRATION: account lookup failed", flush=True)
         await respond("Account status is temporarily unavailable. Please contact A&T Management if this continues.")
