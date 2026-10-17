@@ -38,7 +38,7 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install aiohttp asyncpg
       - name: Compile isolated V2 modules
-        run: python -m py_compile unified_driver_profiles.py steam_openid_v2.py steam_callback_v2.py trucky_membership_adapter.py unified_distance_units.py distance_normalization_v2.py
+        run: python -m py_compile unified_driver_profiles.py steam_openid_v2.py steam_callback_v2.py trucky_membership_adapter.py unified_distance_units.py distance_normalization_v2.py unified_job_matching_v2.py
       - name: Run isolated unit tests
         run: python -m unittest discover -s tests -p 'test_*steam*.py' -v
       - name: Check provider distance normalization
@@ -50,7 +50,7 @@ jobs:
       - name: Check shared Trucky and TrucksBook role eligibility
         run: python -m unittest discover -s tests -p 'test_shared_driver_roles_v2.py' -v
       - name: Check schema integrity
-        run: python -m unittest tests/test_unified_schema_integrity.py -v
+        run: python -m unittest discover -s tests -p 'test_unified_schema_integrity.py' -v
       - name: Run disposable database registration integration tests
         run: python -m unittest discover -s tests -p 'test_registration_database_v2.py' -v
       - name: Validate schema against temporary PostgreSQL
