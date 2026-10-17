@@ -3,6 +3,7 @@
 This adapter does not award mileage or trust a user-submitted account ID.
 """
 from decimal import Decimal, InvalidOperation
+from datetime import datetime, timezone
 
 TRUCKY_COMPANY_ID = 49041
 
@@ -33,7 +34,14 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
         return None
     if not km.is_finite() or km <= 0 or km > 100000:
         return None
+    try:
+        delivered_at = datetime.fromisoformat(job["completed_at"].replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if delivered_at.tzinfo is None or delivered_at.astimezone(timezone.utc) > datetime.now(timezone.utc):
+        return None
     return {
+        "delivered_at": delivered_at,
         "provider": "trucky",
         "provider_job_id": str(job["id"]),
         "discord_user_id": discord_user_id,
