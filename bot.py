@@ -3967,6 +3967,22 @@ async def log_verification(
         )
 
 
+async def save_existing_driver_verification_channel(discord_user_id, channel_id):
+    """Attach a private Steam verification channel without resetting legacy identity."""
+    if db_pool is None:
+        return False
+    async with db_pool.acquire() as connection:
+        result = await connection.execute(
+            """
+            UPDATE driver_verifications
+            SET verification_channel_id = $2
+            WHERE discord_user_id = $1
+            """,
+            discord_user_id, channel_id,
+        )
+    return result == "UPDATE 1"
+
+
 async def save_new_verification(
     discord_user_id,
     channel_id,
@@ -5749,18 +5765,9 @@ async def register_driver(ctx):
     # CHECK FOR EXISTING DRIVER LINK
     # ------------------------------------------
 
-    if await driver_already_linked(
-        member.id
-    ):
-        await onboarding_reply(
-            (
-                f"{member.mention}, your Discord "
-                "account is already linked to an "
-                "A&T TrucksBook driver profile."
-            ),
-            mention_author=False,
-        )
-        return
+    existing_driver_linked = await driver_already_linked(member.id)
+    # Existing drivers may complete Steam verification without losing their
+    # legacy TrucksBook identity, mileage, rank, or verification status.
 
     # ------------------------------------------
     # CHECK EXISTING VERIFICATION
@@ -5770,14 +5777,7 @@ async def register_driver(ctx):
         member.id
     )
 
-    if (
-        existing
-        and existing["status"]
-        in (
-            "pending",
-            "confirmed",
-        )
-    ):
+    if existing and (existing_driver_linked or existing["status"] in ("pending", "confirmed")):
         existing_channel_id = (
             existing[
                 "verification_channel_id"
@@ -5937,10 +5937,14 @@ async def register_driver(ctx):
     # ------------------------------------------
 
     try:
-        saved = await save_new_verification(
-            member.id,
-            verification_channel.id,
-        )
+        if existing_driver_linked:
+            saved = await save_existing_driver_verification_channel(
+                member.id, verification_channel.id
+            )
+        else:
+            saved = await save_new_verification(
+                member.id, verification_channel.id,
+            )
         # V2 shadow-write: do not activate or modify legacy mileage.
         await unified_driver_profiles.begin_registration(
             db_pool, member.id, verification_channel.id
