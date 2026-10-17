@@ -6040,11 +6040,11 @@ async def myregistration(ctx):
         await respond("Account status is temporarily unavailable. Please contact A&T Management if this continues.")
         return
     if not tb:
-        await respond("🚛 **A&T Driver Registration**\\nTrucksBook: Not linked. Use **/register** in <#1553652697184473210> to begin private registration.")
+        await respond("🚛 **A&T Driver Registration**\nTrucksBook: Not linked. Use **/register** in <#1553652697184473210> to begin private registration.")
         return
     trucky = (f"Linked: {tr['trucky_display_name']} (ID {tr['trucky_account_id']})" if tr else
               f"Request {pending['status']} (ID {pending['trucky_account_id']})" if pending else "Not linked (optional)")
-    await respond(f"🚛 **Your A&T Driver Registration**\\nTrucksBook: Linked — {tb['trucksbook_name']}\\nTrucky: {trucky}\\nYour existing mileage and progression remain unchanged.")
+    await respond(f"🚛 **Your A&T Driver Registration**\nTrucksBook: Linked — {tb['trucksbook_name']}\nTrucky: {trucky}\nYour existing mileage and progression remain unchanged.")
 
 
 @bot.command(name="verify")
