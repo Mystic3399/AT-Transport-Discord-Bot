@@ -63,3 +63,46 @@ def validate_roster_page(payload, page, previous_last_page=None):
         if member["company_id"] != COMPANY_ID:
             raise MembershipUnavailable("Unexpected Trucky company in roster")
     return current, last, payload["data"]
+
+
+async def inspect_member_identity_fields(account_id):
+    """Read-only diagnostic: identify available roster fields, never expose values.
+
+    A Steam field must NOT be trusted for auto-approval until the Trucky API
+    contract and its relationship to the authenticated user are validated.
+    """
+    if not isinstance(account_id, str) or not account_id.isdecimal() or int(account_id) <= 0:
+        raise ValueError("Trucky account ID must be numeric")
+    token = os.getenv("TRUCKY_API_TOKEN", "").strip()
+    if not token:
+        raise MembershipUnavailable("Trucky API token not configured")
+    timeout = aiohttp.ClientTimeout(total=15)
+    headers = {"x-access-token": token, "Accept": "application/json"}
+    last_page = None
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        for page in range(1, MAX_PAGES + 1):
+            async with session.get(
+                BASE_URL, params={"page": page, "perPage": 100, "inactive": "false"},
+                headers=headers, allow_redirects=False
+            ) as response:
+                if response.status != 200:
+                    raise MembershipUnavailable(f"Trucky roster HTTP {response.status}")
+                payload = await response.json(content_type=None)
+            _, last, members = validate_roster_page(payload, page, last_page)
+            last_page = last
+            matching = [m for m in members if m["id"] == int(account_id)]
+            if len(matching) > 1:
+                raise MembershipUnavailable("Duplicate member ID")
+            if matching:
+                # Only return field names/types, never the account data.
+                return {
+                    "found": True,
+                    "field_types": {
+                        key: type(value).__name__
+                        for key, value in matching[0].items()
+                    },
+                    "steam_id_verified": False,
+                }
+            if page == last:
+                return {"found": False, "field_types": {}, "steam_id_verified": False}
+    raise MembershipUnavailable("Trucky roster pagination exceeded limit")
