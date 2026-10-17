@@ -36,6 +36,21 @@ class TruckyDiscordReaderTests(unittest.TestCase):
         self.embed["fields"] = [{"name": "🚀 Stats Type", "value": "Race Miles"}]
         self.assertEqual(parse_trucky_embed(self.embed)["mileage_type"], "race")
 
+    def test_distance_miles_word(self):
+        self.embed["description"] = "Oslo to Hamar: 129 miles"
+        self.assertEqual(parse_trucky_embed(self.embed)["distance_unit"], "mi")
+
+    def test_distance_kilometres(self):
+        self.embed["description"] = "Oslo to Hamar: 207.61 kilometres"
+        result = parse_trucky_embed(self.embed)
+        self.assertEqual(result["distance_unit"], "km")
+        self.assertEqual(result["distance"], "207.61")
+
+    def test_job_id_must_be_in_title(self):
+        self.embed["title"] = "Trucky update"
+        self.embed["description"] = "Job Completed - #27805272; 129 mi"
+        self.assertIsNone(parse_trucky_embed(self.embed))
+
     def test_reject_ambiguous_distance(self):
         self.embed["description"] = "129 mi. and 20 km"
         self.assertIsNone(parse_trucky_embed(self.embed))
