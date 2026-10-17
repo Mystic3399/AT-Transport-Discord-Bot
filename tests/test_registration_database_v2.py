@@ -82,7 +82,8 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 FROM unified_trucky_webhook_receipts WHERE receipt_id=$1
             """, receipt_id)
             awards = await conn.fetchval(
-                "SELECT COUNT(*) FROM unified_provider_job_events WHERE provider='trucky'"
+                """SELECT COUNT(*) FROM unified_provider_job_events
+                   WHERE provider='trucky' AND provider_job_id='991234560'"""
             )
         self.assertEqual(receipt["payload_sha256"], digest)
         self.assertEqual(receipt["candidate_job_id"], "991234560")
