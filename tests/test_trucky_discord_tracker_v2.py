@@ -28,6 +28,14 @@ class TruckyDiscordReaderTests(unittest.TestCase):
         self.assertIsNone(inspect_trucky_message(msg, expected_webhook_id=43))
         self.assertEqual(inspect_trucky_message(msg, expected_webhook_id=42)["provider_job_id"], "27805272")
 
+    def test_emoji_stats_type(self):
+        self.embed["fields"] = [{"name": "🚀 Stats Type", "value": "Real Miles"}]
+        self.assertEqual(parse_trucky_embed(self.embed)["mileage_type"], "real")
+
+    def test_race_miles_remain_separate(self):
+        self.embed["fields"] = [{"name": "🚀 Stats Type", "value": "Race Miles"}]
+        self.assertEqual(parse_trucky_embed(self.embed)["mileage_type"], "race")
+
     def test_reject_ambiguous_distance(self):
         self.embed["description"] = "129 mi. and 20 km"
         self.assertIsNone(parse_trucky_embed(self.embed))
