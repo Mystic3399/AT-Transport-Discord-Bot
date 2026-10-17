@@ -225,112 +225,112 @@ VERIFICATION_STAFF_ROLE_IDS = {
 PROGRESSION_ROLES = [
     (
         0,
-        int(os.getenv("ROLE_NEW_DRIVER")),
+        int(os.getenv("ROLE_NEW_DRIVER") or "0"),
         "A&T New Driver",
     ),
     (
         5000,
-        int(os.getenv("ROLE_ROAD_RUNNER")),
+        int(os.getenv("ROLE_ROAD_RUNNER") or "0"),
         "Road Runner",
     ),
     (
         10000,
-        int(os.getenv("ROLE_DISTANCE_DRIVER")),
+        int(os.getenv("ROLE_DISTANCE_DRIVER") or "0"),
         "Distance Driver",
     ),
     (
         15000,
-        int(os.getenv("ROLE_AURORA_DRIVER")),
+        int(os.getenv("ROLE_AURORA_DRIVER") or "0"),
         "Aurora Driver",
     ),
     (
         20000,
-        int(os.getenv("ROLE_WOLF_PACK_DRIVER")),
+        int(os.getenv("ROLE_WOLF_PACK_DRIVER") or "0"),
         "Wolf Pack Driver",
     ),
     (
         25000,
-        int(os.getenv("ROLE_VIKING_HAULER")),
+        int(os.getenv("ROLE_VIKING_HAULER") or "0"),
         "Viking Hauler",
     ),
     (
         30000,
-        int(os.getenv("ROLE_ELITE_HAULER")),
+        int(os.getenv("ROLE_ELITE_HAULER") or "0"),
         "Elite Hauler",
     ),
     (
         35000,
-        int(os.getenv("ROLE_AT_VETERAN")),
+        int(os.getenv("ROLE_AT_VETERAN") or "0"),
         "A&T Veteran",
     ),
     (
         40000,
-        int(os.getenv("ROLE_AT_ROAD_LEGEND")),
+        int(os.getenv("ROLE_AT_ROAD_LEGEND") or "0"),
         "A&T Road Legend",
     ),
     (
         50000,
-        int(os.getenv("ROLE_BEYOND_HORIZONS")),
+        int(os.getenv("ROLE_BEYOND_HORIZONS") or "0"),
         "Beyond Horizons",
     ),
     (
         75000,
-        int(os.getenv("ROLE_HORIZON_WOLF")),
+        int(os.getenv("ROLE_HORIZON_WOLF") or "0"),
         "Horizon Wolf",
     ),
     (
         100000,
-        int(os.getenv("ROLE_AT_CENTURION")),
+        int(os.getenv("ROLE_AT_CENTURION") or "0"),
         "A&T Centurion",
     ),
     (
         150000,
-        int(os.getenv("ROLE_VIKING_PATHFINDER")),
+        int(os.getenv("ROLE_VIKING_PATHFINDER") or "0"),
         "Viking Pathfinder",
     ),
     (
         200000,
-        int(os.getenv("ROLE_ROAD_GUARDIAN")),
+        int(os.getenv("ROLE_ROAD_GUARDIAN") or "0"),
         "Road Guardian",
     ),
     (
         300000,
-        int(os.getenv("ROLE_AURORA_PATHFINDER")),
+        int(os.getenv("ROLE_AURORA_PATHFINDER") or "0"),
         "Aurora Pathfinder",
     ),
     (
         400000,
-        int(os.getenv("ROLE_VIKING_ROADMASTER")),
+        int(os.getenv("ROLE_VIKING_ROADMASTER") or "0"),
         "Viking Roadmaster",
     ),
     (
         500000,
-        int(os.getenv("ROLE_HORIZON_LEGEND")),
+        int(os.getenv("ROLE_HORIZON_LEGEND") or "0"),
         "Horizon Legend",
     ),
     (
         600000,
-        int(os.getenv("ROLE_ALPHA_ROADMASTER")),
+        int(os.getenv("ROLE_ALPHA_ROADMASTER") or "0"),
         "Alpha Roadmaster",
     ),
     (
         700000,
-        int(os.getenv("ROLE_AURORA_COMMANDER")),
+        int(os.getenv("ROLE_AURORA_COMMANDER") or "0"),
         "Aurora Commander",
     ),
     (
         800000,
-        int(os.getenv("ROLE_GUARDIAN_HORIZON")),
+        int(os.getenv("ROLE_GUARDIAN_HORIZON") or "0"),
         "Guardian of the Horizon",
     ),
     (
         900000,
-        int(os.getenv("ROLE_BEYOND_HORIZON")),
+        int(os.getenv("ROLE_BEYOND_HORIZON") or "0"),
         "Beyond the Horizon",
     ),
     (
         1000000,
-        int(os.getenv("ROLE_AT_IMMORTAL")),
+        int(os.getenv("ROLE_AT_IMMORTAL") or "0"),
         "A&T Immortal",
     ),
 ]
@@ -2588,6 +2588,10 @@ async def on_ready():
     if db_pool is not None and unified_schema_ready:
         await start_public_integrations()
 
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        print("STAGING SAFE MODE: historical role sync and leaderboard startup disabled")
+        return
+
     print("--------------------------------")
     print("A&T Transport LTD Bot")
     print(f"Logged in as: {bot.user}")
@@ -2694,6 +2698,8 @@ async def on_ready():
 @bot.event
 async def on_member_join(member):
     """Restore earned permanent roles and Active status when a driver returns."""
+    if member.guild.id != GUILD_ID or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
     try:
         await sync_member_role_category_dividers(member)
     except (discord.Forbidden, discord.HTTPException) as error:
