@@ -12,10 +12,16 @@ import unified_driver_profiles as profiles
 @unittest.skipUnless(os.getenv("TEST_DATABASE_URL"), "Requires disposable TEST_DATABASE_URL")
 class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.conn = await asyncpg.connect(os.environ["TEST_DATABASE_URL"])
-        # The CI database is disposable; do not run these tests on production.
+        # Refuse to connect before explicit opt-in and strict local disposable DB validation.
         if os.getenv("AT_V2_TEST_DATABASE_DISPOSABLE") != "YES":
             self.skipTest("Explicit disposable-database opt-in required")
+        from urllib.parse import urlsplit
+        db_url = urlsplit(os.environ["TEST_DATABASE_URL"])
+        if (db_url.hostname not in ("localhost", "127.0.0.1", "::1")
+                or db_url.path != "/v2_test"
+                or db_url.scheme not in ("postgres", "postgresql")):
+            self.skipTest("Only localhost/v2_test disposable PostgreSQL is permitted")
+        self.conn = await asyncpg.connect(os.environ["TEST_DATABASE_URL"])
         await self.conn.execute(profiles.SCHEMA)
         self.pool = await asyncpg.create_pool(os.environ["TEST_DATABASE_URL"], min_size=1, max_size=2)
 
