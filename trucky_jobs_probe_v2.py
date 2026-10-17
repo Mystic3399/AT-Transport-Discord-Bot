@@ -38,7 +38,9 @@ async def main():
                     "found": False,
                     "field_types": {},
                     "steam_id_verified": False,
-                    "lookup_error": type(member_error).__name__,
+                    "lookup_error": getattr(
+                        member_error, "diagnostic_code", type(member_error).__name__
+                    ),
                 }
             print("TRUCKY_MEMBER_IDENTITY_SHAPE " +
                   json.dumps(member_report, sort_keys=True), flush=True)

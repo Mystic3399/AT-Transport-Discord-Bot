@@ -1,4 +1,5 @@
 """Read-only A&T Trucky membership verification, based on observed roster JSON."""
+import asyncio
 import os
 import aiohttp
 
@@ -7,7 +8,11 @@ BASE_URL = f"https://e.truckyapp.com/api/v1/company/{COMPANY_ID}/members"
 MAX_PAGES = 100
 
 class MembershipUnavailable(Exception):
-    pass
+    """Sanitized Trucky member lookup failure with a stable diagnostic code."""
+
+    def __init__(self, message, diagnostic_code="membership_unavailable"):
+        super().__init__(message)
+        self.diagnostic_code = diagnostic_code
 
 async def verify_member(account_id):
     """Return canonical member name or None. Raise if any page cannot be trusted."""
@@ -51,17 +56,17 @@ async def verify_member(account_id):
 def validate_roster_page(payload, page, previous_last_page=None):
     """Validate the observed Trucky company-members pagination contract."""
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-        raise MembershipUnavailable("Invalid Trucky roster format")
+        raise MembershipUnavailable("Invalid Trucky roster format", "invalid_roster_format")
     current, last = payload.get("current_page"), payload.get("last_page")
     if type(current) is not int or current != page or type(last) is not int or not (page <= last <= MAX_PAGES):
-        raise MembershipUnavailable("Invalid Trucky roster pagination")
+        raise MembershipUnavailable("Invalid Trucky roster pagination", "invalid_pagination")
     if previous_last_page is not None and last != previous_last_page:
-        raise MembershipUnavailable("Trucky roster changed during pagination")
+        raise MembershipUnavailable("Trucky roster changed during pagination", "pagination_changed")
     for member in payload["data"]:
         if not isinstance(member, dict) or type(member.get("id")) is not int or type(member.get("company_id")) is not int or not isinstance(member.get("name"), str) or not member["name"].strip():
-            raise MembershipUnavailable("Invalid Trucky member record")
+            raise MembershipUnavailable("Invalid Trucky member record", "invalid_member_record")
         if member["company_id"] != COMPANY_ID:
-            raise MembershipUnavailable("Unexpected Trucky company in roster")
+            raise MembershipUnavailable("Unexpected Trucky company in roster", "unexpected_company")
     return current, last, payload["data"]
 
 
@@ -75,35 +80,49 @@ async def inspect_member_identity_fields(account_id):
         raise ValueError("Trucky account ID must be numeric")
     token = os.getenv("TRUCKY_API_TOKEN", "").strip()
     if not token:
-        raise MembershipUnavailable("Trucky API token not configured")
+        raise MembershipUnavailable("Trucky API token not configured", "missing_token")
     timeout = aiohttp.ClientTimeout(total=15)
     headers = {"x-access-token": token, "Accept": "application/json",
                "User-Agent": "A&T Transport LTD Command Bot"}
     last_page = None
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        for page in range(1, MAX_PAGES + 1):
-            async with session.get(
-                BASE_URL, params={"page": page, "perPage": 100, "inactive": "false"},
-                headers=headers, allow_redirects=False
-            ) as response:
-                if response.status != 200:
-                    raise MembershipUnavailable(f"Trucky roster HTTP {response.status}")
-                payload = await response.json(content_type=None)
-            _, last, members = validate_roster_page(payload, page, last_page)
-            last_page = last
-            matching = [m for m in members if m["id"] == int(account_id)]
-            if len(matching) > 1:
-                raise MembershipUnavailable("Duplicate member ID")
-            if matching:
-                # Only return field names/types, never the account data.
-                return {
-                    "found": True,
-                    "field_types": {
-                        key: type(value).__name__
-                        for key, value in matching[0].items()
-                    },
-                    "steam_id_verified": False,
-                }
-            if page == last:
-                return {"found": False, "field_types": {}, "steam_id_verified": False}
-    raise MembershipUnavailable("Trucky roster pagination exceeded limit")
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            for page in range(1, MAX_PAGES + 1):
+                async with session.get(
+                    BASE_URL, params={"page": page, "perPage": 100, "inactive": "false"},
+                    headers=headers, allow_redirects=False
+                ) as response:
+                    if response.status != 200:
+                        # The HTTP status is safe to report; never include body,
+                        # URL query, response headers, or credentials.
+                        raise MembershipUnavailable(
+                            "Trucky roster HTTP request failed",
+                            f"http_{response.status}",
+                        )
+                    payload = await response.json(content_type=None)
+                _, last, members = validate_roster_page(payload, page, last_page)
+                last_page = last
+                matching = [m for m in members if m["id"] == int(account_id)]
+                if len(matching) > 1:
+                    raise MembershipUnavailable("Duplicate member ID", "duplicate_member_id")
+                if matching:
+                    # Only return field names/types, never the account data.
+                    return {
+                        "found": True,
+                        "field_types": {
+                            key: type(value).__name__
+                            for key, value in matching[0].items()
+                        },
+                        "steam_id_verified": False,
+                    }
+                if page == last:
+                    return {"found": False, "field_types": {}, "steam_id_verified": False}
+    except MembershipUnavailable:
+        raise
+    except (asyncio.TimeoutError, TimeoutError) as error:
+        raise MembershipUnavailable("Trucky roster request timed out", "timeout") from error
+    except aiohttp.ClientError as error:
+        raise MembershipUnavailable("Trucky roster transport failed", "transport_error") from error
+    except (ValueError, TypeError) as error:
+        raise MembershipUnavailable("Trucky roster response could not be decoded", "invalid_response") from error
+    raise MembershipUnavailable("Trucky roster pagination exceeded limit", "page_limit")
