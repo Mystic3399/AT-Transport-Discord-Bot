@@ -4,7 +4,8 @@ Provider job IDs are scoped to each provider. Cross-provider matches are
 potential duplicates only; uncertain records must never be auto-credited.
 """
 from datetime import timedelta
-from unified_job_matching_v2 import is_candidate_duplicate
+from unified_job_matching_v2 import is_candidate_duplicate, _normalized_metadata
+from decimal import Decimal, InvalidOperation
 
 
 def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None, provider_feed_complete=False):
@@ -22,6 +23,13 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
         return "pending"
     if incoming["provider"] == "trucksbook" and incoming["mileage_type"] == "race":
         return "pending"  # TrucksBook race miles are not credited by A&T policy.
+    try:
+        _normalized_metadata(incoming.get("metadata"))
+        miles = Decimal(str(incoming.get("miles")))
+        if not miles.is_finite() or miles <= 0:
+            return "pending"
+    except (ValueError, TypeError, InvalidOperation):
+        return "pending"
     delivered = incoming.get("delivered_at")
     if delivered is None or getattr(delivered, "tzinfo", None) is None:
         return "pending"
