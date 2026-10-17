@@ -149,3 +149,72 @@ async def activate_if_verified(pool, discord_user_id):
             )
         """, discord_user_id)
         return result == "UPDATE 1"
+
+async def get_pending_claim(pool, discord_user_id, provider):
+    if provider not in ("trucksbook", "trucky"):
+        raise ValueError("Unsupported tracking provider")
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("""
+            SELECT provider_account_id,provider_display_name,status
+            FROM unified_provider_claims
+            WHERE discord_user_id=$1 AND provider=$2
+        """, discord_user_id, provider)
+
+async def approve_provider_claim(pool, discord_user_id, provider, reviewer_id,
+                                 membership_confirmed, ownership_confirmed):
+    """Atomic management approval. Never auto-approve from a roster lookup alone."""
+    if provider not in ("trucksbook", "trucky"):
+        raise ValueError("Unsupported tracking provider")
+    if reviewer_id == discord_user_id:
+        raise ValueError("You cannot approve your own tracking account")
+    if not membership_confirmed or not ownership_confirmed:
+        raise ValueError("Membership and account ownership must both be verified")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            claim = await conn.fetchrow("""
+                SELECT provider_account_id,provider_display_name,status
+                FROM unified_provider_claims
+                WHERE discord_user_id=$1 AND provider=$2 FOR UPDATE
+            """, discord_user_id, provider)
+            if claim is None or claim["status"] != "pending":
+                raise ValueError("No pending claim for that provider")
+            existing = await conn.fetchrow("""
+                SELECT provider_account_id FROM unified_provider_links
+                WHERE discord_user_id=$1 AND provider=$2 FOR UPDATE
+            """, discord_user_id, provider)
+            if existing and existing["provider_account_id"] != claim["provider_account_id"]:
+                raise ValueError("Provider already linked to a different account; manual review required")
+            await conn.execute("""
+                INSERT INTO unified_provider_links
+                    (provider,provider_account_id,discord_user_id,
+                     provider_display_name,verified_at,verified_by)
+                VALUES($1,$2,$3,$4,NOW(),$5)
+                ON CONFLICT(provider,provider_account_id) DO UPDATE SET
+                    provider_display_name=EXCLUDED.provider_display_name
+                WHERE unified_provider_links.discord_user_id=EXCLUDED.discord_user_id
+            """, provider,claim["provider_account_id"],discord_user_id,
+                claim["provider_display_name"],reviewer_id)
+            linked = await conn.fetchval("""
+                SELECT EXISTS(SELECT 1 FROM unified_provider_links
+                WHERE provider=$1 AND provider_account_id=$2
+                  AND discord_user_id=$3 AND verified_at IS NOT NULL)
+            """,provider,claim["provider_account_id"],discord_user_id)
+            if not linked:
+                raise ValueError("Account is already owned by another driver")
+            await conn.execute("""
+                UPDATE unified_provider_claims SET status='approved',
+                    membership_confirmed=TRUE,ownership_confirmed=TRUE,
+                    reviewed_by=$3,reviewed_at=NOW()
+                WHERE discord_user_id=$1 AND provider=$2
+            """,discord_user_id,provider,reviewer_id)
+            await conn.execute("""
+                UPDATE unified_driver_profiles
+                SET status='active',activated_at=COALESCE(activated_at,NOW())
+                WHERE discord_user_id=$1
+            """,discord_user_id)
+            await conn.execute("""
+                UPDATE unified_registration_sessions
+                SET status='approved',updated_at=NOW()
+                WHERE discord_user_id=$1
+            """,discord_user_id)
+            return claim["provider_account_id"]
