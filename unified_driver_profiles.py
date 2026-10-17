@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS unified_provider_claims (
  membership_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
  ownership_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
  submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
- expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '30 minutes'),
+ expires_at TIMESTAMPTZ,
  status TEXT NOT NULL DEFAULT 'pending'
  CHECK(status IN ('pending','approved','rejected')),
  reviewed_by BIGINT,
@@ -65,7 +65,10 @@ CREATE TABLE IF NOT EXISTS unified_provider_claims (
 ALTER TABLE unified_provider_claims
  ADD COLUMN IF NOT EXISTS submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE unified_provider_claims
- ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+ ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE unified_provider_claims ALTER COLUMN expires_at DROP NOT NULL;
+ALTER TABLE unified_provider_claims ALTER COLUMN expires_at DROP DEFAULT;
+UPDATE unified_provider_claims SET expires_at=NULL WHERE status='pending' AND expires_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS unified_provider_job_events (
  provider TEXT NOT NULL CHECK(provider IN ('trucksbook','trucky')),
  provider_job_id TEXT NOT NULL,
@@ -215,7 +218,7 @@ async def submit_provider_claim(pool, discord_user_id, provider, account_id, dis
                     provider_account_id=EXCLUDED.provider_account_id,
                     provider_display_name=EXCLUDED.provider_display_name,
                     membership_confirmed=FALSE,ownership_confirmed=FALSE,
-                    submitted_at=NOW(),expires_at=NOW()+INTERVAL '30 minutes',
+                    submitted_at=NOW(),expires_at=NULL,
                     status='pending',reviewed_by=NULL,reviewed_at=NULL
             """, discord_user_id, provider, account_id, display_name)
 
@@ -468,11 +471,10 @@ async def auto_approve_trucky_if_steam_matches(
             valid_window = await conn.fetchval("""
                 SELECT $1::TIMESTAMPTZ >= $2::TIMESTAMPTZ
                    AND $1::TIMESTAMPTZ <= NOW() + INTERVAL '2 minutes'
-                   AND $3::TIMESTAMPTZ > NOW()
-                   AND $1::TIMESTAMPTZ < $3::TIMESTAMPTZ
-            """, completed_at, claim["submitted_at"], claim["expires_at"])
+
+            """, completed_at, claim["submitted_at"])
             if not valid_window:
-                raise ValueError("Signed Trucky job is outside the active link window")
+                raise ValueError("Signed Trucky job predates registration or is in the future")
             linked = await conn.fetchrow("""
                 SELECT provider_account_id FROM unified_provider_links
                 WHERE discord_user_id=$1 AND provider='trucky' FOR UPDATE
