@@ -14,3 +14,54 @@ CREATE TABLE IF NOT EXISTS unified_staging_mileage_ledger (
  REFERENCES unified_provider_job_events(provider,provider_job_id)
 );
 """
+
+async def install_staging_ledger(pool):
+    async with pool.acquire() as conn:
+        await conn.execute(SCHEMA)
+
+
+async def stage_decision(pool, provider, job_id, decision, reviewer_id=None):
+    """Immutable staging decision; no changes to driver_progress or Discord."""
+    if provider not in ("trucky", "trucksbook") or decision not in ("review", "credited", "duplicate"):
+        raise ValueError("Invalid provider or decision")
+    if not isinstance(job_id, str) or not job_id:
+        raise ValueError("Missing job ID")
+    if decision != "review" and (type(reviewer_id) is not int or reviewer_id <= 0):
+        raise ValueError("Reviewer identity required")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            event = await conn.fetchrow("""
+                SELECT discord_user_id,real_miles,race_miles
+                FROM unified_provider_job_events
+                WHERE provider=$1 AND provider_job_id=$2 FOR UPDATE
+            """, provider, job_id)
+            if event is None:
+                raise ValueError("Unknown job")
+            existing = await conn.fetchrow("""
+                SELECT status,reviewed_by FROM unified_staging_mileage_ledger
+                WHERE provider=$1 AND provider_job_id=$2 FOR UPDATE
+            """, provider, job_id)
+            if existing is not None:
+                if existing["status"] != decision or existing["reviewed_by"] != reviewer_id:
+                    raise ValueError("Conflicting ledger decision requires audited correction")
+                return False
+            await conn.execute("""
+                INSERT INTO unified_staging_mileage_ledger
+                (provider,provider_job_id,discord_user_id,real_miles,race_miles,status,reviewed_by)
+                VALUES($1,$2,$3,$4,$5,$6,$7)
+            """, provider, job_id, event["discord_user_id"],
+                 event["real_miles"] if decision == "credited" else 0,
+                 event["race_miles"] if decision == "credited" else 0,
+                 decision, reviewer_id)
+            return True
+
+
+async def staging_totals(pool, discord_user_id):
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT COALESCE(SUM(real_miles),0) AS real_miles,
+                   COALESCE(SUM(race_miles),0) AS race_miles
+            FROM unified_staging_mileage_ledger
+            WHERE discord_user_id=$1 AND status='credited'
+        """, discord_user_id)
+        return dict(row)
