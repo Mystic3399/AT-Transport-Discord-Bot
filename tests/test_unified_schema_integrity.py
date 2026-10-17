@@ -1,5 +1,6 @@
 """Regression checks for unified V2 schema integrity (no database needed)."""
 import ast
+import re
 import unittest
 import unified_driver_profiles as profiles
 
@@ -18,7 +19,7 @@ class SchemaIntegrityTests(unittest.TestCase):
             "unified_job_matches",
         ):
             self.assertEqual(
-                profiles.SCHEMA.count("CREATE TABLE IF NOT EXISTS " + table + " ("),
+                len(re.findall(r"CREATE TABLE IF NOT EXISTS\\s+" + table + r"\\s*\\(", profiles.SCHEMA)),
                 1, table,
             )
 
