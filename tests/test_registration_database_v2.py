@@ -25,6 +25,41 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         if hasattr(self, "conn"):
             await self.conn.close()
 
+    async def test_normalized_job_audit_and_duplicate_rejection(self):
+        user = 991234567890123460
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO unified_driver_profiles(discord_user_id) VALUES($1)
+                ON CONFLICT DO NOTHING
+            """, user)
+            await conn.execute("""
+                INSERT INTO unified_provider_links
+                    (provider,provider_account_id,discord_user_id,verified_at)
+                VALUES('trucky','991234560',$1,NOW())
+                ON CONFLICT DO NOTHING
+            """, user)
+        self.assertTrue(await profiles.record_normalized_provider_job(
+            self.pool, "trucky", "job-991234560", user, "100", "km"
+        ))
+        self.assertFalse(await profiles.record_normalized_provider_job(
+            self.pool, "trucky", "job-991234560", user, "100", "km"
+        ))
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT real_miles,race_miles,source_payload
+                FROM unified_provider_job_events
+                WHERE provider='trucky' AND provider_job_id='job-991234560'
+            """)
+        from decimal import Decimal
+        self.assertEqual(row["real_miles"], Decimal("62.14"))
+        self.assertEqual(row["race_miles"], Decimal("0"))
+        self.assertEqual(row["source_payload"]["original_unit"], "km")
+        self.assertEqual(row["source_payload"]["original_distance"], "100")
+        with self.assertRaises(ValueError):
+            await profiles.record_normalized_provider_job(
+                self.pool, "trucky", "job-991234560", user, "101", "km"
+            )
+
     async def test_steam_replay_account_switch_and_trucky_gate(self):
         user = 991234567890123450
         other = 991234567890123451
