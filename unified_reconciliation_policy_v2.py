@@ -19,7 +19,11 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
         raise ValueError("Unsupported provider")
     if type(incoming.get("discord_user_id")) is not int or incoming["discord_user_id"] <= 0:
         return "pending"
-    if (incoming.get("trusted") is False or incoming.get("verified_delivery") is False\n            or incoming.get("eligible_for_award") is False):\n        return "pending"\n    if incoming.get("mileage_type") not in ("real", "race"):
+    if (incoming.get("trusted") is False
+            or incoming.get("verified_delivery") is False
+            or incoming.get("eligible_for_award") is False):
+        return "pending"
+    if incoming.get("mileage_type") not in ("real", "race"):
         return "pending"
     if incoming["provider"] == "trucksbook" and incoming["mileage_type"] == "race":
         return "pending"  # TrucksBook race miles are not credited by A&T policy.
