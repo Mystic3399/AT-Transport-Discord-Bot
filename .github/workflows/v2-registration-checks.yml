@@ -38,11 +38,13 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install aiohttp asyncpg
       - name: Compile isolated V2 modules
-        run: python -m py_compile unified_driver_profiles.py steam_openid_v2.py steam_callback_v2.py trucky_membership_adapter.py unified_distance_units.py distance_normalization_v2.py unified_job_matching_v2.py unified_job_review_v2.py
+        run: python -m py_compile unified_driver_profiles.py steam_openid_v2.py steam_callback_v2.py trucky_membership_adapter.py unified_distance_units.py distance_normalization_v2.py unified_job_matching_v2.py unified_job_review_v2.py staging_readiness_v2.py
       - name: Run isolated unit tests
         run: python -m unittest discover -s tests -p 'test_*steam*.py' -v
       - name: Check provider distance normalization
         run: python -m unittest discover -s tests -p 'test_distance_normalization_v2.py' -v
+      - name: Check staging safety gate
+        run: python -m unittest discover -s tests -p 'test_staging_readiness_v2.py' -v
       - name: Check cross-provider duplicate candidate matching
         run: python -m unittest discover -s tests -p 'test_unified_job_matching_v2.py' -v
       - name: Check kilometre-to-mile conversion
