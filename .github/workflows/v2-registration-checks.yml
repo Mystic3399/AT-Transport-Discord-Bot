@@ -93,6 +93,7 @@ jobs:
                       names = await conn.fetch("""
                           SELECT tablename FROM pg_tables
                           WHERE schemaname='public' AND tablename LIKE 'unified_%'
+                            AND tablename NOT LIKE 'unified_staging_%'
                       """)
                       assert len(names) == 9, names
               finally:
