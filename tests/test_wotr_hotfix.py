@@ -51,7 +51,7 @@ class ClassificationTests(unittest.TestCase):
                       GUILD_ID=1, find_driver_link=find, record_real_job=record)
             handler = load_function('on_message', ns)
             for statistics in ('Real, WoTr', 'Real', 'Invalid, WoTr', 'Race, WoTr', 'WoTr'):
-                await handler(SimpleNamespace(webhook_id=9, embeds=[Embed(statistics=statistics)]))
+                await handler(SimpleNamespace(webhook_id=9, channel=SimpleNamespace(id=22), embeds=[Embed(statistics=statistics)]))
             self.assertEqual(len(calls), 2)
             self.assertEqual(calls[0]['accepted_distance'], 103)
             self.assertEqual(calls[0]['discord_user_id'], 42)

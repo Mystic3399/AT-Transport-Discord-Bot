@@ -29,8 +29,8 @@ async def suggest_cross_provider_matches(pool, provider, provider_job_id):
                    delivered_at,source_payload
             FROM unified_provider_job_events
             WHERE provider=$1 AND discord_user_id=$2
-              AND delivered_at BETWEEN $3 - INTERVAL '30 minutes'
-                                   AND $3 + INTERVAL '30 minutes'
+              AND delivered_at BETWEEN $3::timestamptz - INTERVAL '30 minutes'
+                                   AND $3::timestamptz + INTERVAL '30 minutes'
             ORDER BY delivered_at,provider_job_id
             LIMIT 100
         """, other, primary["discord_user_id"], primary["delivered_at"]) if primary["delivered_at"] else []

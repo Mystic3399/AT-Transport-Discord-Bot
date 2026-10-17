@@ -35,8 +35,8 @@ CREATE TABLE IF NOT EXISTS unified_provider_links (
  provider_display_name TEXT,
  verified_at TIMESTAMPTZ,
  verified_by BIGINT,
- PRIMARY KEY(provider,provider_account_id),
- UNIQUE(discord_user_id,provider)
+ PRIMARY KEY (provider, provider_account_id),
+ UNIQUE (discord_user_id, provider)
 );
 CREATE TABLE IF NOT EXISTS unified_registration_sessions (
  discord_user_id BIGINT PRIMARY KEY REFERENCES unified_driver_profiles(discord_user_id),
@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS unified_provider_job_events (
  delivered_at TIMESTAMPTZ,
  source_payload JSONB,
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
- PRIMARY KEY(provider,provider_job_id)
+ PRIMARY KEY (provider, provider_job_id)
 );
 CREATE TABLE IF NOT EXISTS unified_job_matches (
  provider TEXT NOT NULL,
