@@ -31,20 +31,9 @@ async def verify_member(account_id):
                     if response.status != 200:
                         raise MembershipUnavailable(f"Trucky API HTTP {response.status}")
                     payload = await response.json(content_type=None)
-                if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-                    raise MembershipUnavailable("Invalid Trucky roster format")
-                current = payload.get("current_page")
-                last = payload.get("last_page")
-                if type(current) is not int or current != page or type(last) is not int or not (page <= last <= MAX_PAGES):
-                    raise MembershipUnavailable("Invalid Trucky roster pagination")
-                if last_page is not None and last != last_page:
-                    raise MembershipUnavailable("Trucky roster changed during pagination")
+                current, last, members = validate_roster_page(payload, page, last_page)
                 last_page = last
-                for member in payload["data"]:
-                    if not isinstance(member, dict) or type(member.get("id")) is not int or type(member.get("company_id")) is not int or not isinstance(member.get("name"), str):
-                        raise MembershipUnavailable("Invalid Trucky member record")
-                    if member["company_id"] != COMPANY_ID:
-                        raise MembershipUnavailable("Unexpected Trucky company in roster")
+                for member in members:
                     if member["id"] == int(account_id):
                         matches.append(member["name"])
                 if page == last:
@@ -57,3 +46,20 @@ async def verify_member(account_id):
             raise
         raise MembershipUnavailable("Trucky membership lookup failed") from error
     raise MembershipUnavailable("Trucky roster exceeds supported page limit")
+
+
+def validate_roster_page(payload, page, previous_last_page=None):
+    """Validate the observed Trucky company-members pagination contract."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise MembershipUnavailable("Invalid Trucky roster format")
+    current, last = payload.get("current_page"), payload.get("last_page")
+    if type(current) is not int or current != page or type(last) is not int or not (page <= last <= MAX_PAGES):
+        raise MembershipUnavailable("Invalid Trucky roster pagination")
+    if previous_last_page is not None and last != previous_last_page:
+        raise MembershipUnavailable("Trucky roster changed during pagination")
+    for member in payload["data"]:
+        if not isinstance(member, dict) or type(member.get("id")) is not int or type(member.get("company_id")) is not int or not isinstance(member.get("name"), str) or not member["name"].strip():
+            raise MembershipUnavailable("Invalid Trucky member record")
+        if member["company_id"] != COMPANY_ID:
+            raise MembershipUnavailable("Unexpected Trucky company in roster")
+    return current, last, payload["data"]
