@@ -6182,6 +6182,31 @@ async def approve_unified_provider(ctx, provider: str = None):
     )
 
 
+async def sync_unified_driver_roles(guild, discord_user_id):
+    """One existing A&T progression ladder for verified Trucky/TrucksBook drivers.
+
+    Read legacy real miles without creating or resetting driver_progress rows.
+    Trucky-only accounts begin at the existing New Driver tier until verified
+    mileage is integrated into the shared mileage ledger.
+    """
+    if db_pool is None:
+        return {"status": "database_unavailable", "role_name": None}
+    async with db_pool.acquire() as connection:
+        verified = await connection.fetchval("""
+            SELECT EXISTS(
+                SELECT 1 FROM unified_provider_links
+                WHERE discord_user_id=$1 AND verified_at IS NOT NULL
+            )
+        """, discord_user_id)
+        if not verified:
+            return {"status": "unverified", "role_name": None}
+        real_miles = await connection.fetchval("""
+            SELECT real_miles FROM driver_progress WHERE discord_user_id=$1
+        """, discord_user_id)
+    miles = max(0, float(real_miles or 0))
+    return await sync_member_progression_role(guild, discord_user_id, miles)
+
+
 @bot.command(name="confirmprovider")
 async def confirm_unified_provider(ctx, provider: str = None, ownership_evidence: str = None):
     """Final staff confirmation after independent ownership evidence review."""
@@ -6226,9 +6251,16 @@ async def confirm_unified_provider(ctx, provider: str = None, ownership_evidence
         print(f"V2 APPROVAL ERROR: {type(error).__name__}: {error}")
         await ctx.reply("Approval could not be completed; contact management.", mention_author=False)
         return
+    try:
+        role_result = await sync_unified_driver_roles(ctx.guild, applicant_id)
+    except (discord.Forbidden, discord.HTTPException) as error:
+        print(f"UNIFIED ROLE SYNC ERROR: {type(error).__name__}: {error}")
+        role_result = {"status": "role_error", "role_name": None}
     await ctx.reply(
-        f"Trucky verified for <@{applicant_id}>. V2 profile marked active. "
-        "Legacy mileage and driver roles were not changed.",
+        f"Trucky verified for <@{applicant_id}>. Unified driver profile active. "
+        f"Shared A&T progression role: {role_result['status']} "
+        f"({role_result.get('role_name') or 'not assigned'}). "
+        "Existing TrucksBook mileage was preserved.",
         mention_author=False,
     )
 
