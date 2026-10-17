@@ -5493,6 +5493,9 @@ async def link_trucky(ctx, account_id: str = None, *, display_name: str = None):
     """Submit a Trucky account for staff ownership verification; never auto-approve."""
     if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot:
         return
+    if os.getenv("TRUCKY_OWNER_BETA", "1") == "1" and ctx.author.id != ctx.guild.owner_id:
+        await ctx.reply("Trucky linking is currently in owner-only beta.", mention_author=False)
+        return
     if db_pool is None:
         await ctx.reply("Driver database unavailable.", mention_author=False)
         return
