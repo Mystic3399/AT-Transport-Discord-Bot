@@ -91,6 +91,14 @@ class StagingAwardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["status"], "duplicate_delivery_or_provider_job")
         self.assertEqual(conn.whole, 5)
 
+    async def test_excessive_precision_rejected_before_database_write(self):
+        conn = _Connection()
+        conn.current = "1.12345678901"
+        with self.assertRaises(ValueError):
+            await award_staging_real_miles(_Pool(conn), "trucky", "job-a", 123,
+                "1.12345678901", canonical_delivery_key="journey-1")
+        self.assertEqual(conn.whole, 0)
+
     async def test_driver_mismatch_rejected(self):
         conn = _Connection()
         conn.current = "5"
