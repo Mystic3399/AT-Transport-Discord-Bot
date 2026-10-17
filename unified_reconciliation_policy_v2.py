@@ -28,7 +28,7 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None)
     for candidate in other_provider_jobs:
         try:
             if is_candidate_duplicate(incoming, candidate):
-                return "duplicate"
+                return "duplicate" if candidate.get("credited") is True else "pending"
         except (ValueError, KeyError, TypeError):
             return "pending"
     if provider_watermark is None or provider_watermark.tzinfo is None:
