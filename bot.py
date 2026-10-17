@@ -2600,9 +2600,15 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
 
+        # Register the driver onboarding slash command immediately in our
+        # home server; global Discord command propagation may take time.
+        home_guild = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=home_guild)
+        guild_synced = await bot.tree.sync(guild=home_guild)
+
         print(
-            f"Synced {len(synced)} "
-            "slash command(s)."
+            f"Synced {len(synced)} global slash command(s) "
+            f"and {len(guild_synced)} home-server slash command(s)."
         )
 
     except Exception as error:
