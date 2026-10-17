@@ -6187,7 +6187,8 @@ async def sync_unified_driver_roles(guild, discord_user_id):
 
     Read legacy real miles without creating or resetting driver_progress rows.
     Trucky-only accounts begin at the existing New Driver tier until verified
-    mileage is integrated into the shared mileage ledger.
+    mileage is integrated into the shared mileage ledger. Legacy verified
+    TrucksBook drivers remain eligible without requiring a second registration.
     """
     if db_pool is None:
         return {"status": "database_unavailable", "role_name": None}
@@ -6196,6 +6197,9 @@ async def sync_unified_driver_roles(guild, discord_user_id):
             SELECT EXISTS(
                 SELECT 1 FROM unified_provider_links
                 WHERE discord_user_id=$1 AND verified_at IS NOT NULL
+            ) OR EXISTS(
+                SELECT 1 FROM driver_links
+                WHERE discord_user_id=$1
             )
         """, discord_user_id)
         if not verified:
