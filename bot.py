@@ -6456,6 +6456,17 @@ async def submit_trucksbook(
         inline=False,
     )
 
+    embed.add_field(
+        name="🔗 Optional Trucky Hub Linking",
+        value=(
+            "Trucky is optional and does not affect your TrucksBook verification. "
+            "To request linking later, use `!linktrucky ACCOUNT_ID Display Name` "
+            "in the A&T server, or simply skip this step. "
+            "A&T Trucky membership must be verified before approval."
+        ),
+        inline=False,
+    )
+
     embed.set_footer(
         text=(
             "A&T Transport LTD • "
