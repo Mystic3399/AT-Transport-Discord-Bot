@@ -67,6 +67,29 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.pool, "trucky", "job-991234560", user, "101", "km"
             )
 
+    async def test_repeated_job_with_changed_delivery_time_is_rejected(self):
+        from datetime import datetime, timedelta, timezone
+        user = 991234567890123490
+        delivered = datetime(2026, 10, 17, 12, tzinfo=timezone.utc)
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO unified_driver_profiles(discord_user_id)
+                VALUES($1) ON CONFLICT DO NOTHING
+            """, user)
+            await conn.execute("""
+                INSERT INTO unified_provider_links
+                    (provider,provider_account_id,discord_user_id,verified_at)
+                VALUES('trucky','991234590',$1,NOW()) ON CONFLICT DO NOTHING
+            """, user)
+        args = (self.pool, "trucky", "time-991234590", user, "100", "km")
+        self.assertTrue(await profiles.record_normalized_provider_job(
+            *args, delivered_at=delivered))
+        self.assertFalse(await profiles.record_normalized_provider_job(
+            *args, delivered_at=delivered))
+        with self.assertRaises(ValueError):
+            await profiles.record_normalized_provider_job(
+                *args, delivered_at=delivered + timedelta(minutes=10))
+
     async def test_staging_ledger_isolated_and_immutable(self):
         from decimal import Decimal
         from unified_staging_ledger_v2 import install_staging_ledger, stage_decision, staging_totals
