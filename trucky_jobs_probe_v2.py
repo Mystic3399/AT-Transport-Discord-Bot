@@ -26,10 +26,20 @@ async def main():
             # Reuse the authenticated company roster lookup; expose only field
             # names/types so this diagnostic cannot leak member identity.
             from trucky_membership_adapter import inspect_member_identity_fields
-            member_report = await asyncio.wait_for(
-                inspect_member_identity_fields(str(completed["user_id"])),
-                timeout=25,
-            )
+            try:
+                member_report = await asyncio.wait_for(
+                    inspect_member_identity_fields(str(completed["user_id"])),
+                    timeout=25,
+                )
+            except Exception as member_error:
+                # Membership is independent of jobs. Report a safe failure
+                # category without losing the successful job-schema diagnostic.
+                member_report = {
+                    "found": False,
+                    "field_types": {},
+                    "steam_id_verified": False,
+                    "lookup_error": type(member_error).__name__,
+                }
             print("TRUCKY_MEMBER_IDENTITY_SHAPE " +
                   json.dumps(member_report, sort_keys=True), flush=True)
         else:
