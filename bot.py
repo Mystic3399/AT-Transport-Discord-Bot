@@ -15,6 +15,7 @@ import asyncpg
 import discord
 from bs4 import BeautifulSoup
 from discord.ext import commands, tasks
+import trucky_linking
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -2507,6 +2508,7 @@ async def on_ready():
     if db_pool is None:
         try:
             await setup_database()
+            await trucky_linking.install_schema(db_pool)
         except Exception as error:
             print(
                 f"DATABASE ERROR: {error}"
@@ -5462,6 +5464,149 @@ async def driver_profile_error(
         ),
         mention_author=False,
     )
+
+
+# --------------------------------------------------
+# OPTIONAL TRUCKY HUB ACCOUNT LINKING (NO MILEAGE WRITES)
+# --------------------------------------------------
+
+TRUCKY_LINK_LOG_CHANNEL_ID = optional_snowflake_env("TRUCKY_LINK_LOG_CHANNEL_ID")
+
+
+async def notify_trucky_link_staff(guild, heading, message):
+    if not TRUCKY_LINK_LOG_CHANNEL_ID:
+        print("TRUCKY LINK LOG: TRUCKY_LINK_LOG_CHANNEL_ID is not configured")
+        return
+    channel = guild.get_channel(TRUCKY_LINK_LOG_CHANNEL_ID)
+    if channel is None:
+        print("TRUCKY LINK LOG: configured channel not found")
+        return
+    try:
+        await channel.send(embed=discord.Embed(title=heading, description=message, color=0x19B7CA))
+    except discord.HTTPException as error:
+        print(f"TRUCKY LINK LOG ERROR: {error}")
+
+
+@bot.command(name="linktrucky")
+async def link_trucky(ctx, account_id: str = None, *, display_name: str = None):
+    """Submit a Trucky account for staff ownership verification; never auto-approve."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot:
+        return
+    if db_pool is None:
+        await ctx.reply("Driver database unavailable.", mention_author=False)
+        return
+    if not account_id or not display_name:
+        await ctx.reply(
+            "To request your optional Trucky link, use `!linktrucky ACCOUNT_ID Display Name`. "
+            "Find your stable Trucky account ID in your account details. "
+            "Management must verify ownership before the account is linked. "
+            "For privacy, send this in your private onboarding channel or by DM to management.",
+            mention_author=False,
+        )
+        return
+    try:
+        await trucky_linking.request_link(db_pool, ctx.author.id, account_id, display_name)
+    except (ValueError, asyncpg.UniqueViolationError) as error:
+        await ctx.reply(f"Could not submit link request: {error}", mention_author=False)
+        return
+    await ctx.reply("Trucky account request received. Management verification is required; no mileage has been added.", mention_author=False)
+    await notify_trucky_link_staff(
+        ctx.guild, "Trucky account link requested",
+        f"Discord: {ctx.author.mention}\nTrucky ID: `{account_id}`\n"
+        f"Display name: {discord.utils.escape_markdown(display_name)}\n"
+        f"Review account ownership before `!approvetrucky {ctx.author.id}`.",
+    )
+
+
+@bot.command(name="myaccounts")
+async def my_accounts(ctx):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    async with db_pool.acquire() as conn:
+        tb = await conn.fetchrow(
+            "SELECT trucksbook_name FROM driver_links WHERE discord_user_id=$1",
+            ctx.author.id,
+        )
+        tr = await conn.fetchrow(
+            "SELECT trucky_display_name, trucky_account_id FROM trucky_driver_links WHERE discord_user_id=$1",
+            ctx.author.id,
+        )
+        pending = await conn.fetchval(
+            "SELECT status FROM trucky_link_requests WHERE discord_user_id=$1",
+            ctx.author.id,
+        )
+    await ctx.reply(
+        f"Discord: {ctx.author.mention}\n"
+        f"TrucksBook: {discord.utils.escape_markdown(tb['trucksbook_name']) if tb else 'Not linked'}\n"
+        f"Trucky: {discord.utils.escape_markdown(tr['trucky_display_name']) if tr else ('Request ' + pending if pending else 'Not linked (optional)')}",
+        mention_author=False,
+    )
+
+
+@bot.command(name="approvetrucky")
+async def approve_trucky(ctx, member: discord.Member = None):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or not member_is_verification_staff(ctx.author):
+        return
+    if member is None or db_pool is None:
+        await ctx.reply("Usage: `!approvetrucky @driver`", mention_author=False)
+        return
+    try:
+        req = await trucky_linking.approve_link(db_pool, member.id, ctx.author.id)
+    except (ValueError, asyncpg.UniqueViolationError) as error:
+        await ctx.reply(f"Link not approved: {error}", mention_author=False)
+        return
+    await ctx.reply(f"Approved Trucky link for {member.mention}. No mileage was changed.", mention_author=False)
+    await notify_trucky_link_staff(
+        ctx.guild, "Trucky account link approved",
+        f"Discord: {member.mention}\nTrucksBook: existing verified link\n"
+        f"Trucky: {discord.utils.escape_markdown(req['trucky_display_name'])} "
+        f"(`{req['trucky_account_id']}`)\nApproved by: {ctx.author.mention}",
+    )
+
+
+@bot.command(name="rejecttrucky")
+async def reject_trucky(ctx, member: discord.Member = None):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or not member_is_verification_staff(ctx.author):
+        return
+    if member is None or db_pool is None:
+        await ctx.reply("Usage: `!rejecttrucky @driver`", mention_author=False)
+        return
+    changed = await trucky_linking.reject_link(db_pool, member.id, ctx.author.id)
+    await ctx.reply("Request rejected." if changed else "No pending request.", mention_author=False)
+    if changed:
+        await notify_trucky_link_staff(ctx.guild, "Trucky account link rejected",
+                                      f"Driver: {member.mention}\nReviewed by: {ctx.author.mention}")
+
+
+@bot.command(name="driverlinks")
+async def driver_links_overview(ctx):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or not member_is_verification_staff(ctx.author):
+        return
+    if db_pool is None:
+        return
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT d.discord_user_id, d.trucksbook_name,
+                      t.trucky_display_name, q.status AS request_status
+               FROM driver_links d
+               LEFT JOIN trucky_driver_links t USING (discord_user_id)
+               LEFT JOIN trucky_link_requests q USING (discord_user_id)
+               ORDER BY d.trucksbook_name LIMIT 100"""
+        )
+    lines = [
+        f"<@{r['discord_user_id']}> | TB: {discord.utils.escape_markdown(r['trucksbook_name'])} | "
+        f"Trucky: {discord.utils.escape_markdown(r['trucky_display_name']) if r['trucky_display_name'] else (r['request_status'] or 'Not linked')}"
+        for r in rows
+    ]
+    chunk = ""
+    for line in lines or ["No linked drivers found."]:
+        if len(chunk) + len(line) + 1 > 1750:
+            await ctx.reply(chunk, mention_author=False)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        await ctx.reply(chunk, mention_author=False)
+
 
 @bot.command(
     name="verify"
