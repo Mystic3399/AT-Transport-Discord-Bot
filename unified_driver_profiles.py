@@ -21,6 +21,29 @@ CREATE TABLE IF NOT EXISTS unified_provider_links (
     PRIMARY KEY (provider, provider_account_id),
     UNIQUE (discord_user_id, provider)
 );
+
+CREATE TABLE IF NOT EXISTS unified_registration_sessions (
+    discord_user_id BIGINT PRIMARY KEY REFERENCES unified_driver_profiles(discord_user_id),
+    verification_channel_id BIGINT UNIQUE,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','awaiting_review','approved','cancelled')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS unified_provider_claims (
+    discord_user_id BIGINT NOT NULL REFERENCES unified_driver_profiles(discord_user_id),
+    provider TEXT NOT NULL CHECK (provider IN ('trucksbook','trucky')),
+    provider_account_id TEXT NOT NULL,
+    provider_display_name TEXT,
+    membership_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+    ownership_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','approved','rejected')),
+    reviewed_by BIGINT,
+    reviewed_at TIMESTAMPTZ,
+    PRIMARY KEY (discord_user_id,provider),
+    UNIQUE (provider,provider_account_id)
+);
 CREATE TABLE IF NOT EXISTS unified_provider_job_events (
     provider TEXT NOT NULL CHECK (provider IN ('trucksbook','trucky')),
     provider_job_id TEXT NOT NULL,
@@ -73,3 +96,56 @@ async def has_verified_provider(pool, discord_user_id):
                 WHERE discord_user_id=$1 AND verified_at IS NOT NULL
             )
         """, discord_user_id))
+
+async def begin_registration(pool, discord_user_id, channel_id):
+    """Create a pending identity and registration session; never touch mileage."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("""
+                INSERT INTO unified_driver_profiles(discord_user_id)
+                VALUES($1) ON CONFLICT(discord_user_id) DO NOTHING
+            """, discord_user_id)
+            await conn.execute("""
+                INSERT INTO unified_registration_sessions(discord_user_id,verification_channel_id)
+                VALUES($1,$2)
+                ON CONFLICT(discord_user_id) DO UPDATE SET
+                    verification_channel_id=EXCLUDED.verification_channel_id,
+                    updated_at=NOW()
+            """, discord_user_id, channel_id)
+
+async def submit_provider_claim(pool, discord_user_id, provider, account_id, display_name=None):
+    """Record a claim, NOT verification or activation."""
+    if provider not in ("trucksbook", "trucky"):
+        raise ValueError("Unsupported tracking provider")
+    if not isinstance(account_id,str) or not account_id.isdigit() or not (1 <= len(account_id) <= 30):
+        raise ValueError("Provider account ID must be numeric")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if not await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM unified_registration_sessions WHERE discord_user_id=$1)",
+                discord_user_id,
+            ):
+                raise ValueError("Start /register first")
+            await conn.execute("""
+                INSERT INTO unified_provider_claims
+                    (discord_user_id,provider,provider_account_id,provider_display_name)
+                VALUES($1,$2,$3,$4)
+                ON CONFLICT(discord_user_id,provider) DO UPDATE SET
+                    provider_account_id=EXCLUDED.provider_account_id,
+                    provider_display_name=EXCLUDED.provider_display_name,
+                    membership_confirmed=FALSE,ownership_confirmed=FALSE,
+                    status='pending',reviewed_by=NULL,reviewed_at=NULL
+            """, discord_user_id, provider, account_id, display_name)
+
+async def activate_if_verified(pool, discord_user_id):
+    """Only verified provider links may activate a profile; no mileage writes."""
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE unified_driver_profiles p
+            SET status='active',activated_at=COALESCE(activated_at,NOW())
+            WHERE p.discord_user_id=$1 AND EXISTS(
+                SELECT 1 FROM unified_provider_links l
+                WHERE l.discord_user_id=p.discord_user_id AND l.verified_at IS NOT NULL
+            )
+        """, discord_user_id)
+        return result == "UPDATE 1"
