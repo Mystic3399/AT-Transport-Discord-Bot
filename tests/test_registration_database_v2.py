@@ -67,6 +67,31 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.pool, "trucky", "job-991234560", user, "101", "km"
             )
 
+    async def test_staging_ledger_isolated_and_immutable(self):
+        from decimal import Decimal
+        from unified_staging_ledger_v2 import install_staging_ledger, stage_decision, staging_totals
+        user = 991234567890123480
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO unified_driver_profiles(discord_user_id)
+                VALUES($1) ON CONFLICT DO NOTHING
+            """, user)
+            await conn.execute("""
+                INSERT INTO unified_provider_links
+                (provider,provider_account_id,discord_user_id,verified_at)
+                VALUES('trucksbook','991234580',$1,NOW()) ON CONFLICT DO NOTHING
+            """, user)
+        await install_staging_ledger(self.pool)
+        await profiles.record_normalized_provider_job(
+            self.pool, "trucksbook", "ledger-991234580", user, "100", "km")
+        self.assertTrue(await stage_decision(
+            self.pool, "trucksbook", "ledger-991234580", "credited", 999))
+        self.assertFalse(await stage_decision(
+            self.pool, "trucksbook", "ledger-991234580", "credited", 999))
+        self.assertEqual((await staging_totals(self.pool, user))["real_miles"], Decimal("62.14"))
+        with self.assertRaises(ValueError):
+            await stage_decision(self.pool, "trucksbook", "ledger-991234580", "duplicate", 999)
+
     async def test_cross_provider_candidate_is_read_only(self):
         from datetime import datetime, timedelta, timezone
         from unified_job_review_v2 import suggest_cross_provider_matches
