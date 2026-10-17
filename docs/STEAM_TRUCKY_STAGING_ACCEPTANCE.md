@@ -35,3 +35,20 @@ The standalone callback and Discord bot are not deployed together; provider
 Steam field provenance and end-to-end tests are not verified. The old
 `!confirmprovider` management beta path must not be enabled as a substitute
 for Steam-backed automated verification.
+
+## Atomic automatic approval gate (development)
+The `auto_approve_trucky_if_steam_matches` database function is implemented,
+but has no production caller. It must only be called with trusted provider Steam
+data, independently verified current A&T membership, and a matching pending
+Trucky claim. It does not assign Discord roles or ingest mileage.
+
+Acceptance tests still required:
+- Correct Steam identity + matching Trucky ID + current membership: approve.
+- Incorrect Steam identity: no provider link or active profile.
+- Reused Trucky ID owned by a different Discord user: reject.
+- Missing trusted Steam field: reject and flag exception.
+- Concurrent claims: one winner only; no partial activation.
+- Existing TrucksBook mileage and progression: unchanged.
+
+Never pass `trusted_provider_source=True` based on a public profile, driver
+input, or merely the presence of a field called steam_id.
