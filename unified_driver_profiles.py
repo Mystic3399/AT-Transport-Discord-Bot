@@ -402,16 +402,23 @@ async def record_normalized_provider_job(
     Only call with provider-authenticated job IDs and trusted unit metadata.
     Cross-provider matching and rank/mileage credit remain separate approval gates.
     """
-    from distance_normalization_v2 import normalize_distance_miles
+    import json
+    from unified_distance_units import normalize_distance
     if provider not in ("trucksbook", "trucky"):
         raise ValueError("Unsupported job provider")
     if not isinstance(provider_job_id, str) or not provider_job_id.strip():
         raise ValueError("Missing provider job ID")
     if mileage_type not in ("real", "race"):
         raise ValueError("Unsupported mileage type")
-    miles = normalize_distance_miles(distance, unit)
+    original, canonical_unit, miles = normalize_distance(distance, unit)
     real = miles if mileage_type == "real" else 0
     race = miles if mileage_type == "race" else 0
+    audit_payload = json.dumps({
+        "original_distance": str(original),
+        "original_unit": canonical_unit,
+        "canonical_miles": str(miles),
+        "mileage_type": mileage_type,
+    })
     async with pool.acquire() as conn:
         async with conn.transaction():
             verified = await conn.fetchval("""
@@ -425,19 +432,20 @@ async def record_normalized_provider_job(
                 raise ValueError("Provider account not verified for this driver")
             result = await conn.execute("""
                 INSERT INTO unified_provider_job_events
-                    (provider,provider_job_id,discord_user_id,real_miles,race_miles,delivered_at)
-                VALUES($1,$2,$3,$4,$5,$6)
+                    (provider,provider_job_id,discord_user_id,real_miles,race_miles,delivered_at,source_payload)
+                VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
                 ON CONFLICT(provider,provider_job_id) DO NOTHING
-            """, provider,provider_job_id,discord_user_id,real,race,delivered_at)
+            """, provider,provider_job_id,discord_user_id,real,race,delivered_at,audit_payload)
             if result == "INSERT 0 0":
                 previous = await conn.fetchrow("""
-                    SELECT discord_user_id,real_miles,race_miles
+                    SELECT discord_user_id,real_miles,race_miles,source_payload
                     FROM unified_provider_job_events
                     WHERE provider=$1 AND provider_job_id=$2
                 """, provider,provider_job_id)
                 if (previous is None or previous["discord_user_id"] != discord_user_id
                         or previous["real_miles"] != real
-                        or previous["race_miles"] != race):
+                        or previous["race_miles"] != race
+                        or previous["source_payload"] != json.loads(audit_payload)):
                     raise ValueError("Conflicting duplicate provider job requires review")
                 return False
             return True
