@@ -11,6 +11,7 @@ def summarize_confirmed_real_miles(rows):
     if not isinstance(rows, (list, tuple)):
         raise ValueError("Expected provider job rows")
     unique = {}
+    providers_by_key = {}
     pending = rejected = invalid = duplicates = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -40,15 +41,21 @@ def summarize_confirmed_real_miles(rows):
             invalid += 1
             continue
         if key in unique:
-            duplicates += 1
-            # Different provider distances can disagree: conservatively use
-            # the smaller confirmed distance, never the sum.
-            unique[key] = min(unique[key], miles)
+            if provider in providers_by_key[key]:
+                # A canonical key repeated within one provider is ambiguous;
+                # never award or include that journey in a provisional sum.
+                unique[key] = None
+                invalid += 1
+            elif unique[key] is not None:
+                duplicates += 1
+                unique[key] = min(unique[key], miles)
+            providers_by_key[key].add(provider)
         else:
             unique[key] = miles
+            providers_by_key[key] = {provider}
     return {
-        "confirmed_unique_real_miles": sum(unique.values(), Decimal("0")),
-        "unique_job_count": len(unique),
+        "confirmed_unique_real_miles": sum((miles for miles in unique.values() if miles is not None), Decimal("0")),
+        "unique_job_count": sum(miles is not None for miles in unique.values()),
         "cross_provider_repeat_count": duplicates,
         "unreviewed_job_count": pending,
         "rejected_job_count": rejected,
