@@ -686,15 +686,22 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(row["roles_changed"])
         self.assertEqual(columns, 0)
         with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            # A provider resend may arrive as a new Discord message ID, in
+            # addition to a gateway replay of the original message ID.
+            await shadow.record_trucksbook_shadow_receipt(
+                self.pool, message_id=991234567004, webhook_id=456789,
+                configured_webhook_id="456789", payload=payload, parsed_job=parsed,
+            )
             report = await shadow.audit_receipts(self.pool, "68093174")
-        self.assertEqual(report["receipt_count"], 1)
+        self.assertEqual(report["receipt_count"], 2)
         self.assertEqual(report["unique_jobs"], 1)
-        self.assertEqual(report["replay_count"], 6)
-        self.assertEqual(report["source_verified"], 1)
-        self.assertEqual(report["safety_intact"], 1)
+        self.assertEqual(report["replay_count"], 7)
+        self.assertEqual(report["source_verified"], 2)
+        self.assertEqual(report["safety_intact"], 2)
         self.assertEqual(report["safety_violations"], 0)
         self.assertEqual(report["job"]["provider_job_id"], "68093174")
-        self.assertEqual(report["job"]["replay_count"], 6)
+        self.assertEqual(report["job"]["receipt_count"], 2)
+        self.assertEqual(report["job"]["replay_count"], 7)
 
     async def test_shadow_audit_is_staging_only_and_rejects_invalid_job_lookup(self):
         import unified_staging_shadow_receipts_v2 as shadow

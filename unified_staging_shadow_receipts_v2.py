@@ -58,7 +58,10 @@ async def audit_receipts(pool, provider_job_id=None):
         summary = await conn.fetchrow("""
             SELECT COUNT(*)::BIGINT AS receipt_count,
                    COUNT(DISTINCT provider_job_id)::BIGINT AS unique_jobs,
-                   COALESCE(SUM(delivery_count - 1), 0)::BIGINT AS replay_count,
+                   (COALESCE(SUM(delivery_count - 1), 0)
+                    + GREATEST(COUNT(provider_job_id)
+                               - COUNT(DISTINCT provider_job_id), 0))::BIGINT
+                       AS replay_count,
                    MAX(last_seen_at) AS latest_receipt_at,
                    COUNT(*) FILTER (WHERE source_authentication =
                        'configured_discord_webhook_id_match')::BIGINT AS source_verified,
@@ -75,7 +78,8 @@ async def audit_receipts(pool, provider_job_id=None):
             match = await conn.fetchrow("""
                 SELECT provider_job_id,
                        COUNT(*)::BIGINT AS receipt_count,
-                       COALESCE(SUM(delivery_count - 1), 0)::BIGINT AS replay_count,
+                       (COALESCE(SUM(delivery_count - 1), 0)
+                        + GREATEST(COUNT(*) - 1, 0))::BIGINT AS replay_count,
                        MIN(received_at) AS first_received_at,
                        MAX(last_seen_at) AS latest_receipt_at,
                        COUNT(*) FILTER (WHERE source_authentication =
