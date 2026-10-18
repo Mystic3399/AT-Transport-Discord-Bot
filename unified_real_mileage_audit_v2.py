@@ -57,6 +57,7 @@ def summarize_confirmed_real_miles(rows):
             providers_by_key[key] = {provider}
     return {
         "ambiguous_canonical_key_count": len(blocked_keys),
+        "requires_manual_review": bool(blocked_keys or pending or invalid),
         "confirmed_unique_real_miles": sum((miles for miles in unique.values() if miles is not None), Decimal("0")),
         "unique_job_count": sum(miles is not None for miles in unique.values()),
         "cross_provider_repeat_count": duplicates,
