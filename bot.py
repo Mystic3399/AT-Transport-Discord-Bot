@@ -2849,6 +2849,11 @@ async def on_message(message):
             if staging:
                 print("STAGING TRUCKSBOOK WEBHOOK REJECTED: source not configured")
             return
+        if staging:
+            # Staging acceptance must never enter the legacy mileage writer.
+            # Trusted provider payloads remain available for separate read-only review.
+            print("STAGING TRUSTED WEBHOOK OBSERVED: no mileage, registration, or role writes")
+            return
     if message.webhook_id is None:
         await bot.process_commands(
             message
