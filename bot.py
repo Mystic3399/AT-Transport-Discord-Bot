@@ -2585,7 +2585,8 @@ async def on_ready():
             await setup_database()
             await trucky_linking.install_schema(db_pool)
             await unified_driver_profiles.install_schema(db_pool)
-            await unified_driver_profiles.backfill_trucksbook_profiles(db_pool)
+            if not isolated_staging:
+                await unified_driver_profiles.backfill_trucksbook_profiles(db_pool)
             unified_schema_ready = True
         except Exception as error:
             print(
