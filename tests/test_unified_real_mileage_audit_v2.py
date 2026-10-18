@@ -57,3 +57,15 @@ def test_same_provider_canonical_collision_excluded():
     assert result["invalid_job_count"] == 1
     assert result["ambiguous_canonical_key_count"] == 1
     assert result["auto_award_allowed"] is False
+
+
+def test_manual_review_flag_for_pending_or_ambiguous_jobs():
+    clean = summarize_confirmed_real_miles([row("trucky", "clean", 10)])
+    assert clean["requires_manual_review"] is False
+    pending = summarize_confirmed_real_miles([row("trucky", "pending", 10, "unreviewed")])
+    assert pending["requires_manual_review"] is True
+    ambiguous = summarize_confirmed_real_miles([
+        row("trucky", "collision", 10), row("trucky", "collision", 11),
+    ])
+    assert ambiguous["requires_manual_review"] is True
+    assert ambiguous["confirmed_unique_real_miles"] == 0
