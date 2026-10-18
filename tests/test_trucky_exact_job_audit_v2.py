@@ -18,6 +18,7 @@ class ExactJobLookupTests(unittest.TestCase):
     def test_no_match_and_ambiguous_matches_fail_closed(self):
         self.assertEqual(find_job_record({"data": [{"id": 1}]}, 2)["status"], "not_found")
         self.assertEqual(find_job_record({"data": [{"id": 2}, {"id": "2"}]}, 2)["status"], "ambiguous")
+        self.assertEqual(find_job_record({"data": [{"id": 1, "driver": {"id": 2}}]}, 2)["status"], "not_found")
 
     def test_response_shape_without_record_array_is_not_interpreted(self):
         result = find_job_record({"items": [{"id": 2}]}, 2)

@@ -108,7 +108,17 @@ def find_job_record(payload, job_id):
             for key, item in value.items():
                 key_text = str(key)
                 normalized = "".join(c for c in key_text.lower() if c.isalnum())
-                if (normalized.endswith("id") or "job" in normalized) and type(item) in (str, int) and str(item) == str(job_id):
+                identity_ancestry = any(
+                    token in "".join(c for c in part.lower() if c.isalnum())
+                    for part in path for token in ("driver", "user", "account", "steam")
+                )
+                recognized_job_key = normalized in {"id", "jobid", "jobidentifier", "jobreferenceid"}
+                job_parent = any(
+                    "job" in "".join(c for c in part.lower() if c.isalnum())
+                    for part in path
+                )
+                if ((recognized_job_key and not identity_ancestry or job_parent and normalized == "id")
+                        and type(item) in (str, int) and str(item) == str(job_id)):
                     found.append(".".join((*path, key_text)))
                 found.extend(matching_paths(item, (*path, key_text)))
         elif isinstance(value, list):

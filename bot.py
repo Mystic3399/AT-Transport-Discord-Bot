@@ -6595,7 +6595,7 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
         "lookup_status": lookup["status"],
         "page_record_count": lookup["record_count"],
         "job_id_field_paths": lookup["id_paths"],
-        "signed_hmac_receipt_count": len(receipts),
+        "signed_hmac_receipt_rows_returned": len(receipts),
         "signed_receipts": [
             {"receipt_id": row["receipt_id"], "event_type": row["event_type"],
              "received_at": row["received_at"].isoformat(),
