@@ -56,3 +56,17 @@ def test_repeated_sync_idempotent():
 
 def test_missing_member_safe():
     assert run_sync(40000, None)["status"] == "member_missing"
+
+
+def test_above_40k_awards_role():
+    member = Member()
+    assert run_sync(40001, member)["status"] == "updated"
+    assert [r.id for r in member.roles] == [1561168545994252431]
+
+
+def test_achievement_not_removed_on_lower_mileage():
+    member = Member()
+    run_sync(40000, member)
+    assert run_sync(39999, member)["status"] == "correct"
+    assert [r.id for r in member.roles] == [1561168545994252431]
+    member.remove_roles.assert_not_awaited()
