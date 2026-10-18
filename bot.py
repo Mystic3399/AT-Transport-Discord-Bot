@@ -6371,6 +6371,56 @@ async def staging_role_sync(ctx):
     await ctx.reply(message, mention_author=False)
 
 
+@bot.command(name="truckyjobsprobe")
+async def staging_trucky_jobs_probe(ctx, page: int = 1):
+    """Read authenticated Trucky schema in isolated staging without exposing job values."""
+    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+        await ctx.reply(
+            "This diagnostic is available only in isolated A&T staging.",
+            mention_author=False,
+        )
+        return
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        await ctx.reply(
+            "Use this command in the configured A&T staging server.",
+            mention_author=False,
+        )
+        return
+    if ctx.author.id != 1561159250728718497:
+        await ctx.reply(
+            "Only the authorised staging owner can run this diagnostic.",
+            mention_author=False,
+        )
+        return
+
+    import trucky_jobs_api_v2
+    try:
+        payload = await trucky_jobs_api_v2.fetch_trucky_jobs_page(page=page)
+        shape = trucky_jobs_api_v2.inspect_jobs_response_shape(payload)
+    except (ValueError, trucky_jobs_api_v2.TruckyJobLookupUnavailable) as error:
+        await ctx.reply(
+            f"Trucky schema lookup unavailable: {error}. No data was changed.",
+            mention_author=False,
+        )
+        return
+    except Exception as error:
+        print(f"STAGING TRUCKY JOB PROBE ERROR: {type(error).__name__}")
+        await ctx.reply(
+            "Trucky schema lookup failed. No data was changed.",
+            mention_author=False,
+        )
+        return
+
+    rendered = json.dumps(shape, sort_keys=True)
+    if len(rendered) > 1600:
+        rendered = rendered[:1590] + "…"
+    await ctx.reply(
+        "Authenticated Trucky response shape (field names and data types only; "
+        "job values and driver details are omitted):\n" + rendered,
+        mention_author=False,
+    )
+
+
 @bot.command(name="confirmprovider")
 async def confirm_unified_provider(ctx, provider: str = None, ownership_evidence: str = None):
     """Final staff confirmation after independent ownership evidence review."""
