@@ -6305,6 +6305,72 @@ async def sync_unified_driver_roles(guild, discord_user_id):
     return await sync_member_progression_role(guild, discord_user_id, miles)
 
 
+@bot.command(name="stagingrolesync")
+async def staging_role_sync(ctx):
+    """Safely sync the owner's existing progression role in isolated staging."""
+    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+        await ctx.reply(
+            "This command is available only in isolated A&T staging.",
+            mention_author=False,
+        )
+        return
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        await ctx.reply(
+            "Use this command in the configured A&T staging server.",
+            mention_author=False,
+        )
+        return
+    if ctx.author.id != 1561159250728718497:
+        await ctx.reply(
+            "Only the authorised staging owner can synchronise roles.",
+            mention_author=False,
+        )
+        return
+
+    try:
+        result = await sync_unified_driver_roles(ctx.guild, ctx.author.id)
+    except discord.Forbidden:
+        await ctx.reply(
+            "Discord denied the role update. Check the bot's Manage Roles "
+            "permission and make sure its highest role is above the driver roles.",
+            mention_author=False,
+        )
+        return
+    except discord.HTTPException:
+        await ctx.reply(
+            "Discord could not complete the role update. No mileage or "
+            "registration data was changed; try again later.",
+            mention_author=False,
+        )
+        return
+    except Exception as error:
+        print(f"STAGING ROLE SYNC ERROR: {type(error).__name__}")
+        await ctx.reply(
+            "Role synchronisation failed. No mileage or registration data "
+            "was changed.",
+            mention_author=False,
+        )
+        return
+
+    status = result.get("status")
+    role_name = result.get("role_name")
+    if status == "updated":
+        message = f"✅ Staging role assigned/updated: **{role_name}**."
+    elif status == "correct":
+        message = f"✅ Roles are already correct: **{role_name}**. No changes needed."
+    elif status == "role_missing":
+        message = f"⚠️ The configured progression role **{role_name}** is missing from this server."
+    elif status == "member_missing":
+        message = "⚠️ Your Discord member record could not be found in this server."
+    elif status == "unverified":
+        message = "No verified driver profile was found; no roles were changed."
+    elif status == "database_unavailable":
+        message = "The staging database is unavailable; no roles were changed."
+    else:
+        message = "Role synchronisation returned an unexpected status; no mileage was changed."
+    await ctx.reply(message, mention_author=False)
+
+
 @bot.command(name="confirmprovider")
 async def confirm_unified_provider(ctx, provider: str = None, ownership_evidence: str = None):
     """Final staff confirmation after independent ownership evidence review."""
