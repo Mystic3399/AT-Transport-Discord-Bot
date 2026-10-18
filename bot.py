@@ -2855,9 +2855,33 @@ async def on_message(message):
                 print("STAGING TRUCKSBOOK WEBHOOK REJECTED: source not configured")
             return
         if staging:
-            # Staging acceptance must never enter the legacy mileage writer.
-            # Trusted provider payloads remain available for separate read-only review.
-            print("STAGING TRUSTED WEBHOOK OBSERVED: no mileage, registration, or role writes")
+            # Parse the existing TrucksBook embed format for redacted acceptance
+            # evidence, then stop before every legacy database/role/mileage path.
+            embeds = getattr(message, "embeds", None) or []
+            if len(embeds) != 1:
+                print(
+                    "STAGING TRUCKSBOOK QUARANTINED: payload=ambiguous "
+                    "mileage_awarded=no registration_changed=no roles_changed=no"
+                )
+                return
+            parsed = extract_trucksbook_job_from_embed(embeds[0])
+            if parsed is None:
+                print(
+                    "STAGING TRUCKSBOOK QUARANTINED: payload=unrecognized "
+                    "mileage_awarded=no registration_changed=no roles_changed=no"
+                )
+                return
+            job_id = parsed["job_id"]
+            distance = parsed["accepted_distance"]
+            classification = (
+                "real" if is_real_statistics(parsed["statistics"]) else "non_real"
+            )
+            print(
+                "STAGING TRUCKSBOOK QUARANTINED "
+                f"job_id={job_id} distance={distance if distance is not None else 'unknown'} "
+                f"classification={classification} "
+                "mileage_awarded=no registration_changed=no roles_changed=no"
+            )
             return
     if message.webhook_id is None:
         await bot.process_commands(
