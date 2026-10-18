@@ -30,6 +30,12 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
         return None
     if job.get("stats_type") != "real_miles" or job.get("distance_unit") != "km":
         return None
+    # World of Trucks is an event tag, not a reason to discard Real Miles.
+    # Keep this adapter read-only until provider API verification is complete.
+    from world_of_trucks_policy_v2 import classify_event_mileage
+    classification = classify_event_mileage("trucky", "Real, WoTr" if job.get("event_tag") == "WoTr" else "Real")
+    if classification is None or classification.mileage_type != "real":
+        return None
     try:
         km = Decimal(str(job.get("real_driven_distance_km")))
     except (InvalidOperation, ValueError, TypeError):
