@@ -2836,6 +2836,19 @@ async def on_message(message):
                 )
         except Exception as error:
             print("TRUCKY STAGING OBSERVATION ERROR: %s" % type(error).__name__)
+    if message.webhook_id is not None:
+        import os
+        from trucksbook_webhook_auth_v2 import is_authorized_trucksbook_webhook
+        staging = os.getenv("AT_V2_ISOLATED_STAGING") == "YES"
+        allowed = is_authorized_trucksbook_webhook(
+            message.webhook_id,
+            isolated_staging=staging,
+            configured_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
+        )
+        if not allowed:
+            if staging:
+                print("STAGING TRUCKSBOOK WEBHOOK REJECTED: source not configured")
+            return
     if message.webhook_id is None:
         await bot.process_commands(
             message
