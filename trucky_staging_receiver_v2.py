@@ -21,6 +21,7 @@ _IDENTITY_LOG_OUTCOMES = frozenset({
     "identity_linked_role_sync_pending",
     "membership_check_unavailable",
     "identity_not_verified",
+    "identity_verified_read_only",
     "database_unavailable",
 })
 
@@ -41,7 +42,8 @@ def _log_trucky_identity_outcome(status, *, receipt_recorded, active_member=Fals
     """Emit only an allowlisted outcome; never log provider or Steam identifiers."""
     outcome = status if status in _IDENTITY_LOG_OUTCOMES else "identity_not_verified"
     ownership_verified = outcome in {
-        "identity_linked", "identity_linked_role_sync_pending"
+        "identity_linked", "identity_linked_role_sync_pending",
+        "identity_verified_read_only"
     }
     print(
         "TRUCKY_IDENTITY_VERIFICATION "
@@ -71,6 +73,82 @@ async def receive_trucky_webhook(request):
         raise web.HTTPUnauthorized(text="Invalid webhook")
     if verified["status"] == "ignored_event":
         return web.json_response({"status": "ignored_event"})
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        # Staging authenticates and audits the event, but never changes claims,
+        # provider links, mileage, achievements, or Discord roles.
+        import steam_callback_v2
+        pool = request.app.get(steam_callback_v2.POOL_KEY)
+        if pool is None:
+            _log_trucky_identity_outcome(
+                "database_unavailable", receipt_recorded=False
+            )
+            return web.json_response(
+                {"status": "authenticated_observation_only",
+                 "identity_status": "database_unavailable",
+                 "mileage_awarded": False}, status=202
+            )
+
+        data = verified["data"]
+        candidate = data.get("id") if isinstance(data, dict) else None
+        if (type(candidate) not in (str, int) or not str(candidate).isdecimal()
+                or int(candidate) <= 0):
+            candidate = None
+        import unified_driver_profiles
+        evidence = None
+        identity_reason = None
+        try:
+            evidence = extract_trucky_identity_evidence(data)
+            candidate = evidence["provider_job_id"]
+        except InvalidTruckyWebhook:
+            identity_reason = "provider_steam_evidence_missing_or_invalid"
+
+        digest = hashlib.sha256(raw).hexdigest()
+        receipt_id = await unified_driver_profiles.record_trucky_webhook_receipt(
+            pool, digest, verified["event"], candidate
+        )
+        link_status = "identity_not_verified"
+        active_member = False
+        if evidence is not None:
+            import trucky_membership_adapter
+            try:
+                canonical_name = await trucky_membership_adapter.verify_member(
+                    evidence["trucky_account_id"]
+                )
+                if canonical_name is None:
+                    link_status = "not_active_company_member"
+                else:
+                    active_member = True
+                    result = await unified_driver_profiles.verify_trucky_event_against_verified_links(
+                        pool, evidence["trucky_account_id"], evidence["steam_id64"]
+                    )
+                    link_status = result["status"]
+                    identity_reason = (
+                        None if link_status == "identity_verified_read_only"
+                        else link_status
+                    )
+            except trucky_membership_adapter.MembershipUnavailable:
+                link_status = "membership_check_unavailable"
+            except ValueError as verification_error:
+                link_status = "identity_not_verified"
+                identity_reason = getattr(
+                    verification_error, "code", "identity_verification_rejected"
+                )
+
+        _log_trucky_identity_outcome(
+            link_status,
+            receipt_recorded=receipt_id is not None,
+            active_member=active_member,
+            identity_reason=identity_reason,
+        )
+        return web.json_response({
+            "status": "authenticated_observation_only",
+            "receipt_recorded": receipt_id is not None,
+            "mileage_awarded": False,
+            "registration_changed": False,
+            "roles_changed": False,
+            "identity_status": link_status,
+            "identity_reason": identity_reason if identity_reason in _IDENTITY_REASON_CODES else None,
+        }, status=202)
     # HMAC authenticates the sender, but does not prove the delivery's final
     # mileage or ownership. Save only a digest, event name and candidate ID.
     import steam_callback_v2
