@@ -302,6 +302,54 @@ async def get_trucky_identity_link_diagnostics(pool, discord_user_id):
         "claim_link_match": row["claim_link_match"],
     }
 
+async def verify_trucky_event_against_verified_links(pool, account_id, provider_steam_id):
+    """Read-only comparison of signed event identity with an existing verified profile.
+
+    This function performs no claim/link, mileage, role, or achievement writes.
+    The caller must validate the Trucky signature and confirm active membership.
+    """
+    import steam_openid_v2
+
+    if not isinstance(account_id, str) or not account_id.isdecimal():
+        return {"status": "invalid_account_id", "discord_user_id": None}
+    if not isinstance(provider_steam_id, str) or not provider_steam_id.isdecimal():
+        return {"status": "provider_steam_evidence_missing_or_invalid", "discord_user_id": None}
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT c.discord_user_id, c.provider_account_id, c.status,
+                   s.steam_id64,
+                   l.provider_account_id AS linked_account_id,
+                   l.verified_at AS linked_verified_at,
+                   s.verified_at AS steam_verified_at
+            FROM unified_provider_claims c
+            LEFT JOIN unified_steam_links s
+              ON s.discord_user_id=c.discord_user_id
+            LEFT JOIN unified_provider_links l
+              ON l.discord_user_id=c.discord_user_id AND l.provider='trucky'
+            WHERE c.provider='trucky' AND c.provider_account_id=$1
+            LIMIT 2
+        """, account_id)
+
+    if row is None:
+        return {"status": "claim_missing", "discord_user_id": None}
+    if row["status"] != "approved":
+        return {"status": "claim_missing_or_inactive", "discord_user_id": None}
+    if (row["linked_account_id"] != account_id
+            or row["linked_verified_at"] is None):
+        return {"status": "approved_link_inconsistent", "discord_user_id": None}
+    if row["steam_id64"] is None or row["steam_verified_at"] is None:
+        return {"status": "steam_link_missing", "discord_user_id": None}
+    if not steam_openid_v2.steam_ids_match(
+        row["steam_id64"], provider_steam_id, trusted_provider_source=True
+    ):
+        return {"status": "steam_identity_mismatch", "discord_user_id": None}
+    return {
+        "status": "identity_verified_read_only",
+        "discord_user_id": int(row["discord_user_id"]),
+    }
+
+
 async def approve_provider_claim(pool, discord_user_id, provider, reviewer_id,
                                  membership_confirmed, ownership_confirmed):
     """Atomic management approval. Never auto-approve from a roster lookup alone."""
