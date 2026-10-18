@@ -12,6 +12,7 @@ def summarize_confirmed_real_miles(rows):
         raise ValueError("Expected provider job rows")
     unique = {}
     providers_by_key = {}
+    blocked_keys = set()
     pending = rejected = invalid = duplicates = 0
     for row in rows:
         if not isinstance(row, dict):
@@ -45,6 +46,7 @@ def summarize_confirmed_real_miles(rows):
                 # A canonical key repeated within one provider is ambiguous;
                 # never award or include that journey in a provisional sum.
                 unique[key] = None
+                blocked_keys.add(key)
                 invalid += 1
             elif unique[key] is not None:
                 duplicates += 1
@@ -54,6 +56,7 @@ def summarize_confirmed_real_miles(rows):
             unique[key] = miles
             providers_by_key[key] = {provider}
     return {
+        "ambiguous_canonical_key_count": len(blocked_keys),
         "confirmed_unique_real_miles": sum((miles for miles in unique.values() if miles is not None), Decimal("0")),
         "unique_job_count": sum(miles is not None for miles in unique.values()),
         "cross_provider_repeat_count": duplicates,
