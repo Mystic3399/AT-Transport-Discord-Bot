@@ -47,10 +47,12 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 ON CONFLICT DO NOTHING
             """, user)
         self.assertTrue(await profiles.record_normalized_provider_job(
-            self.pool, "trucky", "job-991234560", user, "100", "km"
+            self.pool, "trucky", "job-991234560", user, "100", "km",
+            provider_account_id="991234560",
         ))
         self.assertFalse(await profiles.record_normalized_provider_job(
-            self.pool, "trucky", "job-991234560", user, "100", "km"
+            self.pool, "trucky", "job-991234560", user, "100", "km",
+            provider_account_id="991234560",
         ))
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
@@ -65,7 +67,12 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(row["source_payload"])["original_distance"], "100")
         with self.assertRaises(ValueError):
             await profiles.record_normalized_provider_job(
-                self.pool, "trucky", "job-991234560", user, "101", "km"
+                self.pool, "trucky", "job-991234560", user, "101", "km",
+                provider_account_id="991234560",
+            )
+        with self.assertRaisesRegex(ValueError, "stable provider account ID"):
+            await profiles.record_normalized_provider_job(
+                self.pool, "trucky", "job-without-account", user, "100", "km"
             )
 
     async def test_trucksbook_identity_backfill_preserves_legacy_mileage_and_jobs(self):
@@ -115,6 +122,11 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
         await profiles.backfill_trucksbook_profiles(self.pool)
         await profiles.backfill_trucksbook_profiles(self.pool)
+        import unified_staging_shadow_receipts_v2 as shadow
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            await shadow.install_schema(self.pool)
+            await shadow.install_schema(self.pool)
         async with self.pool.acquire() as conn:
             totals = await conn.fetchrow("""
                 SELECT (SELECT real_miles FROM driver_progress WHERE discord_user_id=$1)
@@ -270,14 +282,17 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                     (provider,provider_account_id,discord_user_id,verified_at)
                 VALUES('trucky','991234590',$1,NOW()) ON CONFLICT DO NOTHING
             """, user)
-        args = (self.pool, "trucky", "time-991234590", user, "100", "km")
         self.assertTrue(await profiles.record_normalized_provider_job(
-            *args, delivered_at=delivered))
+            self.pool, "trucky", "time-991234590", user, "100", "km",
+            provider_account_id="991234590", delivered_at=delivered))
         self.assertFalse(await profiles.record_normalized_provider_job(
-            *args, delivered_at=delivered))
+            self.pool, "trucky", "time-991234590", user, "100", "km",
+            provider_account_id="991234590", delivered_at=delivered))
         with self.assertRaises(ValueError):
             await profiles.record_normalized_provider_job(
-                *args, delivered_at=delivered + timedelta(minutes=10))
+                self.pool, "trucky", "time-991234590", user, "100", "km",
+                provider_account_id="991234590",
+                delivered_at=delivered + timedelta(minutes=10))
 
     async def test_staging_ledger_isolated_and_immutable(self):
         from decimal import Decimal
@@ -295,7 +310,8 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             """, user)
         await install_staging_ledger(self.pool)
         await profiles.record_normalized_provider_job(
-            self.pool, "trucksbook", "ledger-991234580", user, "100", "km")
+            self.pool, "trucksbook", "ledger-991234580", user, "100", "km",
+            provider_account_id="991234580")
         self.assertTrue(await stage_decision(
             self.pool, "trucksbook", "ledger-991234580", "credited", 999))
         self.assertFalse(await stage_decision(
@@ -325,10 +341,12 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 """, provider, account, user)
         await profiles.record_normalized_provider_job(
             self.pool, "trucky", "match-trucky-991234570", user,
-            "100", "km", delivered_at=now, job_metadata=meta)
+            "100", "km", provider_account_id="991234570",
+            delivered_at=now, job_metadata=meta)
         await profiles.record_normalized_provider_job(
             self.pool, "trucksbook", "match-trucksbook-991234571", user,
-            "62.14", "mi", delivered_at=now + timedelta(minutes=10),
+            "62.14", "mi", provider_account_id="991234571",
+            delivered_at=now + timedelta(minutes=10),
             job_metadata=meta)
         matches = await suggest_cross_provider_matches(
             self.pool, "trucky", "match-trucky-991234570")

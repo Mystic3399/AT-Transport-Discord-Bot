@@ -786,7 +786,9 @@ async def record_normalized_provider_job(
         raise ValueError("Missing provider job ID")
     if mileage_type not in ("real", "race"):
         raise ValueError("Unsupported mileage type")
-    if provider_account_id is not None and (
+    if provider_account_id is None:
+        raise ValueError("A stable provider account ID is required")
+    if (
         not isinstance(provider_account_id, str)
         or not provider_account_id.isascii()
         or not provider_account_id.isdecimal()
@@ -813,7 +815,7 @@ async def record_normalized_provider_job(
                     SELECT 1 FROM unified_provider_links
                     WHERE discord_user_id=$1 AND provider=$2
                       AND verified_at IS NOT NULL
-                      AND ($3::text IS NULL OR provider_account_id=$3)
+                      AND provider_account_id=$3
                 )
             """, discord_user_id, provider, provider_account_id)
             if not verified:

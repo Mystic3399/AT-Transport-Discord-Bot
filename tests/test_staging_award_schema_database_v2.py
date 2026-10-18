@@ -58,7 +58,8 @@ class StagingSchemaDatabaseTests(unittest.IsolatedAsyncioTestCase):
         await install_staging_awards(self.pool)
         await record_normalized_provider_job(
             self.pool, "trucky", "race-991234567890123441", user,
-            "100", "km", mileage_type="race")
+            "100", "km", provider_account_id="991234567890123441",
+            mileage_type="race")
         result = await award_staging_miles(
             self.pool, "trucky", "race-991234567890123441", user, "62.14",
             mileage_type="race",
