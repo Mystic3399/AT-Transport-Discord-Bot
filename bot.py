@@ -6452,6 +6452,73 @@ async def staging_identity_audit(ctx):
     )
 
 
+@bot.command(name="stagingshadowaudit")
+async def staging_shadow_audit(ctx, trucksbook_job_id: str = None):
+    """Owner-only, read-only summary of isolated TrucksBook shadow receipts."""
+    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+        await ctx.reply(
+            "This diagnostic is available only in isolated A&T staging.",
+            mention_author=False,
+        )
+        return
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        await ctx.reply(
+            "Use this diagnostic in the configured A&T staging server.",
+            mention_author=False,
+        )
+        return
+    if not is_authorised_staging_owner(ctx.author.id):
+        await ctx.reply(
+            "Only the configured staging owner can inspect shadow receipts.",
+            mention_author=False,
+        )
+        return
+    if db_pool is None:
+        await ctx.reply("The isolated staging database is unavailable.", mention_author=False)
+        return
+
+    try:
+        import unified_staging_shadow_receipts_v2 as shadow
+        report = await shadow.audit_receipts(db_pool, trucksbook_job_id)
+    except (ValueError, RuntimeError) as error:
+        await ctx.reply(f"Shadow audit unavailable: {error}.", mention_author=False)
+        return
+    except Exception as error:
+        print(f"STAGING SHADOW AUDIT ERROR: {type(error).__name__}", flush=True)
+        await ctx.reply("The read-only shadow audit failed.", mention_author=False)
+        return
+
+    latest = report["latest_receipt_at"]
+    latest_text = latest.isoformat() if latest is not None else "none"
+    source_text = (
+        f"{report['source_verified']}/{report['receipt_count']} configured-source verified"
+        if report["receipt_count"] else "no receipts to verify"
+    )
+    safe = report["safety_violations"] == 0
+    lines = [
+        "Staging TrucksBook shadow audit (read-only):",
+        f"Receipts: {report['receipt_count']}; unique jobs: {report['unique_jobs']}; "
+        f"replays: {report['replay_count']}; latest: {latest_text}.",
+        f"Source: {source_text}. Safety: "
+        f"{'no writes recorded' if safe else 'unexpected write marker present'} "
+        f"({report['safety_violations']} flagged).",
+    ]
+    if trucksbook_job_id is not None:
+        job = report["job"]
+        if job is None:
+            lines.append(f"Job {trucksbook_job_id}: no receipt found.")
+        else:
+            job_latest = job["latest_receipt_at"]
+            job_latest_text = job_latest.isoformat() if job_latest is not None else "none"
+            lines.append(
+                f"Job {trucksbook_job_id}: receipts={job['receipt_count']}; "
+                f"replays={job['replay_count']}; latest={job_latest_text}; "
+                f"source_verified={job['source_verified']}/{job['receipt_count']}; "
+                f"safety={'clean' if job['safety_violations'] == 0 else 'flagged'}."
+            )
+    await ctx.reply(" ".join(lines), mention_author=False)
+
+
 @bot.command(name="stagingrolesync")
 async def staging_role_sync(ctx):
     """Safely sync the owner's existing progression role in isolated staging."""

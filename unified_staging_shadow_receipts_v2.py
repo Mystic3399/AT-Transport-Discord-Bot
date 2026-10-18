@@ -46,6 +46,71 @@ async def install_schema(pool):
         """)
 
 
+async def audit_receipts(pool, provider_job_id=None):
+    """Return a redacted, read-only summary of staging shadow receipts."""
+    _require_staging()
+    if provider_job_id is not None:
+        if (not isinstance(provider_job_id, str)
+                or not re.fullmatch(r"[0-9]{1,32}", provider_job_id)):
+            raise ValueError("Invalid TrucksBook job ID")
+
+    async with pool.acquire() as conn:
+        summary = await conn.fetchrow("""
+            SELECT COUNT(*)::BIGINT AS receipt_count,
+                   COUNT(DISTINCT provider_job_id)::BIGINT AS unique_jobs,
+                   COALESCE(SUM(delivery_count - 1), 0)::BIGINT AS replay_count,
+                   MAX(last_seen_at) AS latest_receipt_at,
+                   COUNT(*) FILTER (WHERE source_authentication =
+                       'configured_discord_webhook_id_match')::BIGINT AS source_verified,
+                   COUNT(*) FILTER (WHERE NOT mileage_awarded
+                       AND NOT registration_changed AND NOT roles_changed)::BIGINT
+                       AS safety_intact,
+                   COUNT(*) FILTER (WHERE mileage_awarded OR registration_changed
+                       OR roles_changed)::BIGINT AS safety_violations
+              FROM staging_shadow_receipts
+             WHERE provider = 'trucksbook'
+        """)
+        match = None
+        if provider_job_id is not None:
+            match = await conn.fetchrow("""
+                SELECT provider_job_id,
+                       COUNT(*)::BIGINT AS receipt_count,
+                       COALESCE(SUM(delivery_count - 1), 0)::BIGINT AS replay_count,
+                       MIN(received_at) AS first_received_at,
+                       MAX(last_seen_at) AS latest_receipt_at,
+                       COUNT(*) FILTER (WHERE source_authentication =
+                           'configured_discord_webhook_id_match')::BIGINT AS source_verified,
+                       COUNT(*) FILTER (WHERE NOT mileage_awarded
+                           AND NOT registration_changed AND NOT roles_changed)::BIGINT
+                           AS safety_intact,
+                       COUNT(*) FILTER (WHERE mileage_awarded OR registration_changed
+                           OR roles_changed)::BIGINT AS safety_violations
+                  FROM staging_shadow_receipts
+                 WHERE provider = 'trucksbook' AND provider_job_id = $1
+                 GROUP BY provider_job_id
+            """, provider_job_id)
+
+    return {
+        "receipt_count": int(summary["receipt_count"] or 0),
+        "unique_jobs": int(summary["unique_jobs"] or 0),
+        "replay_count": int(summary["replay_count"] or 0),
+        "latest_receipt_at": summary["latest_receipt_at"],
+        "source_verified": int(summary["source_verified"] or 0),
+        "safety_intact": int(summary["safety_intact"] or 0),
+        "safety_violations": int(summary["safety_violations"] or 0),
+        "job": None if match is None else {
+            "provider_job_id": match["provider_job_id"],
+            "receipt_count": int(match["receipt_count"] or 0),
+            "replay_count": int(match["replay_count"] or 0),
+            "first_received_at": match["first_received_at"],
+            "latest_receipt_at": match["latest_receipt_at"],
+            "source_verified": int(match["source_verified"] or 0),
+            "safety_intact": int(match["safety_intact"] or 0),
+            "safety_violations": int(match["safety_violations"] or 0),
+        },
+    }
+
+
 def _require_staging():
     if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
         raise RuntimeError("Shadow receipts are restricted to isolated staging")

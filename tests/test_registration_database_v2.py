@@ -68,6 +68,67 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.pool, "trucky", "job-991234560", user, "101", "km"
             )
 
+    async def test_trucksbook_identity_backfill_preserves_legacy_mileage_and_jobs(self):
+        """V2 backfill is additive; legacy history remains the source of truth."""
+        user = 991234560111
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS driver_links (
+                    discord_user_id BIGINT PRIMARY KEY,
+                    trucksbook_user_id BIGINT,
+                    trucksbook_name TEXT NOT NULL,
+                    linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS driver_progress (
+                    discord_user_id BIGINT PRIMARY KEY,
+                    trucksbook_name TEXT NOT NULL UNIQUE,
+                    real_miles BIGINT NOT NULL DEFAULT 0,
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS processed_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    discord_user_id BIGINT NOT NULL,
+                    trucksbook_name TEXT NOT NULL,
+                    accepted_distance INTEGER NOT NULL,
+                    statistics TEXT NOT NULL,
+                    processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+            """)
+            await conn.execute("""
+                INSERT INTO driver_links(discord_user_id,trucksbook_user_id,trucksbook_name)
+                VALUES($1,991234560112,'verified-candidate') ON CONFLICT DO NOTHING
+            """, user)
+            await conn.execute("""
+                INSERT INTO driver_progress(discord_user_id,trucksbook_name,real_miles)
+                VALUES($1,'verified-candidate',12345) ON CONFLICT DO NOTHING
+            """, user)
+            await conn.execute("""
+                INSERT INTO processed_jobs(job_id,discord_user_id,trucksbook_name,
+                    accepted_distance,statistics)
+                VALUES('preserve-job-991234560113',$1,'verified-candidate',176,'Real')
+                ON CONFLICT DO NOTHING
+            """, user)
+
+        await profiles.backfill_trucksbook_profiles(self.pool)
+        await profiles.backfill_trucksbook_profiles(self.pool)
+        async with self.pool.acquire() as conn:
+            totals = await conn.fetchrow("""
+                SELECT (SELECT real_miles FROM driver_progress WHERE discord_user_id=$1)
+                           AS historical_miles,
+                       (SELECT COUNT(*) FROM processed_jobs
+                         WHERE job_id='preserve-job-991234560113') AS preserved_jobs,
+                       (SELECT COUNT(*) FROM unified_provider_links
+                         WHERE provider='trucksbook' AND provider_account_id='991234560112'
+                           AND discord_user_id=$1) AS linked_once
+            """, user)
+        self.assertEqual(totals["historical_miles"], 12345)
+        self.assertEqual(totals["preserved_jobs"], 1)
+        self.assertEqual(totals["linked_once"], 1)
+
     async def test_signed_trucky_receipt_stores_no_identity_or_distance(self):
         digest = hashlib.sha256(b"signed event bytes").hexdigest()
         receipt_id = await profiles.record_trucky_webhook_receipt(
@@ -624,6 +685,26 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(row["registration_changed"])
         self.assertFalse(row["roles_changed"])
         self.assertEqual(columns, 0)
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            report = await shadow.audit_receipts(self.pool, "68093174")
+        self.assertEqual(report["receipt_count"], 1)
+        self.assertEqual(report["unique_jobs"], 1)
+        self.assertEqual(report["replay_count"], 6)
+        self.assertEqual(report["source_verified"], 1)
+        self.assertEqual(report["safety_intact"], 1)
+        self.assertEqual(report["safety_violations"], 0)
+        self.assertEqual(report["job"]["provider_job_id"], "68093174")
+        self.assertEqual(report["job"]["replay_count"], 6)
+
+    async def test_shadow_audit_is_staging_only_and_rejects_invalid_job_lookup(self):
+        import unified_staging_shadow_receipts_v2 as shadow
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "NO"}):
+            with self.assertRaisesRegex(RuntimeError, "isolated staging"):
+                await shadow.audit_receipts(self.pool)
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            with self.assertRaisesRegex(ValueError, "Invalid TrucksBook job ID"):
+                await shadow.audit_receipts(self.pool, "../raw")
 
     async def test_trucksbook_shadow_receipt_rejects_bad_source_and_nonstaging(self):
         import unified_staging_shadow_receipts_v2 as shadow
