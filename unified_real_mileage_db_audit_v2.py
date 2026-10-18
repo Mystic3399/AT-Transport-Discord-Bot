@@ -25,7 +25,14 @@ async def audit_unified_real_mileage(pool, discord_user_id):
     rows = []
     for record in records:
         row = dict(record)
-        row["mileage_type"] = "real" if row["real_miles"] > 0 and row["race_miles"] == 0 else "excluded"
+        from decimal import Decimal, InvalidOperation
+        try:
+            real = Decimal(str(row["real_miles"]))
+            race = Decimal(str(row["race_miles"]))
+            valid = real.is_finite() and race.is_finite() and real > 0 and race == 0
+        except (InvalidOperation, ValueError, TypeError):
+            valid = False
+        row["mileage_type"] = "real" if valid else "excluded"
         rows.append(row)
     result = summarize_confirmed_real_miles(rows)
     result["reason"] = "Provider feed completeness and trusted canonical reconciliation not established"
