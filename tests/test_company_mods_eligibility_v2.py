@@ -33,3 +33,36 @@ def test_only_trucksbook_real_counts():
 def test_only_trucky_race_counts():
     # Trucky Real Miles must not be substituted for Trucky Race Miles.
     assert check(trucksbook_real_miles=39_999, trucky_race_miles=59_999).eligible is False
+
+
+def test_read_only_audit_defaults_to_no_unlock():
+    import asyncio
+    from company_mods_mileage_audit_v2 import audit_company_mods_mileage
+
+    class Connection:
+        async def fetch(self, query, user_id):
+            assert "verified_at IS NOT NULL" in query
+            return [
+                dict(provider="trucksbook", real_miles=40000, race_miles=0, review_status="confirmed"),
+                dict(provider="trucky", real_miles=0, race_miles=60000, review_status="confirmed"),
+                dict(provider="trucky", real_miles=0, race_miles=100000, review_status="rejected"),
+                dict(provider="trucksbook", real_miles=100000, race_miles=0, review_status=None),
+            ]
+
+    class Context:
+        async def __aenter__(self):
+            return Connection()
+        async def __aexit__(self, *args):
+            return False
+
+    class Pool:
+        def acquire(self):
+            return Context()
+
+    result = asyncio.run(audit_company_mods_mileage(Pool(), 123))
+    assert result["trucksbook_confirmed_real_miles"] == 40000
+    assert result["trucky_confirmed_race_miles"] == 60000
+    assert result["rejected_job_count"] == 1
+    assert result["unreviewed_job_count"] == 1
+    assert result["auto_unlock_allowed"] is False
+    assert result["history_complete"] is False
