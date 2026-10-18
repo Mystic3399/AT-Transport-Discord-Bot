@@ -6646,6 +6646,24 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
                     identity = await unified_driver_profiles.verify_trucky_account_against_verified_links(
                         db_pool, identity_fields["account_id"])
                     report["identity_verification"] = identity["status"]
+                    if identity["status"] == "verified_trucky_account_link_matches_steam":
+                        try:
+                            review = await unified_driver_profiles.mark_staging_trucky_receipts_verified_after_api_audit(
+                                db_pool, job_id,
+                                hmac_receipt_verified=bool(receipts) and all(
+                                    str(row["event_type"]) == "job_completed" for row in receipts),
+                                authenticated_api_job_verified=lookup["status"] == "found",
+                                driver_identity_verified=True,
+                                active_member=True,
+                            )
+                            report["receipt_review_transition"] = review["status"]
+                            if review["status"] in ("verified", "already_verified"):
+                                for receipt in report["signed_receipts"]:
+                                    receipt["review_status"] = "verified"
+                        except Exception as review_error:
+                            report["receipt_review_transition"] = (
+                                "unavailable_" + type(review_error).__name__
+                            )
             except Exception as error:
                 report["identity_verification"] = (
                     "membership_unavailable" if type(error).__name__ == "MembershipUnavailable"

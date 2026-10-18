@@ -169,6 +169,56 @@ async def list_trucky_receipt_audit(pool, candidate_job_id, *, limit=20):
         """, str(candidate_job_id), limit)
     return [dict(row) for row in rows]
 
+async def mark_staging_trucky_receipts_verified_after_api_audit(
+    pool, candidate_job_id, *, hmac_receipt_verified,
+    authenticated_api_job_verified, driver_identity_verified, active_member,
+):
+    """Advance only staging receipt review state after independent verification.
+
+    This operation never changes mileage, registrations, achievements, or roles.
+    All evidence gates must be literal True, and the isolated-staging flag is
+    mandatory. Replays are idempotent; rejected receipts remain rejected.
+    """
+    import os
+    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+        raise RuntimeError("Staging receipt review transition is disabled")
+    if (type(candidate_job_id) not in (str, int)
+            or not str(candidate_job_id).isdecimal()
+            or int(candidate_job_id) <= 0):
+        raise ValueError("Invalid candidate Trucky job ID")
+    candidate_job_id = str(candidate_job_id)
+    if not all(value is True for value in (
+        hmac_receipt_verified, authenticated_api_job_verified,
+        driver_identity_verified, active_member,
+    )):
+        return {"status": "evidence_incomplete", "updated_count": 0}
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch("""
+                SELECT receipt_id,review_status
+                  FROM unified_trucky_webhook_receipts
+                 WHERE candidate_job_id=$1 AND event_type='job_completed'
+                 ORDER BY receipt_id FOR UPDATE
+            """, candidate_job_id)
+            if not rows:
+                return {"status": "receipt_missing", "updated_count": 0}
+            states = {row["review_status"] for row in rows}
+            if "rejected" in states:
+                return {"status": "receipt_rejected", "updated_count": 0}
+            if states == {"verified"}:
+                return {"status": "already_verified", "updated_count": 0}
+            result = await conn.execute("""
+                UPDATE unified_trucky_webhook_receipts
+                   SET review_status='verified'
+                 WHERE candidate_job_id=$1 AND event_type='job_completed'
+                   AND review_status='needs_api_verification'
+            """, candidate_job_id)
+            updated = int(result.rsplit(" ", 1)[-1])
+    return {
+        "status": "verified" if updated or states == {"verified"} else "no_change",
+        "updated_count": updated,
+    }
+
 async def backfill_trucksbook_profiles(pool):
     """Idempotent identity backfill; no legacy table changes."""
     async with pool.acquire() as conn:

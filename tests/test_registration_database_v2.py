@@ -141,6 +141,56 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             "claim_missing",
         )
 
+    async def test_staging_trucky_receipt_review_transition_is_gated_and_idempotent(self):
+        from unittest.mock import patch
+        digest = hashlib.sha256(b"verified staging receipt review").hexdigest()
+        await profiles.record_trucky_webhook_receipt(
+            self.pool, digest, "job_completed", "9912345678"
+        )
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            blocked = await profiles.mark_staging_trucky_receipts_verified_after_api_audit(
+                self.pool, "9912345678", hmac_receipt_verified=True,
+                authenticated_api_job_verified=True,
+                driver_identity_verified=False, active_member=True,
+            )
+            self.assertEqual(blocked["status"], "evidence_incomplete")
+            pending = await profiles.list_trucky_receipt_audit(self.pool, "9912345678")
+            self.assertEqual(pending[0]["review_status"], "needs_api_verification")
+
+            verified = await profiles.mark_staging_trucky_receipts_verified_after_api_audit(
+                self.pool, "9912345678", hmac_receipt_verified=True,
+                authenticated_api_job_verified=True,
+                driver_identity_verified=True, active_member=True,
+            )
+            self.assertEqual(verified, {"status": "verified", "updated_count": 1})
+            replay = await profiles.mark_staging_trucky_receipts_verified_after_api_audit(
+                self.pool, "9912345678", hmac_receipt_verified=True,
+                authenticated_api_job_verified=True,
+                driver_identity_verified=True, active_member=True,
+            )
+            self.assertEqual(replay, {"status": "already_verified", "updated_count": 0})
+
+        async with self.pool.acquire() as conn:
+            receipt = await conn.fetchrow("""
+                SELECT payload_sha256,event_type,candidate_job_id,review_status
+                FROM unified_trucky_webhook_receipts WHERE payload_sha256=$1
+            """, digest)
+            job_count = await conn.fetchval("SELECT COUNT(*) FROM unified_provider_job_events")
+        self.assertEqual(receipt["payload_sha256"], digest)
+        self.assertEqual(receipt["candidate_job_id"], "9912345678")
+        self.assertEqual(receipt["review_status"], "verified")
+        self.assertEqual(job_count, 0)
+
+    async def test_staging_trucky_receipt_review_is_disabled_outside_staging(self):
+        from unittest.mock import patch
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "NO"}):
+            with self.assertRaises(RuntimeError):
+                await profiles.mark_staging_trucky_receipts_verified_after_api_audit(
+                    self.pool, "9912345678", hmac_receipt_verified=True,
+                    authenticated_api_job_verified=True,
+                    driver_identity_verified=True, active_member=True,
+                )
+
     async def test_repeated_job_with_changed_delivery_time_is_rejected(self):
         from datetime import datetime, timedelta, timezone
         user = 991234567890123490

@@ -76,6 +76,9 @@ class StagingExactJobAuditCommandTests(unittest.IsolatedAsyncioTestCase):
             verify_trucky_account_against_verified_links=AsyncMock(return_value={
                 "status": "verified_trucky_account_link_matches_steam",
             }),
+            mark_staging_trucky_receipts_verified_after_api_audit=AsyncMock(return_value={
+                "status": "verified", "updated_count": 1,
+            }),
         )
         membership = SimpleNamespace(verify_member=AsyncMock(return_value="redacted"),
                                      MembershipUnavailable=type("MembershipUnavailable", (Exception,), {}))
@@ -89,6 +92,8 @@ class StagingExactJobAuditCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"requested_job_found": true', response)
         self.assertIn('"identity_verification": "verified_trucky_account_link_matches_steam"', response)
         self.assertIn('"signed_event_job_id_matches_api_job": true', response)
+        self.assertIn('"receipt_review_transition": "verified"', response)
+        self.assertIn('"review_status": "verified"', response)
         self.assertIn('"mileage_awarded": false', response)
         self.assertIn('"registration_changed": false', response)
         self.assertIn('"roles_changed": false', response)
@@ -97,6 +102,7 @@ class StagingExactJobAuditCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('"driver":{"id":999', response)
         profile.list_trucky_receipt_audit.assert_awaited_once()
         profile.verify_trucky_account_against_verified_links.assert_awaited_once()
+        profile.mark_staging_trucky_receipts_verified_after_api_audit.assert_awaited_once()
         self.assertEqual(
             profile.verify_trucky_account_against_verified_links.await_args.args[1],
             "999",
