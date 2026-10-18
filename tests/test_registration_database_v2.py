@@ -330,7 +330,14 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_trucky_link_requires_verified_steam_before_comparing(self):
         user = 991234567890123470
         await profiles.begin_registration(self.pool, user, 991234567890123471)
-        await profiles.submit_provider_claim(self.pool, user, "trucky", "209125", "Tester Three")
+        # Seed a claim directly to exercise the fail-closed invariant for an
+        # inconsistent record that could not be created through the API.
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO unified_provider_claims
+                    (discord_user_id,provider,provider_account_id,provider_display_name)
+                VALUES($1,'trucky','209125','Tester Three')
+            """, user)
         digest = hashlib.sha256(b"trucky-job-no-steam-link").hexdigest()
         await profiles.record_trucky_webhook_receipt(self.pool, digest, "job_completed", "987654330")
         with self.assertRaises(profiles.TruckyIdentityVerificationError) as missing:
