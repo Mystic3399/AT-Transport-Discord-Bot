@@ -6681,6 +6681,61 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
     )
 
 
+@bot.command(name="stagingjobreview")
+async def staging_job_review(
+    ctx, action: str, trucky_job_id: str, trucksbook_job_id: str,
+    decision: str = None, evidence_kind: str = None, evidence_sha256: str = None,
+):
+    """Owner-only staging review ledger; it never awards or changes mileage."""
+    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+        await ctx.reply("Manual job review is available only in isolated A&T staging.", mention_author=False)
+        return
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        await ctx.reply("Use this command in the configured A&T staging server.", mention_author=False)
+        return
+    if not is_authorised_staging_owner(ctx.author.id):
+        await ctx.reply("Only the configured staging owner can record job review.", mention_author=False)
+        return
+    if db_pool is None:
+        await ctx.reply("The isolated staging database is unavailable; no review was recorded.", mention_author=False)
+        return
+
+    import unified_manual_job_reconciliation_v2 as job_review
+    try:
+        if action == "open" and decision is None and evidence_kind is None and evidence_sha256 is None:
+            result = await job_review.open_potential_duplicate(
+                db_pool, trucky_job_id, trucksbook_job_id, ctx.author.id
+            )
+        elif action == "resolve" and decision and evidence_kind and evidence_sha256:
+            result = await job_review.resolve_review_case(
+                db_pool, trucky_job_id, trucksbook_job_id, decision,
+                ctx.author.id, evidence_kind, evidence_sha256,
+            )
+        else:
+            await ctx.reply(
+                "Use `!stagingjobreview open <trucky_job_id> <trucksbook_job_id>` or "
+                "`!stagingjobreview resolve <trucky_job_id> <trucksbook_job_id> "
+                "<verified_independent|confirmed_duplicate> "
+                "<provider_shared_identifier|provider_job_records|independent_telemetry> <evidence_sha256>`. "
+                "This records review only; it never awards mileage.",
+                mention_author=False,
+            )
+            return
+    except (ValueError, RuntimeError) as error:
+        await ctx.reply(f"Job review was not recorded: {error}.", mention_author=False)
+        return
+    except Exception as error:
+        print(f"STAGING JOB REVIEW ERROR: {type(error).__name__}", flush=True)
+        await ctx.reply("Job review failed safely; no mileage was changed.", mention_author=False)
+        return
+
+    await ctx.reply(
+        f"Review case {result['case_id']}: {result['status']}. "
+        "This action did not award mileage or change registrations, roles, achievements, or Company Mods access.",
+        mention_author=False,
+    )
+
+
 @bot.command(name="confirmprovider")
 async def confirm_unified_provider(ctx, provider: str = None, ownership_evidence: str = None):
     """Final staff confirmation after independent ownership evidence review."""

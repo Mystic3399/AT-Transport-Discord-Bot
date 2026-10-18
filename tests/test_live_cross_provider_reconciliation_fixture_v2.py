@@ -49,10 +49,19 @@ class LiveCrossProviderFixtureTests(unittest.TestCase):
         self.assertIsNone(self.fixture["verified_shared_journey_id"])
         self.assertIsNone(self.tb["provider_delivery_timestamp"])
         self.assertFalse(self.tb["provider_account_ownership_verified"])
+        self.assertTrue(self.tb["company_export_uploaded"])
+        self.assertEqual(self.tb["company_export_rows"], 263)
+        self.assertEqual(self.tb["matching_export_rows"], 1)
+        self.assertFalse(self.tb["stable_driver_account_id_in_export"])
+        self.assertIsNone(self.tb["completion_timezone"])
+        self.assertEqual(self.tb["duration_seconds"], 719)
         self.assertTrue(self.trucky["authoritative_job_record_retrieved"])
         self.assertTrue(self.trucky["api_driver_account_id_unambiguous"])
         self.assertFalse(self.trucky["api_steam_identity_present"])
-        self.assertFalse(self.trucky["api_completion_timestamp_available"])
+        self.assertTrue(self.trucky["api_completion_timestamp_available"])
+        self.assertEqual(self.trucky["api_completed_at_utc"], "2026-10-18T20:29:36Z")
+        self.assertEqual(self.trucky["api_real_distance_km"], "284")
+        self.assertEqual(self.trucky["api_real_driving_time_seconds"], 725)
         self.assertTrue(self.trucky["signed_receipt_hmac_verified"])
         self.assertTrue(self.trucky["account_link_matches_verified_steam"])
         self.assertEqual(self.tb["provider_job_id"], "68093174")
@@ -102,6 +111,18 @@ class LiveCrossProviderFixtureTests(unittest.TestCase):
         self.assertEqual(self.tb["classification"], self.trucky["classification"])
         self.assertEqual(self.tb["driver_label"], "redacted")
         self.assertNotIn("discord_user_id", self.tb)
+
+    def test_real_export_and_authenticated_trucky_job_are_candidates_only(self):
+        from decimal import Decimal
+        trucky_miles = Decimal(self.trucky["api_real_distance_km"]) * Decimal("0.621371")
+        self.assertEqual(trucky_miles.quantize(Decimal("0.01")), Decimal("176.47"))
+        self.assertEqual(Decimal(self.tb["distance"]), Decimal("176"))
+        self.assertEqual(abs(self.tb["duration_seconds"] -
+                             self.trucky["api_real_driving_time_seconds"]), 6)
+        # The export timezone is unknown. A displayed 22:29 cannot be compared
+        # to Trucky's 20:29:36Z until its TrucksBook timezone is established.
+        self.assertIsNone(self.tb["completion_timezone"])
+        self.assertIsNone(self.fixture["verified_shared_journey_id"])
 
 
 if __name__ == "__main__":

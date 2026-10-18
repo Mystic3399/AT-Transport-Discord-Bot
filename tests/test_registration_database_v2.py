@@ -452,6 +452,125 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(missing.exception.code, "steam_link_missing")
 
+    async def test_real_paris_lille_pair_stays_pending_without_authoritative_job_records(self):
+        import unified_manual_job_reconciliation_v2 as review
+        from unittest.mock import patch
+        user = 991234567890123499
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            case = await review.open_potential_duplicate(
+                self.pool, "27848310", "68093174", user
+            )
+            with self.assertRaisesRegex(ValueError, "Both job owners must be verified"):
+                await review.resolve_review_case(
+                    self.pool, "27848310", "68093174", "confirmed_duplicate",
+                    user, "independent_telemetry", hashlib.sha256(b"review evidence").hexdigest(),
+                )
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT status,discord_user_id FROM unified_job_reconciliation_cases
+                WHERE trucky_job_id='27848310' AND trucksbook_job_id='68093174'
+            """)
+            audit_count = await conn.fetchval("""
+                SELECT COUNT(*) FROM unified_job_reconciliation_audit WHERE case_id=$1
+            """, case["case_id"])
+            event_count = await conn.fetchval("""
+                SELECT COUNT(*) FROM unified_provider_job_events
+                WHERE (provider='trucky' AND provider_job_id='27848310')
+                   OR (provider='trucksbook' AND provider_job_id='68093174')
+            """)
+        self.assertEqual(row["status"], "potential_duplicate")
+        self.assertIsNone(row["discord_user_id"])
+        self.assertEqual(audit_count, 1)
+        self.assertEqual(event_count, 0)
+
+    async def test_manual_review_requires_verified_same_driver_jobs_and_only_audits(self):
+        import unified_manual_job_reconciliation_v2 as review
+        from unittest.mock import patch
+        from decimal import Decimal
+        user = 991234567890123498
+        accounts = {"trucky": "887766551", "trucksbook": "887766552"}
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO unified_driver_profiles(discord_user_id) VALUES($1)", user)
+            await conn.execute("""
+                INSERT INTO unified_steam_links(discord_user_id,steam_id64,verified_at)
+                VALUES($1,'76561198012345679',NOW())
+            """, user)
+            for provider, account in accounts.items():
+                await conn.execute("""
+                    INSERT INTO unified_provider_links
+                        (provider,provider_account_id,discord_user_id,verified_at)
+                    VALUES($1,$2,$3,NOW())
+                """, provider, account, user)
+                await conn.execute("""
+                    INSERT INTO unified_provider_claims
+                        (discord_user_id,provider,provider_account_id,
+                         membership_confirmed,ownership_confirmed,status,reviewed_at)
+                    VALUES($1,$2,$3,TRUE,TRUE,'approved',NOW())
+                """, user, provider, account)
+        event_time = datetime(2026, 10, 18, 20, 29, tzinfo=timezone.utc)
+        delivery_metadata = {
+            "game": "ETS2", "origin": "Paris", "destination": "Lille",
+            "cargo": "Pet Food",
+        }
+        await profiles.record_normalized_provider_job(
+            self.pool, "trucky", "review-trucky-1", user, "284", "km",
+            provider_account_id=accounts["trucky"], delivered_at=event_time,
+            job_metadata=delivery_metadata,
+        )
+        await profiles.record_normalized_provider_job(
+            self.pool, "trucksbook", "review-trucksbook-1", user, "176", "mi",
+            provider_account_id=accounts["trucksbook"], delivered_at=event_time,
+            job_metadata=delivery_metadata,
+        )
+        digest = hashlib.sha256(b"independently reviewed staging evidence").hexdigest()
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            case = await review.open_potential_duplicate(
+                self.pool, "review-trucky-1", "review-trucksbook-1", user
+            )
+            resolved = await review.resolve_review_case(
+                self.pool, "review-trucky-1", "review-trucksbook-1",
+                "confirmed_duplicate", user, "independent_telemetry", digest,
+            )
+        self.assertEqual(resolved["status"], "confirmed_duplicate")
+        async with self.pool.acquire() as conn:
+            status = await conn.fetchval("""
+                SELECT status FROM unified_job_reconciliation_cases WHERE case_id=$1
+            """, case["case_id"])
+            audit = await conn.fetchrow("""
+                SELECT decision,evidence_sha256 FROM unified_job_reconciliation_audit
+                WHERE case_id=$1 ORDER BY audit_id DESC LIMIT 1
+            """, case["case_id"])
+            miles = await conn.fetchrow("""
+                SELECT SUM(real_miles) AS real,SUM(race_miles) AS race
+                FROM unified_provider_job_events WHERE provider_job_id IN
+                    ('review-trucky-1','review-trucksbook-1')
+            """)
+        self.assertEqual(status, "confirmed_duplicate")
+        self.assertEqual(audit["decision"], "confirmed_duplicate")
+        self.assertEqual(audit["evidence_sha256"], digest)
+        # Review leaves both immutable source observations in the ledger and does not credit either.
+        self.assertEqual(miles["real"], Decimal("352.47"))
+
+    async def test_manual_review_rejects_provider_account_mismatch_and_nonstaging(self):
+        import unified_manual_job_reconciliation_v2 as review
+        from unittest.mock import patch
+        user = 991234567890123497
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO unified_driver_profiles(discord_user_id) VALUES($1)", user)
+            await conn.execute("""
+                INSERT INTO unified_provider_links
+                    (provider,provider_account_id,discord_user_id,verified_at)
+                VALUES('trucky','887766553',$1,NOW())
+            """, user)
+        with self.assertRaisesRegex(RuntimeError, "staging-only"):
+            with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "NO"}):
+                await review.open_potential_duplicate(self.pool, "1", "2", user)
+        with self.assertRaisesRegex(ValueError, "Provider account not verified"):
+            await profiles.record_normalized_provider_job(
+                self.pool, "trucky", "wrong-link-job", user, "10", "mi",
+                provider_account_id="887766554",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

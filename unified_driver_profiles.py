@@ -83,12 +83,38 @@ CREATE TABLE IF NOT EXISTS unified_provider_job_events (
  provider TEXT NOT NULL CHECK(provider IN ('trucksbook','trucky')),
  provider_job_id TEXT NOT NULL,
  discord_user_id BIGINT NOT NULL REFERENCES unified_driver_profiles(discord_user_id),
+ provider_account_id TEXT,
  real_miles NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK(real_miles >= 0),
  race_miles NUMERIC(12,2) NOT NULL DEFAULT 0 CHECK(race_miles >= 0),
  delivered_at TIMESTAMPTZ,
  source_payload JSONB,
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  PRIMARY KEY (provider, provider_job_id)
+);
+ALTER TABLE unified_provider_job_events
+ ADD COLUMN IF NOT EXISTS provider_account_id TEXT;
+CREATE TABLE IF NOT EXISTS unified_job_reconciliation_cases (
+ case_id BIGSERIAL PRIMARY KEY,
+ trucky_job_id TEXT NOT NULL,
+ trucksbook_job_id TEXT NOT NULL,
+ discord_user_id BIGINT REFERENCES unified_driver_profiles(discord_user_id),
+ status TEXT NOT NULL DEFAULT 'potential_duplicate'
+  CHECK(status IN ('potential_duplicate','verified_independent','confirmed_duplicate')),
+ opened_by BIGINT NOT NULL,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ reviewed_at TIMESTAMPTZ,
+ UNIQUE(trucky_job_id, trucksbook_job_id)
+);
+CREATE TABLE IF NOT EXISTS unified_job_reconciliation_audit (
+ audit_id BIGSERIAL PRIMARY KEY,
+ case_id BIGINT NOT NULL REFERENCES unified_job_reconciliation_cases(case_id),
+ decision TEXT NOT NULL CHECK(decision IN (
+  'potential_duplicate','verified_independent','confirmed_duplicate')),
+ reviewer_discord_id BIGINT NOT NULL,
+ evidence_kind TEXT,
+ evidence_sha256 TEXT CHECK(evidence_sha256 IS NULL OR evidence_sha256 ~ '^[0-9a-f]{64}$'),
+ discord_user_id BIGINT REFERENCES unified_driver_profiles(discord_user_id),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS unified_job_matches (
  provider TEXT NOT NULL,
@@ -745,7 +771,7 @@ async def auto_approve_trucky_if_steam_matches(
 
 async def record_normalized_provider_job(
     pool, provider, provider_job_id, discord_user_id, distance, unit,
-    *, mileage_type="real", delivered_at=None, job_metadata=None
+    *, provider_account_id=None, mileage_type="real", delivered_at=None, job_metadata=None
 ):
     """Idempotently stage a provider job in canonical miles; do not award mileage.
 
@@ -760,6 +786,13 @@ async def record_normalized_provider_job(
         raise ValueError("Missing provider job ID")
     if mileage_type not in ("real", "race"):
         raise ValueError("Unsupported mileage type")
+    if provider_account_id is not None and (
+        not isinstance(provider_account_id, str)
+        or not provider_account_id.isascii()
+        or not provider_account_id.isdecimal()
+        or int(provider_account_id) <= 0
+    ):
+        raise ValueError("Invalid provider account ID")
     if job_metadata is not None:
         from unified_job_matching_v2 import _normalized_metadata
         _normalized_metadata(job_metadata)
@@ -780,23 +813,28 @@ async def record_normalized_provider_job(
                     SELECT 1 FROM unified_provider_links
                     WHERE discord_user_id=$1 AND provider=$2
                       AND verified_at IS NOT NULL
+                      AND ($3::text IS NULL OR provider_account_id=$3)
                 )
-            """, discord_user_id, provider)
+            """, discord_user_id, provider, provider_account_id)
             if not verified:
                 raise ValueError("Provider account not verified for this driver")
             result = await conn.execute("""
                 INSERT INTO unified_provider_job_events
-                    (provider,provider_job_id,discord_user_id,real_miles,race_miles,delivered_at,source_payload)
-                VALUES($1,$2,$3,$4,$5,$6,$7::jsonb)
+                    (provider,provider_job_id,discord_user_id,provider_account_id,
+                     real_miles,race_miles,delivered_at,source_payload)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
                 ON CONFLICT(provider,provider_job_id) DO NOTHING
-            """, provider,provider_job_id,discord_user_id,real,race,delivered_at,audit_payload)
+            """, provider,provider_job_id,discord_user_id,provider_account_id,
+                 real,race,delivered_at,audit_payload)
             if result == "INSERT 0 0":
                 previous = await conn.fetchrow("""
-                    SELECT discord_user_id,real_miles,race_miles,delivered_at,source_payload
+                    SELECT discord_user_id,provider_account_id,real_miles,race_miles,
+                           delivered_at,source_payload
                     FROM unified_provider_job_events
                     WHERE provider=$1 AND provider_job_id=$2
                 """, provider,provider_job_id)
                 if (previous is None or previous["discord_user_id"] != discord_user_id
+                        or previous["provider_account_id"] != provider_account_id
                         or previous["real_miles"] != real
                         or previous["race_miles"] != race
                         or previous["delivered_at"] != delivered_at

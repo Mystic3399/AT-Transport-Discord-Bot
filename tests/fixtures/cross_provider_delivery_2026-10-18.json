@@ -1,11 +1,16 @@
 {
   "fixture_kind": "owner-supplied redacted staging observation summary",
-  "warning": "This is not a provider API export. Discord tracker content and staging logs are not authoritative provider job records.",
+  "warning": "Redacted evidence fixture. TrucksBook CSV content is owner-uploaded but its authenticated origin and driver ownership are unverified; Trucky data is an authenticated exact-job staging audit.",
   "authoritative_provider_records_retrieved": false,
   "verified_shared_journey_id": null,
   "trucksbook": {
+    "company_export_uploaded": true,
+    "company_export_rows": 263,
+    "matching_export_rows": 1,
     "provider_job_id": "68093174",
     "driver_label": "redacted",
+    "reported_driver_label_matches_export": true,
+    "game": "ETS2",
     "origin": "Paris",
     "destination": "Lille",
     "cargo": "Pet Food",
@@ -13,7 +18,11 @@
     "distance": "176",
     "distance_unit": "miles",
     "classification": "real",
+    "completion_time_exported": "2026-10-18 22:29",
+    "completion_timezone": null,
+    "duration_seconds": 719,
     "provider_delivery_timestamp": null,
+    "stable_driver_account_id_in_export": false,
     "provider_account_ownership_verified": false,
     "staging_received_at_utc": "2026-10-18T20:29:42.437344Z",
     "staging_result": "quarantined_no_award"
@@ -36,11 +45,16 @@
     "api_record_found_by_exact_job_id": true,
     "api_driver_account_id_unambiguous": true,
     "api_steam_identity_present": false,
-    "api_completion_timestamp_available": false,
+    "api_completion_timestamp_available": true,
+    "api_completed_at_utc": "2026-10-18T20:29:36Z",
+    "api_real_distance_km": "284",
+    "api_distance_unit": "km",
+    "api_real_driving_time_seconds": 725,
+    "api_game": "ETS2",
     "signed_receipt_hmac_verified": true,
     "signed_receipt_matches_job_id": true,
     "account_link_matches_verified_steam": true,
-    "receipt_review_status_before_api_review": "needs_api_verification",
+    "receipt_review_status_at_2026-10-18T21:10Z_audit": "needs_api_verification",
     "staging_result": "receipt_recorded_no_award"
   }
 }
