@@ -17,6 +17,10 @@ NODE = next(
     and node.name == "staging_trucky_jobs_probe"
 )
 NODE.decorator_list = []
+OWNER_CHECK_NODE = next(
+    node for node in TREE.body
+    if isinstance(node, ast.FunctionDef) and node.name == "is_authorised_staging_owner"
+)
 
 
 class FakeUnavailable(Exception):
@@ -29,11 +33,12 @@ NAMESPACE = {
     "GUILD_ID": 1561140084739276934,
     "print": lambda *_args, **_kwargs: None,
 }
-exec(compile(ast.Module(body=[NODE], type_ignores=[]), "bot.py", "exec"), NAMESPACE)
+exec(compile(ast.Module(body=[OWNER_CHECK_NODE, NODE], type_ignores=[]), "bot.py", "exec"), NAMESPACE)
 COMMAND = NAMESPACE["staging_trucky_jobs_probe"]
+OWNER_ID = 613036707863986236
 
 
-def context(user_id=1561159250728718497):
+def context(user_id=OWNER_ID):
     return SimpleNamespace(
         author=SimpleNamespace(id=user_id),
         guild=SimpleNamespace(id=1561140084739276934),
@@ -54,10 +59,10 @@ class StagingTruckyProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_refuses_non_owner_without_api_call(self):
         ctx = context(user_id=42)
         api = SimpleNamespace(fetch_trucky_jobs_page=AsyncMock())
-        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}), patch.dict(sys.modules, {"trucky_jobs_api_v2": api}):
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES", "AT_V2_STAGING_OWNER_DISCORD_ID": str(OWNER_ID)}), patch.dict(sys.modules, {"trucky_jobs_api_v2": api}):
             await COMMAND(ctx)
         api.fetch_trucky_jobs_page.assert_not_awaited()
-        self.assertIn("Only the authorised", ctx.reply.await_args.args[0])
+        self.assertIn("Only the configured", ctx.reply.await_args.args[0])
 
     async def test_returns_types_without_job_or_driver_values(self):
         ctx = context()
@@ -66,7 +71,7 @@ class StagingTruckyProbeTests(unittest.IsolatedAsyncioTestCase):
             inspect_jobs_response_shape=Mock(return_value={"outer_keys": ["data"], "record_count": 1, "first_record_types": {"id": "int"}, "first_record_nested_types": {"driver": {"id": "int", "name": "str"}}, "verified_delivery": False}),
             TruckyJobLookupUnavailable=FakeUnavailable,
         )
-        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}), patch.dict(sys.modules, {"trucky_jobs_api_v2": api}):
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES", "AT_V2_STAGING_OWNER_DISCORD_ID": str(OWNER_ID)}), patch.dict(sys.modules, {"trucky_jobs_api_v2": api}):
             await COMMAND(ctx)
         api.fetch_trucky_jobs_page.assert_awaited_once_with(page=1)
         response = ctx.reply.await_args.args[0]

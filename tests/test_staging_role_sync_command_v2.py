@@ -15,6 +15,10 @@ COMMAND_NODE = next(
     if isinstance(node, ast.AsyncFunctionDef) and node.name == "staging_role_sync"
 )
 COMMAND_NODE.decorator_list = []
+OWNER_CHECK_NODE = next(
+    node for node in TREE.body
+    if isinstance(node, ast.FunctionDef) and node.name == "is_authorised_staging_owner"
+)
 
 
 class FakeForbidden(Exception):
@@ -32,11 +36,12 @@ NAMESPACE = {
     "sync_unified_driver_roles": AsyncMock(),
     "print": lambda *_args, **_kwargs: None,
 }
-exec(compile(ast.Module(body=[COMMAND_NODE], type_ignores=[]), "bot.py", "exec"), NAMESPACE)
+exec(compile(ast.Module(body=[OWNER_CHECK_NODE, COMMAND_NODE], type_ignores=[]), "bot.py", "exec"), NAMESPACE)
 COMMAND = NAMESPACE["staging_role_sync"]
+OWNER_ID = 613036707863986236
 
 
-def make_context(user_id=1561159250728718497, guild_id=1561140084739276934):
+def make_context(user_id=OWNER_ID, guild_id=1561140084739276934):
     return SimpleNamespace(
         author=SimpleNamespace(id=user_id),
         guild=None if guild_id is None else SimpleNamespace(id=guild_id),
@@ -57,19 +62,47 @@ class StagingRoleSyncCommandTests(unittest.IsolatedAsyncioTestCase):
         NAMESPACE["sync_unified_driver_roles"].assert_not_awaited()
         self.assertIn("only in isolated", ctx.reply.await_args.args[0])
 
-    async def test_rejects_non_owner_before_role_sync(self):
-        ctx = make_context(user_id=42)
-        with unittest.mock.patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+    async def test_rejects_missing_or_malformed_owner_configuration(self):
+        for configured in (None, "abc", " 613036707863986236", "1"):
+            with self.subTest(configured=configured):
+                ctx = make_context()
+                env = {"AT_V2_ISOLATED_STAGING": "YES"}
+                if configured is not None:
+                    env["AT_V2_STAGING_OWNER_DISCORD_ID"] = configured
+                with unittest.mock.patch.dict(os.environ, env, clear=True):
+                    await COMMAND(ctx)
+                NAMESPACE["sync_unified_driver_roles"].assert_not_awaited()
+                self.assertIn("configured staging owner", ctx.reply.await_args.args[0])
+
+    async def test_rejects_wrong_guild(self):
+        ctx = make_context(guild_id=999)
+        with unittest.mock.patch.dict(os.environ, {
+            "AT_V2_ISOLATED_STAGING": "YES",
+            "AT_V2_STAGING_OWNER_DISCORD_ID": str(OWNER_ID),
+        }, clear=True):
             await COMMAND(ctx)
         NAMESPACE["sync_unified_driver_roles"].assert_not_awaited()
-        self.assertIn("Only the authorised", ctx.reply.await_args.args[0])
+        self.assertIn("configured A&T staging server", ctx.reply.await_args.args[0])
+
+    async def test_rejects_non_owner_before_role_sync(self):
+        ctx = make_context(user_id=42)
+        with unittest.mock.patch.dict(os.environ, {
+            "AT_V2_ISOLATED_STAGING": "YES",
+            "AT_V2_STAGING_OWNER_DISCORD_ID": str(OWNER_ID),
+        }, clear=True):
+            await COMMAND(ctx)
+        NAMESPACE["sync_unified_driver_roles"].assert_not_awaited()
+        self.assertIn("Only the configured", ctx.reply.await_args.args[0])
 
     async def test_invokes_existing_role_sync_for_authorised_owner(self):
         ctx = make_context()
         NAMESPACE["sync_unified_driver_roles"].return_value = {
             "status": "updated", "role_name": "A&T New Driver"
         }
-        with unittest.mock.patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+        with unittest.mock.patch.dict(os.environ, {
+            "AT_V2_ISOLATED_STAGING": "YES",
+            "AT_V2_STAGING_OWNER_DISCORD_ID": str(OWNER_ID),
+        }, clear=True):
             await COMMAND(ctx)
         NAMESPACE["sync_unified_driver_roles"].assert_awaited_once_with(
             ctx.guild, ctx.author.id
@@ -84,14 +117,20 @@ class StagingRoleSyncCommandTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(status=result["status"]):
                 ctx = make_context()
                 NAMESPACE["sync_unified_driver_roles"].return_value = result
-                with unittest.mock.patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+                with unittest.mock.patch.dict(os.environ, {
+                    "AT_V2_ISOLATED_STAGING": "YES",
+                    "AT_V2_STAGING_OWNER_DISCORD_ID": str(OWNER_ID),
+                }, clear=True):
                     await COMMAND(ctx)
                 self.assertIn(expected, ctx.reply.await_args.args[0])
 
     async def test_reports_discord_permission_error(self):
         ctx = make_context()
         NAMESPACE["sync_unified_driver_roles"].side_effect = FakeForbidden()
-        with unittest.mock.patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+        with unittest.mock.patch.dict(os.environ, {
+            "AT_V2_ISOLATED_STAGING": "YES",
+            "AT_V2_STAGING_OWNER_DISCORD_ID": str(OWNER_ID),
+        }, clear=True):
             await COMMAND(ctx)
         self.assertIn("Manage Roles", ctx.reply.await_args.args[0])
 

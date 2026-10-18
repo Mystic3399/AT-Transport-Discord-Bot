@@ -6344,6 +6344,20 @@ async def sync_unified_driver_roles(guild, discord_user_id):
     return await sync_member_progression_role(guild, discord_user_id, miles)
 
 
+def is_authorised_staging_owner(discord_user_id):
+    """Match the staging owner only when isolated staging and config are valid."""
+    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+        return False
+    configured_owner = os.getenv("AT_V2_STAGING_OWNER_DISCORD_ID", "")
+    # Discord snowflakes are decimal IDs; reject whitespace, signs and malformed
+    # values rather than coercing them into an authorization match.
+    if not configured_owner.isascii() or not configured_owner.isdecimal():
+        return False
+    if not 17 <= len(configured_owner) <= 20:
+        return False
+    return str(discord_user_id) == configured_owner
+
+
 @bot.command(name="stagingrolesync")
 async def staging_role_sync(ctx):
     """Safely sync the owner's existing progression role in isolated staging."""
@@ -6359,9 +6373,9 @@ async def staging_role_sync(ctx):
             mention_author=False,
         )
         return
-    if ctx.author.id != 1561159250728718497:
+    if not is_authorised_staging_owner(ctx.author.id):
         await ctx.reply(
-            "Only the authorised staging owner can synchronise roles.",
+            "Only the configured staging owner can synchronise roles.",
             mention_author=False,
         )
         return
@@ -6425,9 +6439,9 @@ async def staging_trucky_jobs_probe(ctx, page: int = 1):
             mention_author=False,
         )
         return
-    if ctx.author.id != 1561159250728718497:
+    if not is_authorised_staging_owner(ctx.author.id):
         await ctx.reply(
-            "Only the authorised staging owner can run this diagnostic.",
+            "Only the configured staging owner can run this diagnostic.",
             mention_author=False,
         )
         return
