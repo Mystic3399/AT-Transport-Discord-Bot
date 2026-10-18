@@ -29,6 +29,15 @@ class VerifiedJobCandidateTests(unittest.TestCase):
     def test_incomplete_rejected(self):
         self.assertIsNone(self.candidate({**BASE, "status": "in_progress"}))
 
+    def test_wotr_real_candidate_remains_review_only(self):
+        candidate = self.candidate({**BASE, "event_tag": "WoTr"})
+        self.assertIsNotNone(candidate)
+        self.assertEqual(candidate["mileage_type"], "real")
+        self.assertFalse(candidate["eligible_for_award"])
+
+    def test_wotr_race_not_reclassified_as_real(self):
+        self.assertIsNone(self.candidate({**BASE, "event_tag": "WoTr", "stats_type": "race_miles"}))
+
     def test_race_rejected(self):
         self.assertIsNone(self.candidate({**BASE, "stats_type": "race_miles"}))
 
