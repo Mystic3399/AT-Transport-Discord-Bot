@@ -179,5 +179,65 @@ class AutomaticStagingRoleAndHistoryTests(unittest.TestCase):
         asyncio.run(run())
 
 
+class StartupBackfillSafeModeTests(unittest.TestCase):
+    def test_staging_startup_installs_schema_without_backfilling_driver_profiles(self):
+        import asyncio
+        import ast
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        source = (ROOT / "bot.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        node = next(
+            item for item in tree.body
+            if isinstance(item, ast.AsyncFunctionDef) and item.name == "on_ready"
+        )
+        node.decorator_list = []
+
+        ns = {}
+        pool = object()
+
+        async def setup_database():
+            ns["db_pool"] = pool
+
+        task = SimpleNamespace(is_running=lambda: True, start=lambda: None)
+        bot = SimpleNamespace(
+            guilds=[SimpleNamespace(id=100)],
+            user=SimpleNamespace(id=999),
+        )
+        backfill = AsyncMock()
+        install_unified = AsyncMock()
+        install_legacy = AsyncMock()
+        ns.update({
+            "os": os,
+            "GUILD_ID": 100,
+            "bot": bot,
+            "db_pool": None,
+            "unified_schema_ready": False,
+            "staging_trucky_probe_ran": False,
+            "rotate_bot_status": task,
+            "leaderboard_rollover_task": task,
+            "setup_database": setup_database,
+            "trucky_linking": SimpleNamespace(install_schema=install_legacy),
+            "unified_driver_profiles": SimpleNamespace(
+                install_schema=install_unified,
+                backfill_trucksbook_profiles=backfill,
+            ),
+            "start_public_integrations": AsyncMock(),
+            "print": lambda *args, **kwargs: None,
+        })
+        exec(compile(ast.Module(body=[node], type_ignores=[]), "bot.py", "exec"), ns)
+        with patch.dict(os.environ, {
+            "AT_V2_ISOLATED_STAGING": "YES",
+            "AT_V2_TRUCKY_SCHEMA_PROBE_ON_START": "NO",
+        }, clear=False):
+            asyncio.run(ns["on_ready"]())
+
+        install_legacy.assert_awaited_once_with(pool)
+        install_unified.assert_awaited_once_with(pool)
+        backfill.assert_not_awaited()
+        ns["start_public_integrations"].assert_awaited_once()
+
+
 if __name__ == "__main__":
     unittest.main()
