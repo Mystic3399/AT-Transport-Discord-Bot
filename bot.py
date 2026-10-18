@@ -6601,7 +6601,7 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
             {"receipt_id": row["receipt_id"], "event_type": row["event_type"],
              "received_at": row["received_at"].isoformat(),
              "review_status": row["review_status"]}
-            for row in receipts
+            for row in receipts[:5]
         ],
         "identity_verification": "not_attempted",
         "mileage_awarded": False,
@@ -6610,7 +6610,19 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
     }
     record = lookup.get("record")
     if record is not None:
-        report["provider_job_fields"] = trucky_jobs_api_v2.safe_job_record_report(record)
+        job_report = trucky_jobs_api_v2.safe_job_record_report(record)
+        safe_names = ("id", "status", "complete", "deliver", "timestamp", "date",
+                      "time", "distance", "miles", "kilomet", "unit", "classif",
+                      "real", "race", "game", "origin", "destination", "cargo", "truck")
+        report["provider_job_fields"] = {
+            "field_types": {
+                path: field_type for path, field_type in job_report["field_types"].items()
+                if any(term in path.lower() for term in safe_names)
+            },
+            "safe_delivery_fields": dict(list(
+                job_report["safe_delivery_fields"].items()
+            )[:12]),
+        }
         identity_fields = trucky_jobs_api_v2.inspect_job_identity_fields(record)
         report["identity_field_presence"] = identity_fields["safe_report"]
         if not receipts:
