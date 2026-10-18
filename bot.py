@@ -545,6 +545,7 @@ DRIVER_MAPPINGS = {
 db_pool = None
 public_http_runner = None
 unified_schema_ready = False
+staging_trucky_probe_ran = False
 
 
 async def start_public_integrations():
@@ -2564,14 +2565,20 @@ async def before_rotate_bot_status():
     
 @bot.event
 async def on_ready():
-    global db_pool, unified_schema_ready
+    global db_pool, unified_schema_ready, staging_trucky_probe_ran
 
     if not rotate_bot_status.is_running():
         rotate_bot_status.start()
 
-    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+    isolated_staging = os.getenv("AT_V2_ISOLATED_STAGING") == "YES"
+    if isolated_staging:
         if len(bot.guilds) != 1 or bot.guilds[0].id != GUILD_ID:
             raise RuntimeError("Staging bot must belong only to the configured test guild")
+        if bot.user is not None:
+            print(
+                f"STAGING BOT IDENTITY bot_id={bot.user.id} guild_id={GUILD_ID}",
+                flush=True,
+            )
 
     if db_pool is None:
         try:
@@ -2588,7 +2595,26 @@ async def on_ready():
     if db_pool is not None and unified_schema_ready:
         await start_public_integrations()
 
-    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+    if isolated_staging:
+        import trucky_jobs_probe_v2
+        if trucky_jobs_probe_v2.should_run_staging_probe(
+            is_staging=True,
+            enabled=os.getenv("AT_V2_TRUCKY_SCHEMA_PROBE_ON_START"),
+            already_ran=staging_trucky_probe_ran,
+        ):
+            # Mark before awaiting so Discord reconnects cannot repeat the live
+            # read-only API diagnostic within this process.
+            staging_trucky_probe_ran = True
+            try:
+                await trucky_jobs_probe_v2.main()
+            except SystemExit:
+                print("STAGING TRUCKY SCHEMA PROBE STOPPED", flush=True)
+            except Exception as error:
+                print(
+                    "STAGING TRUCKY SCHEMA PROBE ERROR: "
+                    f"{type(error).__name__}",
+                    flush=True,
+                )
         print("STAGING SAFE MODE: historical role sync and leaderboard startup disabled")
         return
 

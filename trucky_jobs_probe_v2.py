@@ -5,6 +5,11 @@ import os
 from trucky_jobs_api_v2 import fetch_trucky_jobs_page, inspect_jobs_response_shape
 
 
+def should_run_staging_probe(*, is_staging, enabled, already_ran):
+    """Gate the one-shot authenticated schema probe to an explicit staging opt-in."""
+    return is_staging is True and enabled == "YES" and already_ran is False
+
+
 async def main():
     if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
         raise SystemExit("Probe refused: isolated staging flag missing")

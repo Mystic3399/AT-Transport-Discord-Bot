@@ -23,6 +23,17 @@ class TruckyProbeResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RuntimeError", output)
         self.assertNotIn("private detail", output)
 
+    async def test_probe_requires_explicit_staging_opt_in(self):
+        from trucky_jobs_probe_v2 import should_run_staging_probe
+        self.assertFalse(should_run_staging_probe(
+            is_staging=False, enabled="YES", already_ran=False))
+        self.assertFalse(should_run_staging_probe(
+            is_staging=True, enabled="NO", already_ran=False))
+        self.assertFalse(should_run_staging_probe(
+            is_staging=True, enabled="YES", already_ran=True))
+        self.assertTrue(should_run_staging_probe(
+            is_staging=True, enabled="YES", already_ran=False))
+
 
 if __name__ == "__main__":
     unittest.main()
