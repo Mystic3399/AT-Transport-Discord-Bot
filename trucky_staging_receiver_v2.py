@@ -14,6 +14,34 @@ from trucky_signed_webhook_v2 import (
 
 ON_TRUCKY_LINKED_KEY = web.AppKey("on_trucky_linked", object)
 
+_IDENTITY_LOG_OUTCOMES = frozenset({
+    "pending_identity_verification",
+    "not_active_company_member",
+    "identity_linked",
+    "identity_linked_role_sync_pending",
+    "membership_check_unavailable",
+    "identity_not_verified",
+    "database_unavailable",
+})
+
+
+def _log_trucky_identity_outcome(status, *, receipt_recorded, active_member=False):
+    """Emit only an allowlisted outcome; never log provider or Steam identifiers."""
+    outcome = status if status in _IDENTITY_LOG_OUTCOMES else "identity_not_verified"
+    ownership_verified = outcome in {
+        "identity_linked", "identity_linked_role_sync_pending"
+    }
+    print(
+        "TRUCKY_IDENTITY_VERIFICATION "
+        "event=job_completed "
+        f"outcome={outcome} "
+        f"receipt_recorded={'yes' if receipt_recorded else 'no'} "
+        f"active_member={'yes' if active_member else 'no'} "
+        f"steam_match={'yes' if ownership_verified else 'no'} "
+        "mileage_awarded=no",
+        flush=True,
+    )
+
 
 async def receive_trucky_webhook(request):
     secret = os.getenv("TRUCKY_WEBHOOK_SIGNING_SECRET", "")
@@ -34,6 +62,13 @@ async def receive_trucky_webhook(request):
     # mileage or ownership. Save only a digest, event name and candidate ID.
     import steam_callback_v2
     pool = request.app.get(steam_callback_v2.POOL_KEY)
+    if pool is None:
+        _log_trucky_identity_outcome(
+            "database_unavailable", receipt_recorded=False
+        )
+        return web.json_response(
+            {"status": "authenticated_pending_schema_verification"}
+        )
     if pool is not None:
         data = verified["data"]
         candidate = data.get("id") if isinstance(data, dict) else None
@@ -52,6 +87,7 @@ async def receive_trucky_webhook(request):
             pool, hashlib.sha256(raw).hexdigest(), verified["event"], candidate
         )
         link_status = "pending_identity_verification"
+        active_member = False
         if evidence is not None:
             import trucky_membership_adapter
             try:
@@ -61,6 +97,7 @@ async def receive_trucky_webhook(request):
                 if canonical_name is None:
                     link_status = "not_active_company_member"
                 else:
+                    active_member = True
                     discord_user_id = await unified_driver_profiles.auto_approve_trucky_if_steam_matches(
                         pool,
                         discord_user_id=None,
@@ -89,6 +126,11 @@ async def receive_trucky_webhook(request):
                 # Account/Steam mismatch, absent or expired claim, replay, and
                 # ownership conflicts all remain unlinked and unactioned.
                 link_status = "identity_not_verified"
+        _log_trucky_identity_outcome(
+            link_status,
+            receipt_recorded=receipt_id is not None,
+            active_member=active_member,
+        )
         return web.json_response({
             "status": "authenticated_pending_api_verification",
             "receipt_recorded": receipt_id is not None,

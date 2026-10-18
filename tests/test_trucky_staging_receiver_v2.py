@@ -129,10 +129,25 @@ class IntegratedReceiverTests(unittest.IsolatedAsyncioTestCase):
             client = TestClient(TestServer(app))
             await client.start_server()
             try:
-                response = await client.post(
-                    "/trucky/webhook", data=body,
-                    headers={"X-Signature-SHA256": signature},
+                with patch("builtins.print") as log:
+                    response = await client.post(
+                        "/trucky/webhook", data=body,
+                        headers={"X-Signature-SHA256": signature},
+                    )
+                safe_log = "\n".join(
+                    str(call.args[0]) for call in log.call_args_list
+                    if call.args
                 )
+                self.assertIn(
+                    "TRUCKY_IDENTITY_VERIFICATION event=job_completed "
+                    "outcome=identity_linked receipt_recorded=yes "
+                    "active_member=yes steam_match=yes mileage_awarded=no",
+                    safe_log,
+                )
+                for private_value in (
+                    "76561198000000000", "123456", str(user_id)
+                ):
+                    self.assertNotIn(private_value, safe_log)
                 self.assertEqual(response.status, 202)
                 self.assertEqual((await response.json())["identity_status"], "identity_linked")
             finally:
