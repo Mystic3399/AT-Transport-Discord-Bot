@@ -6320,7 +6320,7 @@ async def staging_role_sync(ctx):
             mention_author=False,
         )
         return
-    if ctx.author.id != 613036707863986236:
+    if ctx.author.id != 1561159250728718497:
         await ctx.reply(
             "Only the authorised staging owner can synchronise roles.",
             mention_author=False,
