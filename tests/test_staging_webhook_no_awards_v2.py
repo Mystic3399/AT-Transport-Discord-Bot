@@ -63,18 +63,28 @@ class StagingWebhookNoAwardTests(unittest.TestCase):
                 webhook_id=456789,
                 channel=SimpleNamespace(id=200),
                 embeds=[Embed()],
+                id=123456789,
             )
             output = io.StringIO()
             with patch.dict(os.environ, {
                 "AT_V2_ISOLATED_STAGING": "YES",
                 "TRUCKSBOOK_WEBHOOK_ID": "456789",
             }, clear=False), contextlib.redirect_stdout(output):
-                await handler(message)
+                with patch("unified_staging_shadow_receipts_v2.record_trucksbook_shadow_receipt",
+                           new=AsyncMock(return_value={
+                               "status": "quarantined", "duplicate": False,
+                               "delivery_count": 1,
+                           })) as receipt:
+                    namespace["db_pool"] = object()
+                    await handler(message)
 
             self.assertIn("STAGING TRUCKSBOOK QUARANTINED", output.getvalue())
             self.assertIn("job_id=27805272", output.getvalue())
             self.assertIn("classification=real", output.getvalue())
+            self.assertIn("receipt=quarantined", output.getvalue())
             self.assertIn("mileage_awarded=no", output.getvalue())
+            receipt.assert_awaited_once()
+            self.assertEqual(receipt.await_args.kwargs["message_id"], message.id)
             record_job.assert_not_awaited()
             link_driver.assert_not_awaited()
             process_commands.assert_not_awaited()

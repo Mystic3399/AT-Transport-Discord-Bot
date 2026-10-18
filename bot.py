@@ -2585,7 +2585,10 @@ async def on_ready():
             await setup_database()
             await trucky_linking.install_schema(db_pool)
             await unified_driver_profiles.install_schema(db_pool)
-            if not isolated_staging:
+            if isolated_staging:
+                import unified_staging_shadow_receipts_v2
+                await unified_staging_shadow_receipts_v2.install_schema(db_pool)
+            else:
                 await unified_driver_profiles.backfill_trucksbook_profiles(db_pool)
             unified_schema_ready = True
         except Exception as error:
@@ -2855,31 +2858,38 @@ async def on_message(message):
                 print("STAGING TRUCKSBOOK WEBHOOK REJECTED: source not configured")
             return
         if staging:
-            # Parse the existing TrucksBook embed format for redacted acceptance
-            # evidence, then stop before every legacy database/role/mileage path.
+            # Persist a redacted source receipt in staging's isolated database,
+            # then stop before every legacy database/role/mileage path.
             embeds = getattr(message, "embeds", None) or []
-            if len(embeds) != 1:
-                print(
-                    "STAGING TRUCKSBOOK QUARANTINED: payload=ambiguous "
-                    "mileage_awarded=no registration_changed=no roles_changed=no"
-                )
-                return
-            parsed = extract_trucksbook_job_from_embed(embeds[0])
-            if parsed is None:
-                print(
-                    "STAGING TRUCKSBOOK QUARANTINED: payload=unrecognized "
-                    "mileage_awarded=no registration_changed=no roles_changed=no"
-                )
-                return
-            job_id = parsed["job_id"]
-            distance = parsed["accepted_distance"]
+            parsed = extract_trucksbook_job_from_embed(embeds[0]) if len(embeds) == 1 else None
+            receipt = {"status": "quarantined" if parsed else "malformed",
+                       "duplicate": False, "delivery_count": 0}
+            if db_pool is not None:
+                try:
+                    import unified_staging_shadow_receipts_v2
+                    receipt = await unified_staging_shadow_receipts_v2.record_trucksbook_shadow_receipt(
+                        db_pool, message_id=message.id, webhook_id=message.webhook_id,
+                        configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
+                        payload=[embed.to_dict() for embed in embeds], parsed_job=parsed,
+                    )
+                except Exception as error:
+                    # Fail closed: shadow persistence failure must not fall
+                    # through into the legacy mileage path.
+                    print("STAGING TRUCKSBOOK RECEIPT ERROR: %s" % type(error).__name__)
+                    return
+            job_id = parsed["job_id"] if parsed else "unknown"
+            distance = parsed["accepted_distance"] if parsed else None
             classification = (
-                "real" if is_real_statistics(parsed["statistics"]) else "non_real"
+                "real" if parsed and is_real_statistics(parsed["statistics"])
+                else "non_real" if parsed and parsed["statistics"]
+                else "unknown"
             )
             print(
                 "STAGING TRUCKSBOOK QUARANTINED "
                 f"job_id={job_id} distance={distance if distance is not None else 'unknown'} "
-                f"classification={classification} "
+                f"classification={classification} receipt={receipt['status']} "
+                f"duplicate_delivery={str(receipt['duplicate']).lower()} "
+                f"delivery_count={receipt.get('delivery_count', 0)} "
                 "mileage_awarded=no registration_changed=no roles_changed=no"
             )
             return

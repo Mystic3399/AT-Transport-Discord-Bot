@@ -572,5 +572,66 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             )
 
 
+    async def test_trucksbook_shadow_receipt_is_redacted_and_idempotent(self):
+        import unified_staging_shadow_receipts_v2 as shadow
+        from unittest.mock import patch
+        await shadow.install_schema(self.pool)
+        payload = [{"title": "Job delivery #68093174",
+                    "description": "private display content never persisted"}]
+        parsed = {"job_id": "68093174", "statistics": "Real, WoTr",
+                  "accepted_distance": 176}
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            first = await shadow.record_trucksbook_shadow_receipt(
+                self.pool, message_id=991234567001, webhook_id=456789,
+                configured_webhook_id="456789", payload=payload, parsed_job=parsed,
+            )
+            replay = await shadow.record_trucksbook_shadow_receipt(
+                self.pool, message_id=991234567001, webhook_id=456789,
+                configured_webhook_id="456789", payload=payload, parsed_job=parsed,
+            )
+        self.assertEqual(first, {"status": "quarantined", "duplicate": False,
+                                 "delivery_count": 1})
+        self.assertEqual(replay, {"status": "quarantined", "duplicate": True,
+                                  "delivery_count": 2})
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT source_payload_sha256, provider_job_id, mileage_classification,
+                       candidate_distance_miles, delivery_count, ownership_status,
+                       mileage_awarded, registration_changed, roles_changed
+                FROM staging_shadow_receipts WHERE source_delivery_id=$1
+            """, "991234567001")
+            columns = await conn.fetchval("""
+                SELECT COUNT(*) FROM information_schema.columns
+                WHERE table_schema='public' AND table_name='staging_shadow_receipts'
+                  AND column_name IN ('raw_payload','display_name','discord_user_id')
+            """)
+        self.assertEqual(row["provider_job_id"], "68093174")
+        self.assertEqual(row["mileage_classification"], "real")
+        self.assertEqual(row["candidate_distance_miles"], 176)
+        self.assertEqual(row["delivery_count"], 2)
+        self.assertEqual(row["ownership_status"], "unverified")
+        self.assertFalse(row["mileage_awarded"])
+        self.assertFalse(row["registration_changed"])
+        self.assertFalse(row["roles_changed"])
+        self.assertEqual(columns, 0)
+
+    async def test_trucksbook_shadow_receipt_rejects_bad_source_and_nonstaging(self):
+        import unified_staging_shadow_receipts_v2 as shadow
+        from unittest.mock import patch
+        await shadow.install_schema(self.pool)
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "NO"}):
+            with self.assertRaisesRegex(RuntimeError, "isolated staging"):
+                await shadow.record_trucksbook_shadow_receipt(
+                    self.pool, message_id=991234567002, webhook_id=456789,
+                    configured_webhook_id="456789", payload=[], parsed_job=None,
+                )
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            with self.assertRaisesRegex(ValueError, "not configured"):
+                await shadow.record_trucksbook_shadow_receipt(
+                    self.pool, message_id=991234567003, webhook_id=456789,
+                    configured_webhook_id="999999", payload=[], parsed_job=None,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
