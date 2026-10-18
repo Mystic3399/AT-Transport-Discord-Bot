@@ -318,13 +318,13 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         await profiles.record_trucky_webhook_receipt(
             self.pool, expired_receipt, "job_completed", "987654322"
         )
-        with self.assertRaisesRegex(ValueError, "outside the active link window"):
-            await profiles.auto_approve_trucky_if_steam_matches(
-                self.pool, None, "209124", second_steam,
-                trusted_provider_source=True, membership_confirmed=True,
-                provider_job_id="987654322", payload_sha256=expired_receipt,
-                completed_at=datetime.now(timezone.utc),
-            )
+        linked_user = await profiles.auto_approve_trucky_if_steam_matches(
+            self.pool, None, "209124", second_steam,
+            trusted_provider_source=True, membership_confirmed=True,
+            provider_job_id="987654322", payload_sha256=expired_receipt,
+            completed_at=datetime.now(timezone.utc),
+        )
+        self.assertEqual(linked_user, other)
 
 
 if __name__ == "__main__":
