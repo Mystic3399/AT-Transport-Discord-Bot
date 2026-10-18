@@ -42,7 +42,8 @@ async def main():
                 member_report = {
                     "found": False,
                     "field_types": {},
-                    "steam_id_verified": False,
+                    "steam_id_verified": None,
+                    "steam_ownership_evidence": "lookup_unavailable",
                     "lookup_error": getattr(
                         member_error, "diagnostic_code", type(member_error).__name__
                     ),
@@ -50,7 +51,12 @@ async def main():
             print("TRUCKY_MEMBER_IDENTITY_SHAPE " +
                   json.dumps(member_report, sort_keys=True), flush=True)
         else:
-            print("TRUCKY_MEMBER_IDENTITY_SHAPE {\"found\":false,\"field_types\":{}}",
+            print("TRUCKY_MEMBER_IDENTITY_SHAPE " + json.dumps({
+                      "found": False,
+                      "field_types": {},
+                      "steam_id_verified": None,
+                      "steam_ownership_evidence": "no_completed_job_account_to_lookup",
+                  }, sort_keys=True),
                   flush=True)
     except Exception as exc:
         # Only emit exception class, not body, URLs, credentials or response data.

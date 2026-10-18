@@ -64,6 +64,40 @@ class _Session:
 
 
 class MembershipLookupDiagnostics(unittest.IsolatedAsyncioTestCase):
+    async def test_membership_does_not_claim_steam_mismatch_when_provider_omits_proof(self):
+        class Response:
+            status = 200
+
+            async def json(self, content_type=None):
+                return {
+                    "current_page": 1,
+                    "last_page": 1,
+                    "data": [{"id": 123, "name": "Driver", "company_id": 49041}],
+                }
+
+        with patch.dict("os.environ", {"TRUCKY_API_TOKEN": "test-token"}), \
+             patch.object(membership.aiohttp, "ClientSession",
+                          side_effect=lambda **kw: _Session(Response(), **kw)):
+            report = await membership.inspect_member_identity_fields("123")
+        self.assertTrue(report["found"])
+        self.assertIsNone(report["steam_id_verified"])
+        self.assertEqual(report["steam_ownership_evidence"],
+                         "not_exposed_by_membership_roster")
+
+    async def test_unmatched_account_is_not_reported_as_steam_mismatch(self):
+        class Response:
+            status = 200
+
+            async def json(self, content_type=None):
+                return {"current_page": 1, "last_page": 1, "data": []}
+
+        with patch.dict("os.environ", {"TRUCKY_API_TOKEN": "test-token"}), \
+             patch.object(membership.aiohttp, "ClientSession",
+                          side_effect=lambda **kw: _Session(Response(), **kw)):
+            report = await membership.inspect_member_identity_fields("123")
+        self.assertFalse(report["found"])
+        self.assertIsNone(report["steam_id_verified"])
+
     async def test_http_status_is_reported_without_body_or_secret(self):
         class Response:
             status = 404

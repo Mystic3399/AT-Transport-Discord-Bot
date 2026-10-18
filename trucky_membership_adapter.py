@@ -113,10 +113,19 @@ async def inspect_member_identity_fields(account_id):
                             key: type(value).__name__
                             for key, value in matching[0].items()
                         },
-                        "steam_id_verified": False,
+                        # Membership proves company membership only. The roster
+                        # does not expose authenticated Steam ownership, so a
+                        # negative boolean would incorrectly imply a mismatch.
+                        "steam_id_verified": None,
+                        "steam_ownership_evidence": "not_exposed_by_membership_roster",
                     }
                 if page == last:
-                    return {"found": False, "field_types": {}, "steam_id_verified": False}
+                    return {
+                        "found": False,
+                        "field_types": {},
+                        "steam_id_verified": None,
+                        "steam_ownership_evidence": "not_exposed_by_membership_roster",
+                    }
     except MembershipUnavailable:
         raise
     except (asyncio.TimeoutError, TimeoutError) as error:
