@@ -513,22 +513,22 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             "cargo": "Pet Food",
         }
         await profiles.record_normalized_provider_job(
-            self.pool, "trucky", "review-trucky-1", user, "284", "km",
+            self.pool, "trucky", "8877665531", user, "284", "km",
             provider_account_id=accounts["trucky"], delivered_at=event_time,
             job_metadata=delivery_metadata,
         )
         await profiles.record_normalized_provider_job(
-            self.pool, "trucksbook", "review-trucksbook-1", user, "176", "mi",
+            self.pool, "trucksbook", "8877665532", user, "176", "mi",
             provider_account_id=accounts["trucksbook"], delivered_at=event_time,
             job_metadata=delivery_metadata,
         )
         digest = hashlib.sha256(b"independently reviewed staging evidence").hexdigest()
         with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
             case = await review.open_potential_duplicate(
-                self.pool, "review-trucky-1", "review-trucksbook-1", user
+                self.pool, "8877665531", "8877665532", user
             )
             resolved = await review.resolve_review_case(
-                self.pool, "review-trucky-1", "review-trucksbook-1",
+                self.pool, "8877665531", "8877665532",
                 "confirmed_duplicate", user, "independent_telemetry", digest,
             )
         self.assertEqual(resolved["status"], "confirmed_duplicate")
@@ -543,7 +543,7 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             miles = await conn.fetchrow("""
                 SELECT SUM(real_miles) AS real,SUM(race_miles) AS race
                 FROM unified_provider_job_events WHERE provider_job_id IN
-                    ('review-trucky-1','review-trucksbook-1')
+                    ('8877665531','8877665532')
             """)
         self.assertEqual(status, "confirmed_duplicate")
         self.assertEqual(audit["decision"], "confirmed_duplicate")
