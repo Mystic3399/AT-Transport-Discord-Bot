@@ -19,6 +19,11 @@ POOL_KEY = web.AppKey("pool", object)
 
 
 async def callback(request):
+    # Isolated staging acceptance is read-only for driver registration.
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        raise web.HTTPServiceUnavailable(
+            text="Steam registration writes are disabled during staging acceptance"
+        )
     pool = request.app[POOL_KEY] if POOL_KEY in request.app else request.app["pool"]
     values = request.query
     if len(values) > 30 or any(len(values.getall(k)) != 1 for k in values):
