@@ -23,3 +23,13 @@ def test_either_provider_qualifies(tb, tr, eligible, provider):
 def test_invalid_totals_rejected(tb, tr):
     with pytest.raises(ValueError):
         check(trucksbook_real_miles=tb, trucky_race_miles=tr)
+
+
+def test_only_trucksbook_real_counts():
+    # TrucksBook Race Miles are intentionally not accepted as input.
+    assert check(trucksbook_real_miles=0, trucky_race_miles=0).eligible is False
+
+
+def test_only_trucky_race_counts():
+    # Trucky Real Miles must not be substituted for Trucky Race Miles.
+    assert check(trucksbook_real_miles=39_999, trucky_race_miles=59_999).eligible is False
