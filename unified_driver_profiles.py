@@ -169,6 +169,7 @@ async def list_trucky_receipt_audit(pool, candidate_job_id, *, limit=20):
         """, str(candidate_job_id), limit)
     return [dict(row) for row in rows]
 
+
 async def mark_staging_trucky_receipts_verified_after_api_audit(
     pool, candidate_job_id, *, hmac_receipt_verified,
     authenticated_api_job_verified, driver_identity_verified, active_member,

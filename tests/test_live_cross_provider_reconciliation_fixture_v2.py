@@ -49,7 +49,12 @@ class LiveCrossProviderFixtureTests(unittest.TestCase):
         self.assertIsNone(self.fixture["verified_shared_journey_id"])
         self.assertIsNone(self.tb["provider_delivery_timestamp"])
         self.assertFalse(self.tb["provider_account_ownership_verified"])
-        self.assertFalse(self.trucky["authoritative_job_record_retrieved"])
+        self.assertTrue(self.trucky["authoritative_job_record_retrieved"])
+        self.assertTrue(self.trucky["api_driver_account_id_unambiguous"])
+        self.assertFalse(self.trucky["api_steam_identity_present"])
+        self.assertFalse(self.trucky["api_completion_timestamp_available"])
+        self.assertTrue(self.trucky["signed_receipt_hmac_verified"])
+        self.assertTrue(self.trucky["account_link_matches_verified_steam"])
         self.assertEqual(self.tb["provider_job_id"], "68093174")
         self.assertEqual(self.trucky["provider_job_id"], "27848310")
 

@@ -47,16 +47,38 @@ class ReconciliationTests(unittest.TestCase):
         self.assertEqual(classify_delivery(BASE, [],
             provider_watermark=TIME + timedelta(minutes=20), provider_feed_complete=True), "pending")
 
-    def test_matching_job_must_have_been_credited_to_skip(self):
+    def test_matching_job_similarity_never_confirms_duplicate(self):
         other = {**BASE, "provider": "trucksbook"}
         watermark = TIME + timedelta(hours=1)
         self.assertEqual(classify_delivery(BASE, [other], provider_watermark=watermark), "pending")
         self.assertEqual(classify_delivery(BASE, [{**other, "credited": True}],
-            provider_watermark=watermark), "duplicate")
+            provider_watermark=watermark, provider_feed_complete=True), "pending")
 
-    def test_later_credited_candidate_wins_over_earlier_pending_match(self):
+    def test_two_legitimate_identical_route_jobs_remain_pending_for_review(self):
         other = {**BASE, "provider": "trucksbook"}
-        self.assertEqual(classify_delivery(BASE, [other, {**other, "credited": True}]), "duplicate")
+        self.assertEqual(classify_delivery(BASE, [other, {**other, "credited": True}],
+            provider_watermark=TIME + timedelta(hours=1),
+            provider_feed_complete=True), "pending")
+
+    def test_verified_shared_id_is_required_to_confirm_a_credited_duplicate(self):
+        for incoming_provider, other_provider in (("trucky", "trucksbook"),
+                                                   ("trucksbook", "trucky")):
+            with self.subTest(incoming=incoming_provider):
+                incoming = {**BASE, "provider": incoming_provider,
+                            "shared_journey_id": "proof-abc", "shared_id_verified": True}
+                other = {**BASE, "provider": other_provider, "credited": True,
+                         "shared_journey_id": "proof-abc", "shared_id_verified": True}
+                self.assertEqual(classify_delivery(incoming, [other]), "duplicate")
+
+    def test_unverified_or_different_shared_id_stays_pending(self):
+        incoming = {**BASE, "shared_journey_id": "proof-abc", "shared_id_verified": True}
+        for candidate in (
+            {**BASE, "provider": "trucksbook", "credited": True,
+             "shared_journey_id": "proof-abc", "shared_id_verified": False},
+            {**BASE, "provider": "trucksbook", "credited": True,
+             "shared_journey_id": "proof-other", "shared_id_verified": True},
+        ):
+            self.assertEqual(classify_delivery(incoming, [candidate]), "pending")
 
     def test_watermark_in_different_timezone(self):
         from datetime import timezone

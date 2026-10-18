@@ -32,7 +32,15 @@
     "started_at_utc": "2026-10-18T20:17:00Z",
     "completed_at_utc_approx": "2026-10-18T20:29:00Z",
     "signed_event_identity_check": "steam_match_yes_read_only",
-    "authoritative_job_record_retrieved": false,
+    "authoritative_job_record_retrieved": true,
+    "api_record_found_by_exact_job_id": true,
+    "api_driver_account_id_unambiguous": true,
+    "api_steam_identity_present": false,
+    "api_completion_timestamp_available": false,
+    "signed_receipt_hmac_verified": true,
+    "signed_receipt_matches_job_id": true,
+    "account_link_matches_verified_steam": true,
+    "receipt_review_status_before_api_review": "needs_api_verification",
     "staging_result": "receipt_recorded_no_award"
   }
 }

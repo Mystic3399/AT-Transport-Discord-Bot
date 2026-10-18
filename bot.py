@@ -6611,6 +6611,7 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
     if record is not None:
         job_report = trucky_jobs_api_v2.safe_job_record_report(record)
         identity_fields = trucky_jobs_api_v2.inspect_job_identity_fields(record)
+        api_job_completed = record.get("status") == "completed"
         # Keep the Discord response deliberately compact so the evidence status
         # cannot be truncated behind a full schema dump.
         safe_delivery = job_report["safe_delivery_fields"]
@@ -6629,6 +6630,7 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
             "steam_identity_present_in_job_api": identity_fields["safe_report"].get(
                 "valid_steam_identity_present", False),
         }
+        report["authenticated_api_job_completed"] = api_job_completed
         if not receipts:
             report["identity_verification"] = "matching_signed_receipt_missing"
         elif not all(str(row["event_type"]) == "job_completed" for row in receipts):
@@ -6652,7 +6654,9 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
                                 db_pool, job_id,
                                 hmac_receipt_verified=bool(receipts) and all(
                                     str(row["event_type"]) == "job_completed" for row in receipts),
-                                authenticated_api_job_verified=lookup["status"] == "found",
+                                authenticated_api_job_verified=(
+                                    lookup["status"] == "found" and api_job_completed
+                                ),
                                 driver_identity_verified=True,
                                 active_member=True,
                             )

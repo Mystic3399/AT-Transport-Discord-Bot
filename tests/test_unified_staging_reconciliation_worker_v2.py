@@ -40,6 +40,20 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["status"], "pending")
             award.assert_not_awaited()
 
+    async def test_similar_route_with_credited_other_provider_job_stays_pending(self):
+        other = {**self.incoming, "provider": "trucksbook", "provider_job_id": "tb-176",
+                 "miles": "176", "credited": True}
+        self.incoming.update({"provider_job_id": "tr-176", "miles": "176"})
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
+                   new_callable=AsyncMock) as award:
+            result = await reconcile_and_stage_miles(
+                None, self.incoming, [other], provider_feed_complete=True,
+                provider_watermark=self.now + timedelta(minutes=31),
+            )
+            self.assertEqual(result["status"], "pending")
+            self.assertEqual(result["credited_whole_miles"], 0)
+            award.assert_not_awaited()
+
     async def test_complete_feed_allows_staging_only(self):
         with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:

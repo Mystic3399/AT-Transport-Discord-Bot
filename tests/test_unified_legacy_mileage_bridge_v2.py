@@ -46,9 +46,20 @@ class LegacyBridgeTests(unittest.TestCase):
         result = preview_legacy_real_miles({**JOB, "mileage_type": "race"}, [], **READY)
         self.assertEqual(result["status"], "unsupported_race_award")
 
-    def test_existing_cross_provider_award_is_not_duplicated(self):
+    def test_similar_cross_provider_job_is_pending_without_shared_identity(self):
         other = {**JOB, "provider": "trucksbook", "credited": True}
-        self.assertEqual(preview_legacy_real_miles(JOB, [other], **READY)["status"], "duplicate")
+        result = preview_legacy_real_miles(JOB, [other], **READY)
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["legacy_award_miles"], 0)
+
+    def test_verified_shared_credited_journey_is_not_duplicated(self):
+        incoming = {**JOB, "shared_journey_id": "verified-t1",
+                    "shared_id_verified": True}
+        other = {**JOB, "provider": "trucksbook", "credited": True,
+                 "shared_journey_id": "verified-t1", "shared_id_verified": True}
+        result = preview_legacy_real_miles(incoming, [other], **READY)
+        self.assertEqual(result["status"], "duplicate")
+        self.assertEqual(result["legacy_award_miles"], 0)
 
 
 if __name__ == "__main__":
