@@ -35,6 +35,9 @@ class VerifiedJobCandidateTests(unittest.TestCase):
         self.assertEqual(candidate["mileage_type"], "real")
         self.assertFalse(candidate["eligible_for_award"])
 
+    def test_unknown_event_tag_requires_review(self):
+        self.assertIsNone(self.candidate({**BASE, "event_tag": "unrecognized"}))
+
     def test_wotr_race_not_reclassified_as_real(self):
         self.assertIsNone(self.candidate({**BASE, "event_tag": "WoTr", "stats_type": "race_miles"}))
 
