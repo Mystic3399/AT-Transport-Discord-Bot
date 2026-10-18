@@ -1,0 +1,38 @@
+{
+  "fixture_kind": "owner-supplied redacted staging observation summary",
+  "warning": "This is not a provider API export. Discord tracker content and staging logs are not authoritative provider job records.",
+  "authoritative_provider_records_retrieved": false,
+  "verified_shared_journey_id": null,
+  "trucksbook": {
+    "provider_job_id": "68093174",
+    "driver_label": "redacted",
+    "origin": "Paris",
+    "destination": "Lille",
+    "cargo": "Pet Food",
+    "truck": "Scania S",
+    "distance": "176",
+    "distance_unit": "miles",
+    "classification": "real",
+    "provider_delivery_timestamp": null,
+    "provider_account_ownership_verified": false,
+    "staging_received_at_utc": "2026-10-18T20:29:42.437344Z",
+    "staging_result": "quarantined_no_award"
+  },
+  "trucky": {
+    "provider_job_id": "27848310",
+    "driver_label": "redacted",
+    "origin": "Paris",
+    "destination": "Lille",
+    "cargo": "Pet Food",
+    "cargo_weight_tonnes": "21",
+    "truck": "Scania S",
+    "distance": "176",
+    "distance_unit": "miles",
+    "classification": "real",
+    "started_at_utc": "2026-10-18T20:17:00Z",
+    "completed_at_utc_approx": "2026-10-18T20:29:00Z",
+    "signed_event_identity_check": "steam_match_yes_read_only",
+    "authoritative_job_record_retrieved": false,
+    "staging_result": "receipt_recorded_no_award"
+  }
+}
