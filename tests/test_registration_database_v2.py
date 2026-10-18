@@ -107,6 +107,40 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await profiles.list_trucky_receipt_audit(self.pool, "bad-id")
 
+    async def test_authenticated_trucky_account_id_requires_verified_steam_link_chain(self):
+        user = 991234567890123466
+        account = "991234566"
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO unified_driver_profiles(discord_user_id) VALUES($1)
+            """, user)
+            await conn.execute("""
+                INSERT INTO unified_steam_links(discord_user_id,steam_id64,verified_at)
+                VALUES($1,'76561198012345678',NOW())
+            """, user)
+            await conn.execute("""
+                INSERT INTO unified_provider_claims
+                    (discord_user_id,provider,provider_account_id,
+                     membership_confirmed,ownership_confirmed,status)
+                VALUES($1,'trucky',$2,TRUE,TRUE,'approved')
+            """, user, account)
+            await conn.execute("""
+                INSERT INTO unified_provider_links
+                    (provider,provider_account_id,discord_user_id,verified_at)
+                VALUES('trucky',$2,$1,NOW())
+            """, user, account)
+
+        self.assertEqual(
+            (await profiles.verify_trucky_account_against_verified_links(
+                self.pool, account))["status"],
+            "verified_trucky_account_link_matches_steam",
+        )
+        self.assertEqual(
+            (await profiles.verify_trucky_account_against_verified_links(
+                self.pool, "991234567"))["status"],
+            "claim_missing",
+        )
+
     async def test_repeated_job_with_changed_delivery_time_is_rejected(self):
         from datetime import datetime, timedelta, timezone
         user = 991234567890123490

@@ -6594,14 +6594,13 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
         "requested_job_found": lookup["status"] == "found",
         "lookup_status": lookup["status"],
         "page_record_count": lookup["record_count"],
-        "job_id_field_paths": lookup["id_paths"],
         "signed_hmac_receipt_rows_returned": len(receipts),
         "receipt_matches_requested_provider_job_id": bool(receipts),
         "signed_receipts": [
-            {"receipt_id": row["receipt_id"], "event_type": row["event_type"],
+            {"event_type": row["event_type"],
              "received_at": row["received_at"].isoformat(),
              "review_status": row["review_status"]}
-            for row in receipts[:5]
+            for row in receipts[:3]
         ],
         "identity_verification": "not_attempted",
         "mileage_awarded": False,
@@ -6611,28 +6610,31 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
     record = lookup.get("record")
     if record is not None:
         job_report = trucky_jobs_api_v2.safe_job_record_report(record)
-        safe_names = ("id", "status", "complete", "deliver", "timestamp", "date",
-                      "time", "distance", "miles", "kilomet", "unit", "classif",
-                      "real", "race", "game", "origin", "destination", "cargo", "truck")
-        report["provider_job_fields"] = {
-            "field_types": {
-                path: field_type for path, field_type in job_report["field_types"].items()
-                if any(term in path.lower() for term in safe_names)
-            },
-            "safe_delivery_fields": dict(list(
-                job_report["safe_delivery_fields"].items()
-            )[:12]),
-        }
         identity_fields = trucky_jobs_api_v2.inspect_job_identity_fields(record)
-        report["identity_field_presence"] = identity_fields["safe_report"]
+        # Keep the Discord response deliberately compact so the evidence status
+        # cannot be truncated behind a full schema dump.
+        safe_delivery = job_report["safe_delivery_fields"]
+        preferred_terms = (
+            "status", "completed_at", "distance_unit", "driven_distance",
+            "real_driven_distance", "mileage_type", "race", "real",
+            "game_id", "game_mode", "origin_city_name", "destination_city_name",
+        )
+        report["provider_job_facts"] = {
+            key: value for key, value in safe_delivery.items()
+            if any(term in key.lower() for term in preferred_terms)
+        }
+        report["provider_identity_evidence"] = {
+            "driver_account_id_unambiguous": identity_fields["safe_report"].get(
+                "driver_account_id_unambiguous", False),
+            "steam_identity_present_in_job_api": identity_fields["safe_report"].get(
+                "valid_steam_identity_present", False),
+        }
         if not receipts:
             report["identity_verification"] = "matching_signed_receipt_missing"
         elif not all(str(row["event_type"]) == "job_completed" for row in receipts):
             report["identity_verification"] = "signed_receipt_event_type_mismatch"
         elif identity_fields["account_id"] is None:
             report["identity_verification"] = "api_driver_account_id_missing_or_ambiguous"
-        elif identity_fields["steam_id"] is None:
-            report["identity_verification"] = "api_steam_identity_missing_or_ambiguous"
         else:
             report["signed_event_job_id_matches_api_job"] = True
             try:
@@ -6641,9 +6643,8 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
                 if member is None:
                     report["identity_verification"] = "not_active_company_member"
                 else:
-                    identity = await unified_driver_profiles.verify_trucky_event_against_verified_links(
-                        db_pool, identity_fields["account_id"], identity_fields["steam_id"]
-                    )
+                    identity = await unified_driver_profiles.verify_trucky_account_against_verified_links(
+                        db_pool, identity_fields["account_id"])
                     report["identity_verification"] = identity["status"]
             except Exception as error:
                 report["identity_verification"] = (
@@ -6651,8 +6652,6 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
                     else "verification_unavailable"
                 )
     rendered = json.dumps(report, sort_keys=True, default=str)
-    if len(rendered) > 1700:
-        rendered = rendered[:1680] + "…"
     await ctx.reply(
         "Read-only authenticated Trucky job audit (IDs and personal fields redacted):\n"
         + rendered,

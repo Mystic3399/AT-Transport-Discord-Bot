@@ -5,6 +5,7 @@ import os
 import pathlib
 import sys
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -56,8 +57,9 @@ class StagingExactJobAuditCommandTests(unittest.IsolatedAsyncioTestCase):
         api = SimpleNamespace(
             TruckyJobLookupUnavailable=type("TruckyJobLookupUnavailable", (Exception,), {}),
             fetch_trucky_jobs_page=AsyncMock(return_value={"data": [{
-                "id": 27848310, "status": "completed", "distance_km": 283.24,
-                "mileage_type": "real", "driver": {"id": 999, "name": "PRIVATE"},
+                "id": 27848310, "status": "completed", "distance_unit": "mi",
+                "driven_distance": 176, "mileage_type": "real",
+                "driver": {"id": 999, "name": "PRIVATE"},
             }]}),
         )
         # Use the actual pure helper implementation while keeping API transport mocked.
@@ -66,21 +68,39 @@ class StagingExactJobAuditCommandTests(unittest.IsolatedAsyncioTestCase):
         api.safe_job_record_report = trucky_jobs_api_v2.safe_job_record_report
         api.inspect_job_identity_fields = trucky_jobs_api_v2.inspect_job_identity_fields
         profile = SimpleNamespace(
-            list_trucky_receipt_audit=AsyncMock(return_value=[]),
+            list_trucky_receipt_audit=AsyncMock(return_value=[{
+                "event_type": "job_completed",
+                "received_at": datetime(2026, 10, 18, 20, 17, tzinfo=timezone.utc),
+                "review_status": "needs_api_verification",
+            }]),
+            verify_trucky_account_against_verified_links=AsyncMock(return_value={
+                "status": "verified_trucky_account_link_matches_steam",
+            }),
         )
+        membership = SimpleNamespace(verify_member=AsyncMock(return_value="redacted"),
+                                     MembershipUnavailable=type("MembershipUnavailable", (Exception,), {}))
         with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES",
                                      "AT_V2_STAGING_OWNER_DISCORD_ID": str(OWNER_ID)}), \
              patch.dict(sys.modules, {"trucky_jobs_api_v2": api,
-                                      "unified_driver_profiles": profile}):
+                                      "unified_driver_profiles": profile,
+                                      "trucky_membership_adapter": membership}):
             await command()(ctx, "27848310")
         response = ctx.reply.await_args.args[0]
         self.assertIn('"requested_job_found": true', response)
+        self.assertIn('"identity_verification": "verified_trucky_account_link_matches_steam"', response)
+        self.assertIn('"signed_event_job_id_matches_api_job": true', response)
         self.assertIn('"mileage_awarded": false', response)
         self.assertIn('"registration_changed": false', response)
         self.assertIn('"roles_changed": false', response)
+        self.assertLess(len(response), 1800)
         self.assertNotIn("PRIVATE", response)
         self.assertNotIn('"driver":{"id":999', response)
         profile.list_trucky_receipt_audit.assert_awaited_once()
+        profile.verify_trucky_account_against_verified_links.assert_awaited_once()
+        self.assertEqual(
+            profile.verify_trucky_account_against_verified_links.await_args.args[1],
+            "999",
+        )
         names = {n.id for n in ast.walk(NODE) if isinstance(n, ast.Name)}
         forbidden = {"award_staging_miles", "record_normalized_provider_job",
                      "set_driver_mileage", "sync_unified_driver_roles",
