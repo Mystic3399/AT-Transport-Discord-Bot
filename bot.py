@@ -6556,6 +6556,96 @@ async def staging_trucky_jobs_probe(ctx, page: int = 1):
     )
 
 
+@bot.command(name="stagingtruckyjobaudit")
+async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
+    """Read-only exact-job lookup correlated to signed staging receipts."""
+    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+        await ctx.reply("This diagnostic is available only in isolated A&T staging.", mention_author=False)
+        return
+    if ctx.guild is None or ctx.guild.id != GUILD_ID:
+        await ctx.reply("Use this diagnostic in the configured A&T staging server.", mention_author=False)
+        return
+    if not is_authorised_staging_owner(ctx.author.id):
+        await ctx.reply("Only the configured staging owner can run this diagnostic.", mention_author=False)
+        return
+    if db_pool is None:
+        await ctx.reply("The isolated staging database is unavailable; no data was changed.", mention_author=False)
+        return
+    if (not isinstance(job_id, str) or not job_id.isascii()
+            or not job_id.isdecimal() or int(job_id) <= 0):
+        await ctx.reply("Provide a valid numeric Trucky job ID. No data was changed.", mention_author=False)
+        return
+
+    import trucky_jobs_api_v2
+    import unified_driver_profiles
+    try:
+        payload = await trucky_jobs_api_v2.fetch_trucky_jobs_page(page=page)
+        lookup = trucky_jobs_api_v2.find_job_record(payload, job_id)
+        receipts = await unified_driver_profiles.list_trucky_receipt_audit(db_pool, job_id)
+    except (ValueError, trucky_jobs_api_v2.TruckyJobLookupUnavailable) as error:
+        await ctx.reply(f"Read-only Trucky audit unavailable: {error}. No data was changed.", mention_author=False)
+        return
+    except Exception as error:
+        print(f"STAGING TRUCKY JOB AUDIT ERROR: {type(error).__name__}", flush=True)
+        await ctx.reply("Read-only Trucky audit failed. No data was changed.", mention_author=False)
+        return
+
+    report = {
+        "requested_job_found": lookup["status"] == "found",
+        "lookup_status": lookup["status"],
+        "page_record_count": lookup["record_count"],
+        "job_id_field_paths": lookup["id_paths"],
+        "signed_hmac_receipt_count": len(receipts),
+        "signed_receipts": [
+            {"receipt_id": row["receipt_id"], "event_type": row["event_type"],
+             "received_at": row["received_at"].isoformat(),
+             "review_status": row["review_status"]}
+            for row in receipts
+        ],
+        "identity_verification": "not_attempted",
+        "mileage_awarded": False,
+        "registration_changed": False,
+        "roles_changed": False,
+    }
+    record = lookup.get("record")
+    if record is not None:
+        report["provider_job_fields"] = trucky_jobs_api_v2.safe_job_record_report(record)
+        if receipts:
+            # The signed receipt parser is the only accepted contract for
+            # comparing provider-owned Steam identity to the approved link.
+            try:
+                from trucky_signed_webhook_v2 import extract_trucky_identity_evidence
+                evidence = extract_trucky_identity_evidence(record)
+                import trucky_membership_adapter
+                member = await trucky_membership_adapter.verify_member(
+                    evidence["trucky_account_id"]
+                )
+                if member is None:
+                    report["identity_verification"] = "not_active_company_member"
+                else:
+                    identity = await unified_driver_profiles.verify_trucky_event_against_verified_links(
+                        db_pool, evidence["trucky_account_id"], evidence["steam_id64"]
+                    )
+                    report["identity_verification"] = identity["status"]
+                    report["signed_event_job_id_matches_api_job"] = (
+                        all(str(row["event_type"]) == "job_completed" for row in receipts)
+                    )
+            except Exception as error:
+                # Emit only the bounded category; never include provider data.
+                report["identity_verification"] = (
+                    "membership_unavailable" if type(error).__name__ == "MembershipUnavailable"
+                    else "api_record_schema_not_sufficient"
+                )
+    rendered = json.dumps(report, sort_keys=True, default=str)
+    if len(rendered) > 1700:
+        rendered = rendered[:1680] + "…"
+    await ctx.reply(
+        "Read-only authenticated Trucky job audit (IDs and personal fields redacted):\n"
+        + rendered,
+        mention_author=False,
+    )
+
+
 @bot.command(name="confirmprovider")
 async def confirm_unified_provider(ctx, provider: str = None, ownership_evidence: str = None):
     """Final staff confirmation after independent ownership evidence review."""

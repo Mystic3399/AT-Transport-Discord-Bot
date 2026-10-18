@@ -147,6 +147,28 @@ async def record_trucky_webhook_receipt(pool, payload_sha256, event_type, candid
             payload_sha256,
         )
 
+async def list_trucky_receipt_audit(pool, candidate_job_id, *, limit=20):
+    """Return minimal HMAC-verified receipt metadata for a job ID.
+
+    Payload digests, bodies, driver identities and mileage are deliberately
+    omitted so this read-only audit can be reported safely.
+    """
+    if (type(candidate_job_id) not in (str, int)
+            or not str(candidate_job_id).isdecimal()
+            or int(candidate_job_id) <= 0):
+        raise ValueError("Invalid candidate Trucky job ID")
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("Invalid receipt limit")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT receipt_id,event_type,received_at,review_status
+              FROM unified_trucky_webhook_receipts
+             WHERE candidate_job_id=$1
+             ORDER BY received_at DESC
+             LIMIT $2
+        """, str(candidate_job_id), limit)
+    return [dict(row) for row in rows]
+
 async def backfill_trucksbook_profiles(pool):
     """Idempotent identity backfill; no legacy table changes."""
     async with pool.acquire() as conn:

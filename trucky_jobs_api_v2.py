@@ -86,3 +86,83 @@ def inspect_jobs_response_shape(payload):
         "first_record_nested_types": nested_types,
         "verified_delivery": False,
     }
+
+
+def find_job_record(payload, job_id):
+    """Find exactly one record for a requested numeric ID without assuming
+    unverified response field names. Returns paths and the private record to
+    the caller; callers must never serialize the record itself.
+    """
+    if type(job_id) not in (str, int) or not str(job_id).isdecimal() or int(job_id) <= 0:
+        raise ValueError("Invalid Trucky job ID")
+    records = payload if isinstance(payload, list) else (
+        payload.get("data") if isinstance(payload, dict) else None
+    )
+    if not isinstance(records, list):
+        return {"status": "unsupported_response_shape", "record_count": None,
+                "match_count": 0, "record": None, "id_paths": []}
+
+    def matching_paths(value, path=()):
+        found = []
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                normalized = "".join(c for c in key_text.lower() if c.isalnum())
+                if (normalized.endswith("id") or "job" in normalized) and type(item) in (str, int) and str(item) == str(job_id):
+                    found.append(".".join((*path, key_text)))
+                found.extend(matching_paths(item, (*path, key_text)))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                found.extend(matching_paths(item, (*path, str(index))))
+        return found
+
+    matches = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        paths = matching_paths(record)
+        if paths:
+            matches.append((record, paths))
+    return {
+        "status": "found" if len(matches) == 1 else "not_found" if not matches else "ambiguous",
+        "record_count": len(records),
+        "match_count": len(matches),
+        "record": matches[0][0] if len(matches) == 1 else None,
+        "id_paths": matches[0][1] if len(matches) == 1 else [],
+    }
+
+
+def safe_job_record_report(record):
+    """Redact identities while exposing verified job facts and schema names.
+
+    Values are emitted only for non-identity fields whose names clearly
+    describe delivery status, timestamps, distance/classification, or game.
+    The original record is never returned.
+    """
+    if not isinstance(record, dict):
+        raise ValueError("Job record required")
+    facts = {}
+    types = {}
+    safe_terms = ("status", "complete", "deliver", "timestamp", "date", "time",
+                  "distance", "miles", "kilomet", "classif", "game")
+
+    def visit(value, path=()):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                dotted = ".".join((*path, key_text))
+                types[dotted] = type(item).__name__
+                normalized = "".join(c for c in key_text.lower() if c.isalnum())
+                classification_field = (
+                    normalized in {"real", "race", "type", "mileagetype", "jobtype"}
+                    or normalized.startswith(("realmiles", "racemiles"))
+                )
+                if (any(term in normalized for term in safe_terms) or classification_field) and type(item) in (str, int, float, bool):
+                    facts[dotted] = item
+                visit(item, (*path, key_text))
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, (*path, str(index)))
+
+    visit(record)
+    return {"field_types": types, "safe_delivery_fields": facts}
