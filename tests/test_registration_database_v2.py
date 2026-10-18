@@ -144,6 +144,10 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_staging_trucky_receipt_review_transition_is_gated_and_idempotent(self):
         from unittest.mock import patch
         digest = hashlib.sha256(b"verified staging receipt review").hexdigest()
+        async with self.pool.acquire() as conn:
+            job_count_before = await conn.fetchval(
+                "SELECT COUNT(*) FROM unified_provider_job_events"
+            )
         await profiles.record_trucky_webhook_receipt(
             self.pool, digest, "job_completed", "9912345678"
         )
@@ -179,7 +183,7 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt["payload_sha256"], digest)
         self.assertEqual(receipt["candidate_job_id"], "9912345678")
         self.assertEqual(receipt["review_status"], "verified")
-        self.assertEqual(job_count, 0)
+        self.assertEqual(job_count, job_count_before)
 
     async def test_staging_trucky_receipt_review_is_disabled_outside_staging(self):
         from unittest.mock import patch
