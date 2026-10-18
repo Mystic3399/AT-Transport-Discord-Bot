@@ -2814,7 +2814,32 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_message(message):
+    import os
+    staging = os.getenv("AT_V2_ISOLATED_STAGING") == "YES"
     message_guild = getattr(message, "guild", None)
+    webhook_id = getattr(message, "webhook_id", None)
+    if staging and webhook_id is not None:
+        from trucksbook_webhook_auth_v2 import inspect_staging_trucksbook_delivery
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        observed = inspect_staging_trucksbook_delivery(
+            webhook_id=webhook_id,
+            guild_id=getattr(message_guild, "id", None),
+            channel_id=channel_id,
+            configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
+            configured_guild_id=GUILD_ID,
+            configured_channel_id=os.getenv("TRUCKSBOOK_STAGING_CHANNEL_ID", "").strip(),
+        )
+        embeds = getattr(message, "embeds", None) or []
+        print(
+            "STAGING WEBHOOK OBSERVED "
+            f"source={'trucksbook_configured' if observed['source_match'] else 'unmatched'} "
+            f"source_match={'yes' if observed['source_match'] else 'no'} "
+            f"guild_match={'yes' if observed['guild_match'] else 'no'} "
+            f"channel_match={observed['channel_status']} "
+            f"embed_count={len(embeds)} "
+            f"route={'shadow_receipt' if observed['allowed'] else 'rejected'}",
+            flush=True,
+        )
     if message_guild is not None and message_guild.id != GUILD_ID:
         return
     if message_guild is None and getattr(message, "webhook_id", None) is None:
@@ -2845,17 +2870,24 @@ async def on_message(message):
         except Exception as error:
             print("TRUCKY STAGING OBSERVATION ERROR: %s" % type(error).__name__)
     if message.webhook_id is not None:
-        import os
         from trucksbook_webhook_auth_v2 import is_authorized_trucksbook_webhook
-        staging = os.getenv("AT_V2_ISOLATED_STAGING") == "YES"
-        allowed = is_authorized_trucksbook_webhook(
-            message.webhook_id,
-            isolated_staging=staging,
-            configured_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
-        )
+        if staging:
+            allowed = observed["allowed"]
+        else:
+            allowed = is_authorized_trucksbook_webhook(
+                message.webhook_id,
+                isolated_staging=False,
+                configured_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
+            )
         if not allowed:
             if staging:
-                print("STAGING TRUCKSBOOK WEBHOOK REJECTED: source not configured")
+                print(
+                    "STAGING TRUCKSBOOK WEBHOOK REJECTED "
+                    f"source_match={'yes' if observed['source_match'] else 'no'} "
+                    f"guild_match={'yes' if observed['guild_match'] else 'no'} "
+                    f"channel_match={observed['channel_status']}",
+                    flush=True,
+                )
             return
         if staging:
             # Persist a redacted source receipt in staging's isolated database,
