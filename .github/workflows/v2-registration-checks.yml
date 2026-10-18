@@ -57,7 +57,7 @@ jobs:
                           WHERE schemaname='public' AND tablename LIKE 'unified_%'
                             AND tablename NOT LIKE 'unified_staging_%'
                       """)
-                      assert len(names) == 10, names
+                      assert len(names) == 12, names
               finally:
                   await conn.close()
           asyncio.run(main())
