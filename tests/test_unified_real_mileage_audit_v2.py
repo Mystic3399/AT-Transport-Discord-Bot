@@ -55,4 +55,5 @@ def test_same_provider_canonical_collision_excluded():
     assert result["confirmed_unique_real_miles"] == Decimal("30")
     assert result["unique_job_count"] == 1
     assert result["invalid_job_count"] == 1
+    assert result["ambiguous_canonical_key_count"] == 1
     assert result["auto_award_allowed"] is False
