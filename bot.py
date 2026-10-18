@@ -2765,6 +2765,8 @@ async def on_member_join(member):
 @bot.event
 async def on_member_update(before, after):
     """Keep decorative divider roles aligned with functional roles."""
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
     before_role_ids = {role.id for role in before.roles}
     after_role_ids = {role.id for role in after.roles}
     booster_changed = before.premium_since != after.premium_since
@@ -2781,6 +2783,8 @@ async def on_member_update(before, after):
 @bot.event
 async def on_member_remove(member):
     """Retain Hall of Fame history and show the member as a former driver."""
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
     if member.guild.id != GUILD_ID or db_pool is None:
         return
     async with db_pool.acquire() as connection:
