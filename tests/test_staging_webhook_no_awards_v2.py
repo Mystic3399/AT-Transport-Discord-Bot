@@ -33,7 +33,7 @@ class Embed:
             "description": "",
             "fields": [{
                 "name": "Details",
-                "value": "Accepted distance: 125 mil\\nStatistics: Real, WoTr",
+                "value": "Accepted distance: 125 mil\nStatistics: Real, WoTr",
             }],
         }
 
