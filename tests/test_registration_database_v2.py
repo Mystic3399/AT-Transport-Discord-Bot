@@ -92,6 +92,21 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt["review_status"], "needs_api_verification")
         self.assertEqual(awards, 0)
 
+    async def test_receipt_audit_returns_only_bounded_safe_fields(self):
+        digest = hashlib.sha256(b"audit receipt bytes").hexdigest()
+        await profiles.record_trucky_webhook_receipt(
+            self.pool, digest, "job_completed", "991234561"
+        )
+        rows = await profiles.list_trucky_receipt_audit(self.pool, "991234561")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event_type"], "job_completed")
+        self.assertEqual(rows[0]["review_status"], "needs_api_verification")
+        self.assertTrue(rows[0]["received_at"].tzinfo is not None)
+        self.assertNotIn("payload_sha256", rows[0])
+        self.assertNotIn("source_payload", rows[0])
+        with self.assertRaises(ValueError):
+            await profiles.list_trucky_receipt_audit(self.pool, "bad-id")
+
     async def test_repeated_job_with_changed_delivery_time_is_rejected(self):
         from datetime import datetime, timedelta, timezone
         user = 991234567890123490
