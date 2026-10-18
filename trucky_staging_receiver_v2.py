@@ -25,7 +25,19 @@ _IDENTITY_LOG_OUTCOMES = frozenset({
 })
 
 
-def _log_trucky_identity_outcome(status, *, receipt_recorded, active_member=False):
+_IDENTITY_REASON_CODES = frozenset({
+    "provider_steam_evidence_missing_or_invalid",
+    "claim_missing", "claim_missing_or_inactive", "claim_account_mismatch",
+    "steam_link_missing", "steam_identity_mismatch", "receipt_missing",
+    "receipt_digest_invalid", "job_evidence_missing", "untrusted_evidence",
+    "invalid_account_id", "completion_time_invalid", "approved_link_inconsistent",
+    "job_outside_claim_window", "different_account_already_linked",
+    "account_owned_by_another_driver", "identity_verification_rejected",
+})
+
+
+def _log_trucky_identity_outcome(status, *, receipt_recorded, active_member=False,
+                                 identity_reason=None):
     """Emit only an allowlisted outcome; never log provider or Steam identifiers."""
     outcome = status if status in _IDENTITY_LOG_OUTCOMES else "identity_not_verified"
     ownership_verified = outcome in {
@@ -37,7 +49,8 @@ def _log_trucky_identity_outcome(status, *, receipt_recorded, active_member=Fals
         f"outcome={outcome} "
         f"receipt_recorded={'yes' if receipt_recorded else 'no'} "
         f"active_member={'yes' if active_member else 'no'} "
-        f"steam_match={'yes' if ownership_verified else 'no'} "
+        f"steam_match={'yes' if ownership_verified else 'no' if identity_reason == 'steam_identity_mismatch' else 'unknown'} "
+        f"identity_reason={identity_reason if identity_reason in _IDENTITY_REASON_CODES else 'none'} "
         "mileage_awarded=no",
         flush=True,
     )
@@ -87,6 +100,7 @@ async def receive_trucky_webhook(request):
             pool, hashlib.sha256(raw).hexdigest(), verified["event"], candidate
         )
         link_status = "pending_identity_verification"
+        identity_reason = None
         active_member = False
         if evidence is not None:
             import trucky_membership_adapter
@@ -122,20 +136,27 @@ async def receive_trucky_webhook(request):
                             link_status = "identity_linked_role_sync_pending"
             except trucky_membership_adapter.MembershipUnavailable:
                 link_status = "membership_check_unavailable"
-            except ValueError:
-                # Account/Steam mismatch, absent or expired claim, replay, and
-                # ownership conflicts all remain unlinked and unactioned.
+            except ValueError as verification_error:
+                # Return only a bounded reason code; provider and Steam IDs are
+                # deliberately excluded from both logs and HTTP responses.
                 link_status = "identity_not_verified"
+                identity_reason = getattr(
+                    verification_error, "code", "identity_verification_rejected"
+                )
+        else:
+            identity_reason = "provider_steam_evidence_missing_or_invalid"
         _log_trucky_identity_outcome(
             link_status,
             receipt_recorded=receipt_id is not None,
             active_member=active_member,
+            identity_reason=identity_reason,
         )
         return web.json_response({
             "status": "authenticated_pending_api_verification",
             "receipt_recorded": receipt_id is not None,
             "mileage_awarded": False,
             "identity_status": link_status,
+            "identity_reason": identity_reason if identity_reason in _IDENTITY_REASON_CODES else None,
         }, status=202)
     # Isolated schema-capture mode remains stateless.
     return web.json_response({"status": "authenticated_pending_schema_verification"})

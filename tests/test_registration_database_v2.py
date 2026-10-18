@@ -269,13 +269,14 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 provider_job_id=job_id, payload_sha256=receipt,
                 completed_at=datetime.now(timezone.utc),
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaises(profiles.TruckyIdentityVerificationError) as mismatch:
             await profiles.auto_approve_trucky_if_steam_matches(
                 self.pool, user, "209123", second_steam,
                 trusted_provider_source=True, membership_confirmed=True,
                 provider_job_id=job_id, payload_sha256=receipt,
                 completed_at=datetime.now(timezone.utc),
             )
+        self.assertEqual(mismatch.exception.code, "steam_identity_mismatch")
         async with self.pool.acquire() as conn:
             status = await conn.fetchval(
                 "SELECT status FROM unified_driver_profiles WHERE discord_user_id=$1", user
@@ -325,6 +326,21 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             completed_at=datetime.now(timezone.utc),
         )
         self.assertEqual(linked_user, other)
+
+    async def test_trucky_link_requires_verified_steam_before_comparing(self):
+        user = 991234567890123470
+        await profiles.begin_registration(self.pool, user, 991234567890123471)
+        await profiles.submit_provider_claim(self.pool, user, "trucky", "209125", "Tester Three")
+        digest = hashlib.sha256(b"trucky-job-no-steam-link").hexdigest()
+        await profiles.record_trucky_webhook_receipt(self.pool, digest, "job_completed", "987654330")
+        with self.assertRaises(profiles.TruckyIdentityVerificationError) as missing:
+            await profiles.auto_approve_trucky_if_steam_matches(
+                self.pool, user, "209125", "76561198000000000",
+                trusted_provider_source=True, membership_confirmed=True,
+                provider_job_id="987654330", payload_sha256=digest,
+                completed_at=datetime.now(timezone.utc),
+            )
+        self.assertEqual(missing.exception.code, "steam_link_missing")
 
 
 if __name__ == "__main__":

@@ -3,6 +3,16 @@
 This module intentionally does not alter legacy TrucksBook mileage, ranks, jobs,
 or driver_links. Run only after a reviewed backup and staged verification.
 """
+
+
+class TruckyIdentityVerificationError(ValueError):
+    """Safe machine-readable failure category; never includes identifiers."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS unified_driver_profiles (
  discord_user_id BIGINT PRIMARY KEY,
@@ -407,16 +417,17 @@ async def auto_approve_trucky_if_steam_matches(
     import steam_openid_v2
     import re
     from datetime import datetime, timezone
+
     if not membership_confirmed or not trusted_provider_source:
-        raise ValueError("Authenticated Trucky membership and Steam evidence required")
+        raise TruckyIdentityVerificationError("untrusted_evidence")
     if not isinstance(account_id, str) or not account_id.isdecimal():
-        raise ValueError("Invalid Trucky account ID")
+        raise TruckyIdentityVerificationError("invalid_account_id")
     if not isinstance(provider_job_id, str) or not provider_job_id.isdecimal():
-        raise ValueError("Signed Trucky job evidence is required")
+        raise TruckyIdentityVerificationError("job_evidence_missing")
     if not isinstance(payload_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", payload_sha256):
-        raise ValueError("Signed Trucky receipt is required")
+        raise TruckyIdentityVerificationError("receipt_digest_invalid")
     if not isinstance(completed_at, datetime) or completed_at.tzinfo is None or completed_at.utcoffset() is None:
-        raise ValueError("A timezone-aware Trucky completion time is required")
+        raise TruckyIdentityVerificationError("completion_time_invalid")
     completed_at = completed_at.astimezone(timezone.utc)
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -429,7 +440,7 @@ async def auto_approve_trucky_if_steam_matches(
                     FOR UPDATE
                 """, account_id)
                 if claim is None:
-                    raise ValueError("No pending Trucky registration claim")
+                    raise TruckyIdentityVerificationError("claim_missing")
                 discord_user_id = claim["discord_user_id"]
             else:
                 claim = await conn.fetchrow("""
@@ -439,17 +450,19 @@ async def auto_approve_trucky_if_steam_matches(
                     WHERE discord_user_id=$1 AND provider='trucky' FOR UPDATE
                 """, discord_user_id)
             if claim is None or claim["status"] not in ("pending", "approved"):
-                raise ValueError("No pending Trucky registration claim")
+                raise TruckyIdentityVerificationError("claim_missing_or_inactive")
             if claim["provider_account_id"] != account_id:
-                raise ValueError("Trucky account differs from pending claim")
+                raise TruckyIdentityVerificationError("claim_account_mismatch")
             steam = await conn.fetchval("""
                 SELECT steam_id64 FROM unified_steam_links
                 WHERE discord_user_id=$1 AND verified_at IS NOT NULL
             """, discord_user_id)
+            if steam is None:
+                raise TruckyIdentityVerificationError("steam_link_missing")
             if not steam_openid_v2.steam_ids_match(
                 steam, provider_steam_id, trusted_provider_source
             ):
-                raise ValueError("Steam identity mismatch or unverified Steam account")
+                raise TruckyIdentityVerificationError("steam_identity_mismatch")
             receipt_exists = await conn.fetchval("""
                 SELECT EXISTS(
                     SELECT 1 FROM unified_trucky_webhook_receipts
@@ -458,7 +471,7 @@ async def auto_approve_trucky_if_steam_matches(
                 )
             """, payload_sha256, provider_job_id)
             if not receipt_exists:
-                raise ValueError("Signed Trucky job receipt is not recorded")
+                raise TruckyIdentityVerificationError("receipt_missing")
             if claim["status"] == "approved":
                 existing = await conn.fetchval("""
                     SELECT EXISTS(SELECT 1 FROM unified_provider_links
@@ -466,7 +479,7 @@ async def auto_approve_trucky_if_steam_matches(
                       AND discord_user_id=$2 AND verified_at IS NOT NULL)
                 """, account_id, discord_user_id)
                 if not existing:
-                    raise ValueError("Approved Trucky link is inconsistent")
+                    raise TruckyIdentityVerificationError("approved_link_inconsistent")
                 return discord_user_id
             valid_window = await conn.fetchval("""
                 SELECT $1::TIMESTAMPTZ >= $2::TIMESTAMPTZ
@@ -474,13 +487,13 @@ async def auto_approve_trucky_if_steam_matches(
 
             """, completed_at, claim["submitted_at"])
             if not valid_window:
-                raise ValueError("Signed Trucky job predates registration or is in the future")
+                raise TruckyIdentityVerificationError("job_outside_claim_window")
             linked = await conn.fetchrow("""
                 SELECT provider_account_id FROM unified_provider_links
                 WHERE discord_user_id=$1 AND provider='trucky' FOR UPDATE
             """, discord_user_id)
             if linked and linked["provider_account_id"] != account_id:
-                raise ValueError("Different Trucky account already linked")
+                raise TruckyIdentityVerificationError("different_account_already_linked")
             result = await conn.execute("""
                 INSERT INTO unified_provider_links
                     (provider,provider_account_id,discord_user_id,
@@ -489,7 +502,7 @@ async def auto_approve_trucky_if_steam_matches(
                 ON CONFLICT(provider,provider_account_id) DO NOTHING
             """, account_id,discord_user_id,claim["provider_display_name"])
             if result != "INSERT 0 1":
-                raise ValueError("Trucky account already claimed by another driver")
+                raise TruckyIdentityVerificationError("account_owned_by_another_driver")
             await conn.execute("""
                 UPDATE unified_provider_claims
                 SET status='approved',membership_confirmed=TRUE,

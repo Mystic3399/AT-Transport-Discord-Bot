@@ -103,7 +103,8 @@ class IntegratedReceiverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await response.json(), {
             "status": "authenticated_pending_api_verification",
             "receipt_recorded": True, "mileage_awarded": False,
-            "identity_status": "pending_identity_verification"})
+            "identity_status": "pending_identity_verification",
+            "identity_reason": "provider_steam_evidence_missing_or_invalid"})
         digest, event, candidate = self.pool.connection.args
         self.assertEqual(digest, hashlib.sha256(body).hexdigest())
         self.assertEqual(event, "job_completed")
@@ -141,7 +142,7 @@ class IntegratedReceiverTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(
                     "TRUCKY_IDENTITY_VERIFICATION event=job_completed "
                     "outcome=identity_linked receipt_recorded=yes "
-                    "active_member=yes steam_match=yes mileage_awarded=no",
+                    "active_member=yes steam_match=yes identity_reason=none mileage_awarded=no",
                     safe_log,
                 )
                 for private_value in (
@@ -150,6 +151,7 @@ class IntegratedReceiverTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(private_value, safe_log)
                 self.assertEqual(response.status, 202)
                 self.assertEqual((await response.json())["identity_status"], "identity_linked")
+                self.assertIsNone((await response.json())["identity_reason"])
             finally:
                 await client.close()
             roster.assert_awaited_once_with("123456")
@@ -157,6 +159,31 @@ class IntegratedReceiverTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(link.await_args.kwargs["trusted_provider_source"])
             self.assertTrue(link.await_args.kwargs["membership_confirmed"])
             callback.assert_awaited_once_with(user_id)
+
+    async def test_steam_mismatch_is_distinguished_from_missing_evidence(self):
+        body = json.dumps({"event": "job_completed", "data": {
+            "id": 27805274,
+            "completed_at": "2026-10-17T20:00:00Z",
+            "driver": {"id": 123456,
+                       "steam_profile": {"steam_id": "76561198000000000"}},
+        }}).encode()
+        signature = hmac.new(b"staging-test-secret", body, hashlib.sha256).hexdigest()
+        mismatch = ValueError("safe mismatch")
+        mismatch.code = "steam_identity_mismatch"
+        with patch("trucky_membership_adapter.verify_member", new=AsyncMock(return_value="A&T Driver")), \
+             patch("unified_driver_profiles.record_trucky_webhook_receipt", new=AsyncMock(return_value=9)), \
+             patch("unified_driver_profiles.auto_approve_trucky_if_steam_matches", new=AsyncMock(side_effect=mismatch)):
+            with patch("builtins.print") as log:
+                response = await self.client.post(
+                    "/trucky/webhook", data=body,
+                    headers={"X-Signature-SHA256": signature},
+                )
+        response_body = await response.json()
+        self.assertEqual(response_body["identity_status"], "identity_not_verified")
+        self.assertEqual(response_body["identity_reason"], "steam_identity_mismatch")
+        lines = "\n".join(str(call.args[0]) for call in log.call_args_list if call.args)
+        self.assertIn("steam_match=no identity_reason=steam_identity_mismatch", lines)
+        self.assertNotIn("76561198000000000", lines)
 
     async def test_signed_completion_without_active_roster_member_stays_unlinked(self):
         body = json.dumps({"event": "job_completed", "data": {
