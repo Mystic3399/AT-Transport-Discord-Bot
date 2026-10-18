@@ -2862,21 +2862,23 @@ async def on_message(message):
             # then stop before every legacy database/role/mileage path.
             embeds = getattr(message, "embeds", None) or []
             parsed = extract_trucksbook_job_from_embed(embeds[0]) if len(embeds) == 1 else None
+            if db_pool is None:
+                print("STAGING TRUCKSBOOK RECEIPT ERROR: database_unavailable")
+                return
             receipt = {"status": "quarantined" if parsed else "malformed",
                        "duplicate": False, "delivery_count": 0}
-            if db_pool is not None:
-                try:
-                    import unified_staging_shadow_receipts_v2
-                    receipt = await unified_staging_shadow_receipts_v2.record_trucksbook_shadow_receipt(
-                        db_pool, message_id=message.id, webhook_id=message.webhook_id,
-                        configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
-                        payload=[embed.to_dict() for embed in embeds], parsed_job=parsed,
-                    )
-                except Exception as error:
-                    # Fail closed: shadow persistence failure must not fall
-                    # through into the legacy mileage path.
-                    print("STAGING TRUCKSBOOK RECEIPT ERROR: %s" % type(error).__name__)
-                    return
+            try:
+                import unified_staging_shadow_receipts_v2
+                receipt = await unified_staging_shadow_receipts_v2.record_trucksbook_shadow_receipt(
+                    db_pool, message_id=message.id, webhook_id=message.webhook_id,
+                    configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
+                    payload=[embed.to_dict() for embed in embeds], parsed_job=parsed,
+                )
+            except Exception as error:
+                # Fail closed: shadow persistence failure must not fall
+                # through into the legacy mileage path.
+                print("STAGING TRUCKSBOOK RECEIPT ERROR: %s" % type(error).__name__)
+                return
             job_id = parsed["job_id"] if parsed else "unknown"
             distance = parsed["accepted_distance"] if parsed else None
             classification = (

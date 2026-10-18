@@ -88,7 +88,11 @@ async def record_trucksbook_shadow_receipt(
         job_id = candidate_id
         stats = parsed_job.get("statistics")
         if isinstance(stats, str):
-            classification = "real" if "real" in stats.casefold() else "non_real"
+            labels = sorted(label.strip().casefold() for label in stats.split(","))
+            if labels in (["real"], ["real", "wotr"]):
+                classification = "real"
+            elif labels:
+                classification = "non_real"
         raw_distance = parsed_job.get("accepted_distance")
         if raw_distance is not None:
             try:

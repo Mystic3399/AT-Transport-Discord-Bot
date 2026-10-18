@@ -208,6 +208,7 @@ class StartupBackfillSafeModeTests(unittest.TestCase):
         backfill = AsyncMock()
         install_unified = AsyncMock()
         install_legacy = AsyncMock()
+        install_shadow = AsyncMock()
         ns.update({
             "os": os,
             "GUILD_ID": 100,
@@ -231,10 +232,13 @@ class StartupBackfillSafeModeTests(unittest.TestCase):
             "AT_V2_ISOLATED_STAGING": "YES",
             "AT_V2_TRUCKY_SCHEMA_PROBE_ON_START": "NO",
         }, clear=False):
-            asyncio.run(ns["on_ready"]())
+            with patch("unified_staging_shadow_receipts_v2.install_schema",
+                       new=install_shadow):
+                asyncio.run(ns["on_ready"]())
 
         install_legacy.assert_awaited_once_with(pool)
         install_unified.assert_awaited_once_with(pool)
+        install_shadow.assert_awaited_once_with(pool)
         backfill.assert_not_awaited()
         ns["start_public_integrations"].assert_awaited_once()
 
