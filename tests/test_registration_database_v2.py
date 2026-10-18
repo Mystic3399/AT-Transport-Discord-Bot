@@ -575,7 +575,8 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_trucksbook_shadow_receipt_is_redacted_and_idempotent(self):
         import unified_staging_shadow_receipts_v2 as shadow
         from unittest.mock import patch
-        await shadow.install_schema(self.pool)
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            await shadow.install_schema(self.pool)
         payload = [{"title": "Job delivery #68093174",
                     "description": "private display content never persisted"}]
         parsed = {"job_id": "68093174", "statistics": "Real, WoTr",
@@ -627,7 +628,8 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_trucksbook_shadow_receipt_rejects_bad_source_and_nonstaging(self):
         import unified_staging_shadow_receipts_v2 as shadow
         from unittest.mock import patch
-        await shadow.install_schema(self.pool)
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            await shadow.install_schema(self.pool)
         with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "NO"}):
             with self.assertRaisesRegex(RuntimeError, "isolated staging"):
                 await shadow.record_trucksbook_shadow_receipt(
