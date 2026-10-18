@@ -44,3 +44,15 @@ def test_bad_distance_cannot_inflate_totals():
     assert result["confirmed_unique_real_miles"] == 0
     assert result["invalid_job_count"] == 3
     assert result["history_complete"] is False
+
+
+def test_same_provider_canonical_collision_excluded():
+    result = summarize_confirmed_real_miles([
+        row("trucky", "collision", 200),
+        row("trucky", "collision", 200),
+        row("trucksbook", "clean", 30),
+    ])
+    assert result["confirmed_unique_real_miles"] == Decimal("30")
+    assert result["unique_job_count"] == 1
+    assert result["invalid_job_count"] == 1
+    assert result["auto_award_allowed"] is False
