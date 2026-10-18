@@ -108,11 +108,11 @@ async def record_trucksbook_shadow_receipt(
         async with conn.transaction():
             inserted = await conn.fetchrow("""
                 INSERT INTO staging_shadow_receipts
-                    (source_delivery_id, source_webhook_id, source_payload_sha256,
+                    (source_delivery_id, provider, source_webhook_id, source_payload_sha256,
                      provider_job_id, mileage_classification,
                      candidate_distance_miles, receipt_status,
                      source_authentication)
-                VALUES ($1, $2, $3, $4, $5, $6, $7,
+                VALUES ($1, 'trucksbook', $2, $3, $4, $5, $6, $7,
                         'configured_discord_webhook_id_match')
                 ON CONFLICT(source_delivery_id) DO NOTHING
                 RETURNING source_delivery_id, delivery_count, receipt_status
