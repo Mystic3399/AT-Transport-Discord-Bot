@@ -68,6 +68,7 @@ def test_read_only_audit_defaults_to_no_unlock():
     assert result["auto_unlock_allowed"] is False
     assert result["history_complete"] is False
 
+
 @pytest.mark.parametrize("tb,tr,eligible,provider", [
     (Decimal("39999.999"), Decimal("59999.999"), False, None),
     (Decimal("40000.000"), Decimal("0.125"), True, "trucksbook"),
@@ -75,11 +76,8 @@ def test_read_only_audit_defaults_to_no_unlock():
     (Decimal("40000.001"), Decimal("60000.001"), True, "both"),
 ])
 def test_fractional_thresholds_are_exact(tb, tr, eligible, provider):
-    from decimal import Decimal
     result = check(trucksbook_real_miles=tb, trucky_race_miles=tr)
     assert result.eligible is eligible
     assert result.qualifying_provider == provider
     assert isinstance(result.trucksbook_real_miles, Decimal)
     assert isinstance(result.trucky_race_miles, Decimal)
-
-def test_only_trucksbook_real_counts():
