@@ -154,7 +154,7 @@ def safe_job_record_report(record):
     facts = {}
     types = {}
     safe_terms = ("status", "complete", "deliver", "timestamp", "date", "time",
-                  "distance", "miles", "kilomet", "classif", "game")
+                  "finished", "started", "distance", "miles", "kilomet", "classif", "game", "unit")
 
     def visit(value, path=()):
         if isinstance(value, dict):
@@ -164,10 +164,17 @@ def safe_job_record_report(record):
                 types[dotted] = type(item).__name__
                 normalized = "".join(c for c in key_text.lower() if c.isalnum())
                 classification_field = (
-                    normalized in {"real", "race", "type", "mileagetype", "jobtype"}
+                    normalized in {"real", "race", "type", "mileagetype", "jobtype", "isreal", "israce"}
                     or normalized.startswith(("realmiles", "racemiles"))
                 )
-                if (any(term in normalized for term in safe_terms) or classification_field) and type(item) in (str, int, float, bool):
+                identity_context = any(
+                    any(token in "".join(c for c in part.lower() if c.isalnum())
+                        for token in ("driver", "user", "account", "steam", "profile"))
+                    for part in path
+                )
+                if (not identity_context
+                        and (any(term in normalized for term in safe_terms) or classification_field)
+                        and type(item) in (str, int, float, bool)):
                     facts[dotted] = item
                 visit(item, (*path, key_text))
         elif isinstance(value, list):

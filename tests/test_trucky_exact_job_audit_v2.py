@@ -35,6 +35,7 @@ class ExactJobLookupTests(unittest.TestCase):
             "status": "completed",
             "completed_at": "2026-10-18T20:29:00Z",
             "distance_km": 283.24,
+            "distance_unit": "km",
             "mileage_type": "real",
             "driver": {"id": 987654, "name": "PRIVATE", "steam_profile": {"steam_id": "76561198000000000"}},
         }
@@ -45,6 +46,7 @@ class ExactJobLookupTests(unittest.TestCase):
         self.assertNotIn("76561198000000000", rendered)
         self.assertNotIn("27848310", rendered)
         self.assertEqual(report["safe_delivery_fields"]["distance_km"], 283.24)
+        self.assertEqual(report["safe_delivery_fields"]["distance_unit"], "km")
         self.assertEqual(report["safe_delivery_fields"]["mileage_type"], "real")
         self.assertIn("driver.steam_profile.steam_id", report["field_types"])
 
