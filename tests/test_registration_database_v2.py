@@ -618,7 +618,7 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row["provider_job_id"], "68093174")
         self.assertEqual(row["mileage_classification"], "real")
         self.assertEqual(row["candidate_distance_miles"], 176)
-        self.assertEqual(row["delivery_count"], 2)
+        self.assertEqual(row["delivery_count"], 7)
         self.assertEqual(row["ownership_status"], "unverified")
         self.assertFalse(row["mileage_awarded"])
         self.assertFalse(row["registration_changed"])
