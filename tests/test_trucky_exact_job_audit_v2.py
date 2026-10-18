@@ -1,7 +1,9 @@
 """Safety tests for the staging-only exact Trucky job audit."""
 import unittest
 
-from trucky_jobs_api_v2 import find_job_record, safe_job_record_report
+from trucky_jobs_api_v2 import (
+    find_job_record, inspect_job_identity_fields, safe_job_record_report,
+)
 
 
 class ExactJobLookupTests(unittest.TestCase):
@@ -48,7 +50,31 @@ class ExactJobLookupTests(unittest.TestCase):
         self.assertEqual(report["safe_delivery_fields"]["distance_km"], 283.24)
         self.assertEqual(report["safe_delivery_fields"]["distance_unit"], "km")
         self.assertEqual(report["safe_delivery_fields"]["mileage_type"], "real")
-        self.assertIn("driver.steam_profile.steam_id", report["field_types"])
+        self.assertEqual(
+            report["identity_field_presence"]["steam_identity_paths"],
+            ["steam_profile.steam_id"],
+        )
+
+    def test_driver_steam_identity_is_extracted_but_never_reported(self):
+        record = {"driver": {"id": 987, "steam_profile": {"steam_id": "76561198000000000"}}}
+        result = inspect_job_identity_fields(record)
+        self.assertEqual(result["account_id"], "987")
+        self.assertEqual(result["steam_id"], "76561198000000000")
+        self.assertEqual(result["safe_report"]["driver_account_id_paths"], ["id"])
+        self.assertTrue(result["safe_report"]["valid_steam_identity_present"])
+        self.assertNotIn("987", str(result["safe_report"]))
+        self.assertNotIn("76561198000000000", str(result["safe_report"]))
+
+    def test_ambiguous_driver_and_steam_id_fields_are_not_selected(self):
+        result = inspect_job_identity_fields({"driver": {
+            "id": 1, "account_id": 2,
+            "steam_id": "76561198000000000",
+            "steam_profile": {"steam_id": "76561198000000001"},
+        }})
+        self.assertIsNone(result["account_id"])
+        self.assertIsNone(result["steam_id"])
+        self.assertFalse(result["safe_report"]["driver_account_id_unambiguous"])
+        self.assertFalse(result["safe_report"]["steam_identity_unambiguous"])
 
 
 if __name__ == "__main__":

@@ -6596,6 +6596,7 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
         "page_record_count": lookup["record_count"],
         "job_id_field_paths": lookup["id_paths"],
         "signed_hmac_receipt_rows_returned": len(receipts),
+        "receipt_matches_requested_provider_job_id": bool(receipts),
         "signed_receipts": [
             {"receipt_id": row["receipt_id"], "event_type": row["event_type"],
              "received_at": row["received_at"].isoformat(),
@@ -6610,31 +6611,32 @@ async def staging_trucky_job_audit(ctx, job_id: str, page: int = 1):
     record = lookup.get("record")
     if record is not None:
         report["provider_job_fields"] = trucky_jobs_api_v2.safe_job_record_report(record)
-        if receipts:
-            # The signed receipt parser is the only accepted contract for
-            # comparing provider-owned Steam identity to the approved link.
+        identity_fields = trucky_jobs_api_v2.inspect_job_identity_fields(record)
+        report["identity_field_presence"] = identity_fields["safe_report"]
+        if not receipts:
+            report["identity_verification"] = "matching_signed_receipt_missing"
+        elif not all(str(row["event_type"]) == "job_completed" for row in receipts):
+            report["identity_verification"] = "signed_receipt_event_type_mismatch"
+        elif identity_fields["account_id"] is None:
+            report["identity_verification"] = "api_driver_account_id_missing_or_ambiguous"
+        elif identity_fields["steam_id"] is None:
+            report["identity_verification"] = "api_steam_identity_missing_or_ambiguous"
+        else:
+            report["signed_event_job_id_matches_api_job"] = True
             try:
-                from trucky_signed_webhook_v2 import extract_trucky_identity_evidence
-                evidence = extract_trucky_identity_evidence(record)
                 import trucky_membership_adapter
-                member = await trucky_membership_adapter.verify_member(
-                    evidence["trucky_account_id"]
-                )
+                member = await trucky_membership_adapter.verify_member(identity_fields["account_id"])
                 if member is None:
                     report["identity_verification"] = "not_active_company_member"
                 else:
                     identity = await unified_driver_profiles.verify_trucky_event_against_verified_links(
-                        db_pool, evidence["trucky_account_id"], evidence["steam_id64"]
+                        db_pool, identity_fields["account_id"], identity_fields["steam_id"]
                     )
                     report["identity_verification"] = identity["status"]
-                    report["signed_event_job_id_matches_api_job"] = (
-                        all(str(row["event_type"]) == "job_completed" for row in receipts)
-                    )
             except Exception as error:
-                # Emit only the bounded category; never include provider data.
                 report["identity_verification"] = (
                     "membership_unavailable" if type(error).__name__ == "MembershipUnavailable"
-                    else "api_record_schema_not_sufficient"
+                    else "verification_unavailable"
                 )
     rendered = json.dumps(report, sort_keys=True, default=str)
     if len(rendered) > 1700:

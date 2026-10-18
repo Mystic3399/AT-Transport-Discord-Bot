@@ -64,6 +64,7 @@ class StagingExactJobAuditCommandTests(unittest.IsolatedAsyncioTestCase):
         import trucky_jobs_api_v2
         api.find_job_record = trucky_jobs_api_v2.find_job_record
         api.safe_job_record_report = trucky_jobs_api_v2.safe_job_record_report
+        api.inspect_job_identity_fields = trucky_jobs_api_v2.inspect_job_identity_fields
         profile = SimpleNamespace(
             list_trucky_receipt_audit=AsyncMock(return_value=[]),
         )

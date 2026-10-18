@@ -5,6 +5,7 @@ This adapter does not infer a job schema or award mileage. An authenticated
 response is not sufficient until fields and account ownership are validated.
 """
 import os
+import re
 import aiohttp
 
 COMPANY_ID = 49041
@@ -154,23 +155,29 @@ def safe_job_record_report(record):
     facts = {}
     types = {}
     safe_terms = ("status", "complete", "deliver", "timestamp", "date", "time",
-                  "finished", "started", "distance", "miles", "kilomet", "classif", "game", "unit")
+                  "finished", "started", "distance", "miles", "kilomet", "classif",
+                  "game", "unit", "origin", "destination", "cargo", "truck")
 
     def visit(value, path=()):
         if isinstance(value, dict):
             for key, item in value.items():
                 key_text = str(key)
                 dotted = ".".join((*path, key_text))
-                types[dotted] = type(item).__name__
                 normalized = "".join(c for c in key_text.lower() if c.isalnum())
-                classification_field = (
-                    normalized in {"real", "race", "type", "mileagetype", "jobtype", "isreal", "israce"}
-                    or normalized.startswith(("realmiles", "racemiles"))
-                )
                 identity_context = any(
                     any(token in "".join(c for c in part.lower() if c.isalnum())
                         for token in ("driver", "user", "account", "steam", "profile"))
                     for part in path
+                )
+                relevant_type = (not identity_context and
+                    (any(term in normalized for term in safe_terms)
+                     or normalized in {"real", "race", "type", "mileagetype", "jobtype", "isreal", "israce"}
+                     or normalized.startswith(("realmiles", "racemiles"))))
+                if relevant_type or (path == () and normalized in {"id", "driver"}):
+                    types[dotted] = type(item).__name__
+                classification_field = (
+                    normalized in {"real", "race", "type", "mileagetype", "jobtype", "isreal", "israce"}
+                    or normalized.startswith(("realmiles", "racemiles"))
                 )
                 if (not identity_context
                         and (any(term in normalized for term in safe_terms) or classification_field)
@@ -182,4 +189,56 @@ def safe_job_record_report(record):
                 visit(item, (*path, str(index)))
 
     visit(record)
-    return {"field_types": types, "safe_delivery_fields": facts}
+    identity = inspect_job_identity_fields(record)
+    return {"field_types": types, "safe_delivery_fields": facts,
+            "identity_field_presence": identity["safe_report"]}
+
+
+def inspect_job_identity_fields(record):
+    """Inspect driver/Steam field locations while withholding all identifiers."""
+    if not isinstance(record, dict):
+        raise ValueError("Job record required")
+    driver = record.get("driver")
+    if not isinstance(driver, dict):
+        return {"account_id": None, "steam_id": None, "safe_report": {
+            "driver_object_present": False, "driver_account_id_paths": [],
+            "steam_identity_paths": [], "valid_steam_identity_present": False,
+        }}
+
+    account_keys = {"id", "userid", "accountid", "truckyuserid", "truckyaccountid"}
+    account_matches = []
+    steam_matches = []
+
+    def visit(value, path=()):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                key_text = str(key)
+                normalized = "".join(c for c in key_text.lower() if c.isalnum())
+                current = (*path, key_text)
+                if not path and normalized in account_keys and type(item) in (str, int) and str(item).isdecimal() and int(item) > 0:
+                    account_matches.append((str(item), ".".join(current)))
+                if "steam" in normalized and "id" in normalized and type(item) in (str, int):
+                    if re.fullmatch(r"7656119[0-9]{10}", str(item)):
+                        steam_matches.append((str(item), ".".join(current)))
+                visit(item, current)
+        elif isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, (*path, str(index)))
+
+    visit(driver)
+    account_ids = {item[0] for item in account_matches}
+    steam_ids = {item[0] for item in steam_matches}
+    account_id = next(iter(account_ids)) if len(account_ids) == 1 else None
+    steam_id = next(iter(steam_ids)) if len(steam_ids) == 1 else None
+    return {
+        "account_id": account_id,
+        "steam_id": steam_id,
+        "safe_report": {
+            "driver_object_present": True,
+            "driver_account_id_paths": sorted({path for _, path in account_matches}),
+            "driver_account_id_unambiguous": account_id is not None,
+            "steam_identity_paths": sorted({path for _, path in steam_matches}),
+            "valid_steam_identity_present": steam_id is not None,
+            "steam_identity_unambiguous": len(steam_ids) == 1,
+        },
+    }
