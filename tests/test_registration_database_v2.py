@@ -589,10 +589,19 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.pool, message_id=991234567001, webhook_id=456789,
                 configured_webhook_id="456789", payload=payload, parsed_job=parsed,
             )
+            concurrent_replays = await asyncio.gather(*(
+                shadow.record_trucksbook_shadow_receipt(
+                    self.pool, message_id=991234567001, webhook_id=456789,
+                    configured_webhook_id="456789", payload=payload, parsed_job=parsed,
+                ) for _ in range(5)
+            ))
         self.assertEqual(first, {"status": "quarantined", "duplicate": False,
                                  "delivery_count": 1})
         self.assertEqual(replay, {"status": "quarantined", "duplicate": True,
                                   "delivery_count": 2})
+        self.assertTrue(all(item["duplicate"] for item in concurrent_replays))
+        self.assertEqual(sorted(item["delivery_count"] for item in concurrent_replays),
+                         [3, 4, 5, 6, 7])
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT source_payload_sha256, provider_job_id, mileage_classification,
@@ -631,6 +640,32 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                     self.pool, message_id=991234567003, webhook_id=456789,
                     configured_webhook_id="999999", payload=[], parsed_job=None,
                 )
+
+
+    async def test_concurrent_staging_duplicate_review_opens_are_idempotent(self):
+        import unified_manual_job_reconciliation_v2 as review
+        from unittest.mock import patch
+        trucky_id, trucksbook_id = "198765432101", "198765432102"
+        reviewer_id = 991234567111
+        with patch.dict(os.environ, {"AT_V2_ISOLATED_STAGING": "YES"}):
+            opened = await asyncio.gather(*(
+                review.open_potential_duplicate(
+                    self.pool, trucky_id, trucksbook_id, reviewer_id
+                ) for _ in range(8)
+            ))
+        self.assertEqual(sum(bool(case["created"]) for case in opened), 1)
+        self.assertEqual(len({case["case_id"] for case in opened}), 1)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetchrow("""
+                SELECT
+                    (SELECT COUNT(*) FROM unified_job_reconciliation_cases
+                     WHERE trucky_job_id=$1 AND trucksbook_job_id=$2) AS cases,
+                    (SELECT COUNT(*) FROM unified_job_reconciliation_audit a
+                     JOIN unified_job_reconciliation_cases c USING(case_id)
+                     WHERE c.trucky_job_id=$1 AND c.trucksbook_job_id=$2) AS audits
+            """, trucky_id, trucksbook_id)
+        self.assertEqual(rows["cases"], 1)
+        self.assertEqual(rows["audits"], 1)
 
 
 if __name__ == "__main__":
