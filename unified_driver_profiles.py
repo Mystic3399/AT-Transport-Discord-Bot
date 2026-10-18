@@ -255,6 +255,53 @@ async def get_pending_claim(pool, discord_user_id, provider):
             WHERE discord_user_id=$1 AND provider=$2
         """, discord_user_id, provider)
 
+
+async def get_trucky_identity_link_diagnostics(pool, discord_user_id):
+    """Read the caller's link-state flags without returning provider IDs/names.
+
+    This deliberately does not mutate registration data and cannot establish
+    ownership; it is a staging-only diagnostic for comparing stored link state
+    with a later signed Trucky event's redacted verification reason.
+    """
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                EXISTS(
+                    SELECT 1 FROM unified_steam_links
+                    WHERE discord_user_id=$1 AND verified_at IS NOT NULL
+                ) AS steam_verified,
+                (SELECT status FROM unified_provider_claims
+                    WHERE discord_user_id=$1 AND provider='trucky'
+                ) AS trucky_claim_status,
+                EXISTS(
+                    SELECT 1 FROM unified_provider_links
+                    WHERE discord_user_id=$1 AND provider='trucky'
+                      AND verified_at IS NOT NULL
+                ) AS trucky_link_verified,
+                CASE WHEN EXISTS(
+                    SELECT 1 FROM unified_provider_claims
+                    WHERE discord_user_id=$1 AND provider='trucky'
+                ) AND EXISTS(
+                    SELECT 1 FROM unified_provider_links
+                    WHERE discord_user_id=$1 AND provider='trucky'
+                      AND verified_at IS NOT NULL
+                ) THEN EXISTS(
+                    SELECT 1 FROM unified_provider_claims c
+                    JOIN unified_provider_links l
+                      ON l.provider='trucky'
+                     AND l.provider_account_id=c.provider_account_id
+                     AND l.discord_user_id=c.discord_user_id
+                    WHERE c.discord_user_id=$1 AND c.provider='trucky'
+                      AND l.verified_at IS NOT NULL
+                ) ELSE NULL END AS claim_link_match
+        """, discord_user_id)
+    return {
+        "steam_verified": bool(row["steam_verified"]),
+        "trucky_claim_status": row["trucky_claim_status"],
+        "trucky_link_verified": bool(row["trucky_link_verified"]),
+        "claim_link_match": row["claim_link_match"],
+    }
+
 async def approve_provider_claim(pool, discord_user_id, provider, reviewer_id,
                                  membership_confirmed, ownership_confirmed):
     """Atomic management approval. Never auto-approve from a roster lookup alone."""
