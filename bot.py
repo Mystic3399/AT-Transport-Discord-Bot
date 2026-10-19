@@ -904,11 +904,36 @@ def normalise_trucksbook_name(trucksbook_name):
     ).strip()
 
 
+def trucksbook_author_user_id(data):
+    """Read the stable provider ID from an exact TrucksBook author profile URL."""
+    url = ((data.get("author") or {}).get("url") or "").strip()
+    match = re.fullmatch(
+        r"https?://(?:www\.)?trucksbook\.eu/user/([1-9]\d*)(?:[/?#].*)?",
+        url, re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = int(match.group(1))
+    return value if value <= 9223372036854775807 else None
+
+
 async def find_driver_link(
     trucksbook_name,
+    trucksbook_user_id=None,
 ):
     if db_pool is None:
         return None
+
+    # A display name can change. The verified numeric provider identity cannot.
+    # If an ID is present but unlinked, never guess ownership from a name.
+    if trucksbook_user_id is not None:
+        async with db_pool.acquire() as connection:
+            user_id = await connection.fetchval(
+                "SELECT discord_user_id FROM driver_links "
+                "WHERE trucksbook_user_id = $1;",
+                trucksbook_user_id,
+            )
+        return int(user_id) if user_id is not None else None
 
     normalised_name = normalise_trucksbook_name(
         trucksbook_name
@@ -2901,7 +2926,8 @@ async def on_message(message):
 
         discord_user_id = (
             await find_driver_link(
-                trucksbook_name
+                trucksbook_name,
+                trucksbook_author_user_id(data),
             )
         )
 
@@ -3226,7 +3252,9 @@ async def wot_recover(ctx, webhook_id: int, message_limit: int = 1000,
                 duplicates += 1
                 continue
             name = (message.embeds[0].to_dict().get("author") or {}).get("name", "")
-            if not name.strip() or await find_driver_link(name.strip()) is None:
+            if not name.strip() or await find_driver_link(
+                name.strip(), trucksbook_author_user_id(message.embeds[0].to_dict())
+            ) is None:
                 unlinked += 1
                 continue
             if apply:
@@ -3360,7 +3388,9 @@ async def mileage_audit(ctx, message_limit: int = 0):
                                 continue
                             matched += 1
                     if recorded is None:
-                        user_id = await find_driver_link(name) if name else None
+                        user_id = await find_driver_link(
+                            name, trucksbook_author_user_id(embed.to_dict())
+                        ) if name else None
                         if user_id is None:
                             unlinked_event_jobs += 1
                             continue
