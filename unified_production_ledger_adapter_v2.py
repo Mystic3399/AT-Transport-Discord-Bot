@@ -195,7 +195,7 @@ async def apply_verified_credit(
                 or not isinstance(companion, dict)
                 or primary.get("provider") not in ("trucky", "trucksbook")
                 or companion.get("provider") not in ("trucky", "trucksbook")
-                or primary.get("provider") == companion.get("provider")
+                or companion.get("provider") == provider
                 or not primary.get("provider_job_id")
                 or not companion.get("provider_job_id")):
             pending_reason = pending_reason or "duplicate_review_pair_missing"
