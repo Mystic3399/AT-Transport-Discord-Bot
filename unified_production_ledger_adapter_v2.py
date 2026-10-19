@@ -80,9 +80,31 @@ def production_ledger_migration_plan():
     }
 
 
-async def install_production_ledger_schema(pool):
-    """Install only additive tables in one transaction; never alter legacy data."""
+async def _activation_blockers_for_connection(conn, config, runtime):
+    actual_fingerprint = await read_only_database_fingerprint(conn)
+    observed = dict(runtime or {})
+    # Railway's injected runtime identity is authoritative. A caller may
+    # supply test/preflight evidence, but cannot spoof the deployment.
+    for key in ("RAILWAY_ENVIRONMENT_ID", "RAILWAY_SERVICE_ID",
+                "RAILWAY_DEPLOYMENT_ID", "RAILWAY_GIT_COMMIT_SHA"):
+        observed[key] = os.environ.get(key)
+    observed["database_fingerprint"] = actual_fingerprint
+    effective_config = dict(os.environ if config is None else config)
+    # Process-level staging/disposable switches always win over injected
+    # config so production code cannot hide a safety override.
+    for key in ("AT_V2_ISOLATED_STAGING", "AT_V2_TEST_DATABASE_DISPOSABLE",
+                "AT_V2_MILEAGE_ENGINE_TEST_ENABLED"):
+        if os.environ.get(key) == "YES":
+            effective_config[key] = "YES"
+    return production_activation_blockers(effective_config, observed)
+
+
+async def install_production_ledger_schema(pool, *, config=None, runtime=None):
+    """Install additive tables only after the same strict production preflight."""
     async with pool.acquire() as conn:
+        blockers = await _activation_blockers_for_connection(conn, config, runtime)
+        if blockers:
+            raise RuntimeError("Production ledger migration blocked: " + ",".join(blockers))
         async with conn.transaction():
             legacy_tables = await conn.fetchval("""
                 SELECT count(*) FROM information_schema.tables
@@ -218,22 +240,7 @@ async def apply_verified_credit(
     async with pool.acquire() as conn:
         # Bind the approval to the actual database being written, not a caller
         # supplied fingerprint. The following transaction writes only V2 tables.
-        actual_fingerprint = await read_only_database_fingerprint(conn)
-        observed = dict(runtime or {})
-        # Railway's injected runtime identity is authoritative. A caller may
-        # supply test/preflight evidence, but cannot spoof the deployment.
-        for key in ("RAILWAY_ENVIRONMENT_ID", "RAILWAY_SERVICE_ID",
-                    "RAILWAY_DEPLOYMENT_ID", "RAILWAY_GIT_COMMIT_SHA"):
-            observed[key] = os.environ.get(key)
-        observed["database_fingerprint"] = actual_fingerprint
-        effective_config = dict(config or {})
-        # Process-level staging/disposable switches always win over injected
-        # config so a production call cannot hide a safety override.
-        for key in ("AT_V2_ISOLATED_STAGING", "AT_V2_TEST_DATABASE_DISPOSABLE",
-                    "AT_V2_MILEAGE_ENGINE_TEST_ENABLED"):
-            if os.environ.get(key) == "YES":
-                effective_config[key] = "YES"
-        blockers = production_activation_blockers(effective_config, observed)
+        blockers = await _activation_blockers_for_connection(conn, config, runtime)
         if blockers:
             return {"status": "activation_blocked", "blockers": blockers}
 

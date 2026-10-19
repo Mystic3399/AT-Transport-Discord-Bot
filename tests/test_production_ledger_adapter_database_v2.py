@@ -158,6 +158,21 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             "snapshot_sha256": "e" * 64,
         }
 
+    async def install_ledger(self):
+        return await install_production_ledger_schema(
+            self.pool, config=self.config, runtime=self.runtime,
+        )
+
+    async def test_migration_refuses_without_explicit_production_preflight(self):
+        with self.assertRaisesRegex(RuntimeError, "Production ledger migration blocked"):
+            await install_production_ledger_schema(self.pool, config={}, runtime={})
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval("""
+                SELECT count(*) FROM information_schema.tables
+                WHERE table_schema=current_schema()
+                  AND table_name LIKE 'unified_v2_production_%'
+            """), 0)
+
     async def award(self, job, **kwargs):
         return await apply_verified_credit(
             self.pool, job, config=self.config, runtime=self.runtime,
@@ -191,15 +206,15 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(tables_after_rollback, 0)
             self.assertEqual(await conn.fetchval("SELECT real_miles FROM driver_progress WHERE discord_user_id=991234567890123701"), 40000)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM processed_jobs WHERE job_id='historical-991234567890123701'"), 1)
-        await install_production_ledger_schema(self.pool)
-        await install_production_ledger_schema(self.pool)
+        await self.install_ledger()
+        await self.install_ledger()
         async with self.pool.acquire() as conn:
             self.assertEqual(await conn.fetchval("SELECT real_miles FROM driver_progress WHERE discord_user_id=991234567890123701"), 40000)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM processed_jobs WHERE job_id='historical-991234567890123701'"), 1)
             self.assertEqual(await conn.fetchval("SELECT trucksbook_real_miles FROM unified_v2_production_mileage_baselines WHERE discord_user_id=991234567890123701"), 40000)
 
     async def test_provider_retries_fractionals_and_policy_buckets(self):
-        await install_production_ledger_schema(self.pool)
+        await self.install_ledger()
         tb = await self.seed_verified_driver_job(991234567890123710, "trucksbook", "991234567890123711", "991234567890123712", "40.12")
         tkr = await self.seed_verified_driver_job(991234567890123710, "trucky", "991234567890123713", "991234567890123714", "60.37", "race")
         self.assertEqual((await self.award(tb))["status"], "credited")
@@ -214,7 +229,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(legacy)
 
     async def test_ambiguous_cross_provider_pair_is_audited_without_credit(self):
-        await install_production_ledger_schema(self.pool)
+        await self.install_ledger()
         job = await self.seed_verified_driver_job(991234567890123720, "trucky", "991234567890123721", "991234567890123722", "176")
         result = await apply_verified_credit(
             self.pool, job, config=self.config, runtime=self.runtime,
@@ -237,7 +252,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 INSERT INTO processed_jobs(job_id,discord_user_id,trucksbook_name,accepted_distance,statistics)
                 VALUES($1,$2,'historical-preserved',88,'real') ON CONFLICT DO NOTHING
             """, job["provider_job_id"], job["discord_user_id"])
-        await install_production_ledger_schema(self.pool)
+        await self.install_ledger()
         result = await self.award(job)
         self.assertEqual(result["status"], "pending_reconciliation")
         self.assertEqual(result["reason"], "historical_job_overlap")
@@ -247,7 +262,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval("SELECT trucksbook_real_miles FROM unified_v2_production_mileage_baselines WHERE discord_user_id=$1", job["discord_user_id"]), 12345)
 
     async def test_decimal_miles_accumulate_without_whole_mile_rounding(self):
-        await install_production_ledger_schema(self.pool)
+        await self.install_ledger()
         user = 991234567890123728
         first = await self.seed_verified_driver_job(user, "trucksbook", "991234567890123729", "991234567890123730", "0.37")
         second = await self.seed_verified_driver_job(user, "trucksbook", "991234567890123735", "991234567890123730", "0.63")
@@ -258,7 +273,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(total, Decimal("1.00"))
 
     async def test_confirmed_duplicate_selects_one_provider_job_for_credit(self):
-        await install_production_ledger_schema(self.pool)
+        await self.install_ledger()
         user = 991234567890123730
         first = await self.seed_verified_driver_job(user, "trucksbook", "991234567890123731", "991234567890123732", "176")
         second = await self.seed_verified_driver_job(user, "trucky", "991234567890123733", "991234567890123734", "176")
@@ -310,7 +325,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_decisions WHERE provider_job_id=$1 AND decision='pending_reconciliation'", second["provider_job_id"]), 1)
 
     async def test_partial_failure_rolls_back_ledger_and_total(self):
-        await install_production_ledger_schema(self.pool)
+        await self.install_ledger()
         job = await self.seed_verified_driver_job(991234567890123740, "trucksbook", "991234567890123741", "991234567890123742", "100")
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -334,7 +349,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", job["discord_user_id"]), 0)
 
     async def test_gate_refuses_staging_and_test_overrides(self):
-        await install_production_ledger_schema(self.pool)
+        await self.install_ledger()
         job = await self.seed_verified_driver_job(991234567890123750, "trucksbook", "991234567890123751", "991234567890123752", "1")
         result = await apply_verified_credit(
             self.pool, job, config={**self.config, "AT_V2_ISOLATED_STAGING": "YES"},
