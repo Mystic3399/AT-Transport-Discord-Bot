@@ -885,6 +885,22 @@ async def auto_approve_trucky_if_steam_matches(
                 """, account_id, discord_user_id)
                 if not existing:
                     raise TruckyIdentityVerificationError("approved_link_inconsistent")
+                # Refresh proof from this independently verified signed event;
+                # old approved links without an evidence digest cannot enter
+                # the new ledger until such a fresh event is observed.
+                await conn.execute("""
+                    UPDATE unified_provider_claims
+                    SET membership_confirmed=TRUE,ownership_confirmed=TRUE,
+                        ownership_evidence_kind='trucky_signed_job_steam_match',
+                        ownership_evidence_sha256=$3,reviewed_at=NOW()
+                    WHERE discord_user_id=$1 AND provider='trucky'
+                      AND provider_account_id=$2 AND status='approved'
+                """, discord_user_id, account_id, payload_sha256)
+                await conn.execute("""
+                    UPDATE unified_trucky_webhook_receipts SET review_status='verified'
+                    WHERE payload_sha256=$1 AND candidate_job_id=$2
+                      AND event_type='job_completed'
+                """, payload_sha256, provider_job_id)
                 return discord_user_id
             valid_window = await conn.fetchval("""
                 SELECT $1::TIMESTAMPTZ >= $2::TIMESTAMPTZ
@@ -911,9 +927,11 @@ async def auto_approve_trucky_if_steam_matches(
             await conn.execute("""
                 UPDATE unified_provider_claims
                 SET status='approved',membership_confirmed=TRUE,
-                    ownership_confirmed=TRUE,reviewed_at=NOW()
+                    ownership_confirmed=TRUE,reviewed_at=NOW(),
+                    ownership_evidence_kind='trucky_signed_job_steam_match',
+                    ownership_evidence_sha256=$3
                 WHERE discord_user_id=$1 AND provider='trucky'
-            """,discord_user_id)
+            """,discord_user_id, account_id, payload_sha256)
             await conn.execute("""
                 UPDATE unified_driver_profiles
                 SET status='active',activated_at=COALESCE(activated_at,NOW())

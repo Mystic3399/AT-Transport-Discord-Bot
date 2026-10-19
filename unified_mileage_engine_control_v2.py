@@ -53,11 +53,16 @@ def verified_job_evidence_reason(incoming):
     if incoming.get("steam_identity_verified") is not True:
         return "steam_identity_unverified"
     expected_evidence = {
-        "trucky": "trucky_signed_job_steam_match",
-        "trucksbook": "trucksbook_official_account_steam_match",
+        "trucky": {"trucky_signed_job_steam_match"},
+        # TrucksBook has no documented bot-verifiable ownership API. The
+        # accepted fallback is a recorded, staff-witnessed official Steam SSO
+        # session, never a public profile or display-name comparison.
+        "trucksbook": {"trucksbook_steam_authenticated_session"},
     }[incoming["provider"]]
-    if incoming.get("ownership_evidence_kind") != expected_evidence:
+    if incoming.get("ownership_evidence_kind") not in expected_evidence:
         return "ownership_evidence_kind_unverified"
+    if not SHA256_RE.fullmatch(str(incoming.get("ownership_evidence_sha256") or "")):
+        return "ownership_evidence_missing"
     if not SHA256_RE.fullmatch(str(incoming.get("source_evidence_sha256") or "")):
         return "source_evidence_missing"
     if incoming.get("mileage_type") not in ("real", "race"):

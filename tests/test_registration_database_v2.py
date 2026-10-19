@@ -392,6 +392,19 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             completed_at=datetime.now(timezone.utc),
         )
         self.assertEqual(linked, user)
+        async with self.pool.acquire() as conn:
+            evidence = await conn.fetchrow("""
+                SELECT ownership_evidence_kind,ownership_evidence_sha256
+                FROM unified_provider_claims
+                WHERE discord_user_id=$1 AND provider='trucky'
+            """, user)
+            receipt = await conn.fetchval("""
+                SELECT review_status FROM unified_trucky_webhook_receipts
+                WHERE payload_sha256=$1
+            """, digest)
+        self.assertEqual(evidence["ownership_evidence_kind"], "trucky_signed_job_steam_match")
+        self.assertEqual(evidence["ownership_evidence_sha256"], digest)
+        self.assertEqual(receipt, "verified")
 
     async def test_trucksbook_claim_does_not_expire(self):
         user = 991234567890123560

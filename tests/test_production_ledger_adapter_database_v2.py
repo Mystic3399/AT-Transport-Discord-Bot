@@ -116,10 +116,13 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await conn.execute("""
                 INSERT INTO unified_provider_claims
                   (discord_user_id,provider,provider_account_id,membership_confirmed,
-                   ownership_confirmed,status,reviewed_by,reviewed_at)
-                VALUES($1,$2,$3,TRUE,TRUE,'approved',777,NOW())
+                   ownership_confirmed,status,reviewed_by,reviewed_at,
+                   ownership_evidence_kind,ownership_evidence_sha256)
+                VALUES($1,$2,$3,TRUE,TRUE,'approved',777,NOW(),$4,$5)
                 ON CONFLICT DO NOTHING
-            """, user, provider, account)
+            """, user, provider, account,
+                "trucky_signed_job_steam_match" if provider == "trucky"
+                else "trucksbook_steam_authenticated_session", "d" * 64)
         await record_normalized_provider_job(
             self.pool, provider, job_id, user, str(miles), "mi",
             provider_account_id=account, mileage_type=kind,
@@ -141,7 +144,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             "steam_identity_verified": True,
             "ownership_evidence_kind": (
                 "trucky_signed_job_steam_match" if provider == "trucky"
-                else "trucksbook_official_account_steam_match"
+                else "trucksbook_steam_authenticated_session"
             ),
             "source_evidence_sha256": evidence_sha,
             "ownership_evidence_sha256": "d" * 64,

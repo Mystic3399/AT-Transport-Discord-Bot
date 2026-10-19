@@ -24,6 +24,7 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
             "job_status": "completed", "ownership_verified": True,
             "steam_identity_verified": True,
             "ownership_evidence_kind": "trucky_signed_job_steam_match",
+            "ownership_evidence_sha256": "c" * 64,
             "source_evidence_sha256": "a" * 64,
             "metadata": {"game": "ets2", "origin": "London",
                          "destination": "Paris", "cargo": "Food"},
@@ -98,7 +99,7 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
     async def test_candidate_match_stays_pending_without_shared_journey_evidence(self):
         other = {**self.incoming, "provider": "trucksbook", "provider_job_id": "200",
                  "provider_account_id": "7654321", "miles": "60", "credited": True,
-                 "ownership_evidence_kind": "trucksbook_official_account_steam_match"}
+                 "ownership_evidence_kind": "trucksbook_steam_authenticated_session"}
         incoming = {**self.incoming, "provider_job_id": "101"}
         with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:
@@ -151,11 +152,31 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_trucksbook_race_miles_are_excluded(self):
         incoming = {**self.incoming, "provider": "trucksbook", "mileage_type": "race",
-                    "ownership_evidence_kind": "trucksbook_official_account_steam_match"}
+                    "ownership_evidence_kind": "trucksbook_steam_authenticated_session"}
         with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:
             result = await reconcile_and_stage_miles(None, incoming, [], **self.feed)
         self.assertEqual(result["reason"], "trucksbook_race_excluded")
+        award.assert_not_awaited()
+
+    async def test_witnessed_trucksbook_steam_session_is_accepted_ownership_evidence(self):
+        incoming = {**self.incoming, "provider": "trucksbook",
+                    "ownership_evidence_kind": "trucksbook_steam_authenticated_session"}
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
+                   new_callable=AsyncMock) as award:
+            award.return_value = {"status": "staging_awarded", "credited_whole_miles": 60}
+            result = await reconcile_and_stage_miles(None, incoming, [], **self.feed)
+        self.assertEqual(result["status"], "staging_awarded")
+        award.assert_awaited_once()
+
+    async def test_witnessed_trucksbook_review_without_evidence_digest_stays_pending(self):
+        incoming = {**self.incoming, "provider": "trucksbook",
+                    "ownership_evidence_kind": "trucksbook_steam_authenticated_session",
+                    "ownership_evidence_sha256": None}
+        with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
+                   new_callable=AsyncMock) as award:
+            result = await reconcile_and_stage_miles(None, incoming, [], **self.feed)
+        self.assertEqual(result["reason"], "ownership_evidence_missing")
         award.assert_not_awaited()
 
     async def test_bad_job_evidence_is_pending_without_award(self):

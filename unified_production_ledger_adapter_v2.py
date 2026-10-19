@@ -313,6 +313,10 @@ async def apply_verified_credit(
                        AND c.discord_user_id=l.discord_user_id
                        AND c.status='approved' AND c.ownership_confirmed=TRUE
                        AND c.membership_confirmed=TRUE
+                       AND c.ownership_evidence_sha256 IS NOT NULL
+                       AND c.ownership_evidence_kind = CASE l.provider
+                         WHEN 'trucky' THEN 'trucky_signed_job_steam_match'
+                         ELSE 'trucksbook_steam_authenticated_session' END
                        AND (c.expires_at IS NULL OR c.expires_at>NOW())
                       JOIN unified_steam_links s
                         ON s.discord_user_id=e.discord_user_id AND s.verified_at IS NOT NULL
@@ -334,10 +338,14 @@ async def apply_verified_credit(
                     AND l.discord_user_id=$3 AND l.verified_at IS NOT NULL
                     AND c.status='approved' AND c.ownership_confirmed=TRUE
                     AND c.membership_confirmed=TRUE
+                    AND c.ownership_evidence_sha256=$4
+                    AND c.ownership_evidence_kind = CASE l.provider
+                      WHEN 'trucky' THEN 'trucky_signed_job_steam_match'
+                      ELSE 'trucksbook_steam_authenticated_session' END
                     AND (c.expires_at IS NULL OR c.expires_at>NOW())
                     AND s.verified_at IS NOT NULL
                 )
-            """, provider, account_id, user_id)
+            """, provider, account_id, user_id, job["ownership_evidence_sha256"])
             if not ownership:
                 await log_decision("rejected_evidence", "provider_ownership_not_linked")
                 return {"status": "rejected_evidence", "reason": "provider_ownership_not_linked"}
