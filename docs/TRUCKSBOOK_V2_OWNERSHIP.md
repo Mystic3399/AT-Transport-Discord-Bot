@@ -1,69 +1,59 @@
-# TrucksBook V2 ownership verification
+# TrucksBook V2 ownership — pending provider-supported evidence
 
-## Provider capability and limitation
+## Corrected provider contract
 
-TrucksBook's [public registration page](https://trucksbook.eu/registration)
-describes signing in through Steam to
-register and verify game ownership. Its public company tools include employee
-lists and CSV exports. The integration currently has no documented official
-TrucksBook API that returns a stable TrucksBook account ID together with the
-Steam identity that authenticated that account. A profile ID, public profile,
-company roster entry, CSV row, Discord webhook author, or matching display
-name is therefore only a claim or job-source signal; none independently proves
-that the Discord applicant owns the provider account.
+Normal TrucksBook login uses email/password. TrucksBook's initial registration
+uses Steam to check game ownership; it is not a repeatable Steam login for an
+existing TrucksBook account. A&T must not instruct existing drivers to sign out
+and then sign in to TrucksBook through Steam.
 
-This method uses no Premium feature. The witnessed Steam sign-in is a manual
-fallback, not a provider-signed API assertion. If the reviewer cannot see and
-compare the canonical SteamID64 and resulting TrucksBook profile ID during the
-same fresh sign-in, keep the claim pending and request authoritative confirmation
-from TrucksBook support. Do not infer identity from similar names.
+Official sources checked on 19 October 2026:
+- https://trucksbook.eu/users/sign_in — normal email/password login.
+- https://trucksbook.eu/registration — initial Steam registration/game check.
+- https://trucksbook.eu/wiki — registration followed by email activation/login.
 
-## Driver submission
+A&T Steam OpenID verification remains separate. Knowing a SteamID64, supplying
+a TrucksBook profile ID, matching names, company membership, a CSV, or a Discord
+webhook does not establish ownership of the provider account. A screenshot or
+SHA-256 digest alone does not authenticate the underlying assertion.
 
-1. Start registration in the private A&T registration channel.
-2. Complete `!linksteam` first.
-3. Submit `!registertrucksbook <numeric profile ID>`.
-4. The bot stores a pending claim only. The profile remains unlinked until a
-   reviewer records sufficient ownership and active A&T membership evidence.
-5. Drivers must never share passwords, Steam Guard codes, recovery codes, or
-   session cookies with A&T staff.
+## Current safe behaviour
 
-## Staff witnessed review
+- `!registertrucksbook <numeric profile ID>` retains a pending claim only.
+- `!approveprovider trucksbook ...` explains the ownership blocker and performs
+  no approval. The obsolete witnessed-Steam function also rejects before any
+  database access, including stale callers with apparently matching IDs.
+- The old `trucksbook_steam_authenticated_session` evidence label cannot
+  authorise V2 mileage or resolve cross-provider review cases.
+- Existing profiles, links, mileage, ranks and achievements are not deleted,
+  reset or rewritten. Production's existing TrucksBook processor is unchanged.
+- Trucky signed-event verification and A&T Steam OpenID remain independent.
 
-1. Arrange a private screenshare. The driver signs out of TrucksBook, then uses
-   TrucksBook's official Steam sign-in with the same Steam account verified in
-   their A&T profile.
-2. During the same live session, staff checks the canonical SteamID64 against
-   the stored Steam-verified identity, the resulting TrucksBook profile ID
-   against the pending claim, and active A&T company membership through the
-   authenticated company view.
-3. Keep a minimal review record in the approved private company evidence store.
-   Do not upload session data or credentials to Discord. Compute the SHA-256
-   digest of the retained evidence file locally; only the digest is stored by
-   the bot.
-4. In the applicant's private channel, an authorised verification staff member
-   runs:
+## Evidence still required
 
-   ```text
-   !approveprovider trucksbook <observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> confirm-member
-   ```
+An observed, provider-supported method must prove control of the stable
+TrucksBook account to the same Discord applicant who separately verified Steam.
+If the provider exposes its authenticated Steam relationship, compare that
+provider-owned field with A&T's verified SteamID64. Do not invent such a field
+or infer it from the original registration requirement.
 
-5. The bot compares both observed IDs to the claim and verified Steam link,
-   enforces unique account ownership, and records reviewer, time, evidence kind,
-   and digest. Mismatch, missing Steam verification, duplicate ownership, or
-   missing evidence leaves the claim unlinked/pending.
+The next investigation is the driver's authenticated TrucksBook account and
+company administration pages, or a reply from official TrucksBook support.
+Inspect whether they expose a provider-maintained stable account/Steam mapping
+or an authenticated account action suitable for a one-time control challenge.
+No action or endpoint is assumed to exist. An owner-assisted alternative must
+be verified and tested before enabling approval; observing email login alone
+is not the missing Steam relationship proof.
 
-Approval only links the accounts and activates the identity profile. It does
-not award mileage, alter legacy totals, issue roles, grant achievements, or
-unlock Company Mods. Those remain behind separate release gates.
+Drivers must not disclose passwords, Steam Guard/email verification codes,
+session cookies or recovery codes. A&T staff must not approve their own claims.
+No Premium subscription is assumed or required by the pending-claim flow.
 
-## Production restore status
+## Backup verification (separate acceptance)
 
-The production backup bucket is present, but the connected Railway operations
-interface does not expose object listing, object download, checksum, or restore
-operations. Do not fetch bucket credentials into chat or restore over production
-or the active staging database. A production-data restore rehearsal remains
-blocked until the owner retrieves the existing logical backup through Railway's
-private S3-compatible bucket using credentials kept locally and supplies it to
-an isolated PostgreSQL restore environment, or grants a controlled tool access
-to that already isolated restore environment.
+Both genuine production backup objects were retrieved through authenticated
+read-only S3 GET requests. Their recomputed SHA-256 hashes match the uploaded
+copies. Both were restored into local embedded PostgreSQL 18.6; 28 SQL migration,
+preservation, replay and rollback checks passed. This does not rehearse Railway
+service rollback or multiple native PostgreSQL worker processes. Production and
+the preserved Railway restore were not changed.

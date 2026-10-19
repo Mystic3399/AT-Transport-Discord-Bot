@@ -159,15 +159,16 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["reason"], "trucksbook_race_excluded")
         award.assert_not_awaited()
 
-    async def test_witnessed_trucksbook_steam_session_is_accepted_ownership_evidence(self):
+    async def test_retired_trucksbook_steam_session_is_rejected(self):
         incoming = {**self.incoming, "provider": "trucksbook",
                     "ownership_evidence_kind": "trucksbook_steam_authenticated_session"}
         with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:
             award.return_value = {"status": "staging_awarded", "credited_whole_miles": 60}
             result = await reconcile_and_stage_miles(None, incoming, [], **self.feed)
-        self.assertEqual(result["status"], "staging_awarded")
-        award.assert_awaited_once()
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["reason"], "ownership_evidence_kind_unverified")
+        award.assert_not_awaited()
 
     async def test_witnessed_trucksbook_review_without_evidence_digest_stays_pending(self):
         incoming = {**self.incoming, "provider": "trucksbook",
@@ -176,7 +177,7 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
         with patch("unified_staging_reconciliation_worker_v2.award_staging_miles",
                    new_callable=AsyncMock) as award:
             result = await reconcile_and_stage_miles(None, incoming, [], **self.feed)
-        self.assertEqual(result["reason"], "ownership_evidence_missing")
+        self.assertEqual(result["reason"], "ownership_evidence_kind_unverified")
         award.assert_not_awaited()
 
     async def test_bad_job_evidence_is_pending_without_award(self):
@@ -190,3 +191,4 @@ class ReconciliationWorkerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

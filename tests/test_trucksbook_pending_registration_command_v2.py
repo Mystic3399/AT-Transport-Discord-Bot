@@ -36,14 +36,16 @@ class TrucksBookPendingCommandTests(unittest.TestCase):
         self.assertNotIn("award_staging_miles", source)
         self.assertNotIn("sync_unified_driver_roles", source)
 
-    def test_staff_approval_uses_witnessed_identity_comparison(self):
+    def test_staff_cannot_use_retired_steam_login_approval(self):
         node = command_functions()["approveprovider"]
         source = ast.unparse(node)
         self.assertIn("member_is_verification_staff", source)
-        self.assertIn("approve_trucksbook_claim_after_witness", source)
+        self.assertNotIn("approve_trucksbook_claim_after_witness", source)
+        self.assertIn("approval is disabled", source)
         self.assertIn("confirm-member", source)
         self.assertNotIn("approve_provider_claim", source)
 
 
 if __name__ == "__main__":
     unittest.main()
+

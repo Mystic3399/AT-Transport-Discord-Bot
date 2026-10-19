@@ -225,7 +225,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_provider_retries_fractionals_and_policy_buckets(self):
         await self.install_ledger()
-        tb = await self.seed_verified_driver_job(991234567890123710, "trucksbook", "991234567890123711", "991234567890123712", "40.12")
+        tb = await self.seed_verified_driver_job(991234567890123710, "trucky", "991234567890123711", "991234567890123714", "40.12")
         tkr = await self.seed_verified_driver_job(991234567890123710, "trucky", "991234567890123713", "991234567890123714", "60.37", "race")
         self.assertEqual((await self.award(tb))["status"], "credited")
         self.assertEqual((await self.award(tkr))["status"], "credited")
@@ -235,7 +235,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             legacy = await conn.fetchval("SELECT real_miles FROM driver_progress WHERE discord_user_id=$1", tb["discord_user_id"])
         self.assertEqual(totals["combined_real_miles"], Decimal("40.12"))
         self.assertEqual(totals["trucky_race_miles"], Decimal("60.37"))
-        self.assertEqual(totals["trucksbook_real_miles"], Decimal("40.12"))
+        self.assertEqual(totals["trucksbook_real_miles"], Decimal("0"))
         self.assertIsNone(legacy)
 
     async def test_ambiguous_cross_provider_pair_is_audited_without_credit(self):
@@ -264,8 +264,8 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             """, job["provider_job_id"], job["discord_user_id"])
         await self.install_ledger()
         result = await self.award(job)
-        self.assertEqual(result["status"], "pending_reconciliation")
-        self.assertEqual(result["reason"], "historical_job_overlap")
+        self.assertEqual(result["status"], "rejected_evidence")
+        self.assertEqual(result["reason"], "ownership_evidence_kind_unverified")
         async with self.pool.acquire() as conn:
             self.assertEqual(await conn.fetchval("SELECT real_miles FROM driver_progress WHERE discord_user_id=$1", job["discord_user_id"]), 12345)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_credit_ledger WHERE provider_job_id=$1", job["provider_job_id"]), 0)
@@ -274,15 +274,15 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_decimal_miles_accumulate_without_whole_mile_rounding(self):
         await self.install_ledger()
         user = 991234567890123728
-        first = await self.seed_verified_driver_job(user, "trucksbook", "991234567890123729", "991234567890123730", "0.37")
-        second = await self.seed_verified_driver_job(user, "trucksbook", "991234567890123735", "991234567890123730", "0.63")
+        first = await self.seed_verified_driver_job(user, "trucky", "991234567890123729", "991234567890123730", "0.37")
+        second = await self.seed_verified_driver_job(user, "trucky", "991234567890123735", "991234567890123730", "0.63")
         self.assertEqual((await self.award(first))["status"], "credited")
         self.assertEqual((await self.award(second))["status"], "credited")
         async with self.pool.acquire() as conn:
-            total = await conn.fetchval("SELECT trucksbook_real_miles FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", user)
+            total = await conn.fetchval("SELECT combined_real_miles FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", user)
         self.assertEqual(total, Decimal("1.00"))
 
-    async def test_confirmed_duplicate_selects_one_provider_job_for_credit(self):
+    async def test_retired_trucksbook_evidence_cannot_confirm_duplicate_credit(self):
         await self.install_ledger()
         user = 991234567890123730
         first = await self.seed_verified_driver_job(user, "trucksbook", "991234567890123731", "991234567890123732", "176")
@@ -321,7 +321,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             )
         # Concurrent replay of the selected primary produces one credit.
         results = await asyncio.gather(award_primary(first), award_primary(first))
-        self.assertEqual(sorted(result["status"] for result in results), ["credited", "duplicate_provider_job"])
+        self.assertEqual(sorted(result["status"] for result in results), ["rejected_evidence", "rejected_evidence"])
         companion = await apply_verified_credit(
             self.pool, second, config=self.config, runtime=self.runtime,
             feed_evidence=self.complete_feed(), reconciliation_status="confirmed_duplicate",
@@ -330,13 +330,13 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(companion["status"], "pending_reconciliation")
         self.assertEqual(companion["reason"], "duplicate_not_selected_for_credit")
         async with self.pool.acquire() as conn:
-            self.assertEqual(await conn.fetchval("SELECT combined_real_miles FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", user), Decimal("176"))
-            self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1", user), 1)
+            self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", user), 0)
+            self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1", user), 0)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_decisions WHERE provider_job_id=$1 AND decision='pending_reconciliation'", second["provider_job_id"]), 1)
 
     async def test_partial_failure_rolls_back_ledger_and_total(self):
         await self.install_ledger()
-        job = await self.seed_verified_driver_job(991234567890123740, "trucksbook", "991234567890123741", "991234567890123742", "100")
+        job = await self.seed_verified_driver_job(991234567890123740, "trucky", "991234567890123741", "991234567890123742", "100")
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 CREATE OR REPLACE FUNCTION test_fail_production_total_insert()
@@ -360,7 +360,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_gate_refuses_staging_and_test_overrides(self):
         await self.install_ledger()
-        job = await self.seed_verified_driver_job(991234567890123750, "trucksbook", "991234567890123751", "991234567890123752", "1")
+        job = await self.seed_verified_driver_job(991234567890123750, "trucky", "991234567890123751", "991234567890123752", "1")
         result = await apply_verified_credit(
             self.pool, job, config={**self.config, "AT_V2_ISOLATED_STAGING": "YES"},
             runtime=self.runtime, feed_evidence=self.complete_feed(),
@@ -379,3 +379,4 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

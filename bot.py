@@ -6143,7 +6143,7 @@ async def register_driver(ctx):
             "**TrucksBook** — Submit `!registertrucksbook 123456` using your TrucksBook profile ID. This records a pending claim only.\n"
             "**Trucky** — Submit `!registertrucky 209123` using your Trucky account ID.\n\n"
             "You may submit both IDs. Each provider requires independent membership "
-            "and ownership verification by A&T Management before activation. TrucksBook review uses a witnessed official Steam sign-in; no Premium is needed.\n"
+            "and ownership verification by A&T Management before activation. TrucksBook ownership remains pending provider-supported verification; Steam is verified separately.\n"
             "Steam verification is required before a new provider claim can be approved.\n\n"
             "If you started by mistake, type `!cancel`.\n"
             "🔒 This channel is private to you and authorised A&T Management."
@@ -6326,11 +6326,9 @@ async def register_trucksbook_in_channel(ctx, account_id: str = None):
     await ctx.reply(
         "Your TrucksBook account ID is recorded as **pending verification**. "
         "The ID and profile name alone do not prove ownership, so no verified link or mileage is created. "
-        "No Premium subscription is required. For review, arrange a private live screen-share with A&T "
-        "Management: sign out, use TrucksBook's official Steam sign-in with the Steam account already "
-        "verified for A&T, and show the resulting TrucksBook profile ID plus active A&T company membership. "
-        "Never share your password, Steam guard code, session cookie, or recovery code. If the Steam identity "
-        "cannot be independently seen and matched, the claim stays pending.",
+        "TrucksBook normally uses email/password login. Verify Steam separately with A&T. "
+        "The former Steam-login review is disabled while a provider-supported ownership method "
+        "is verified. Do not share passwords, authentication codes, session cookies or recovery codes.",
         mention_author=False,
     )
 
@@ -6400,7 +6398,7 @@ async def approve_unified_provider(
         await ctx.reply(
             "Use `!approveprovider trucky`, or `!approveprovider trucksbook "
             "<observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> confirm-member` "
-            "after the witnessed verification procedure.", mention_author=False,
+            "TrucksBook approval is currently disabled pending provider-supported ownership evidence.", mention_author=False,
         )
         return
     if db_pool is None:
@@ -6419,32 +6417,11 @@ async def approve_unified_provider(
         await ctx.reply("No pending V2 claim for that provider.", mention_author=False)
         return
     if provider == "trucksbook":
-        if (not all((observed_steam_id64, observed_trucksbook_id, evidence_sha256))
-                or membership_confirmation != "confirm-member"):
-            await ctx.reply(
-                "The claim remains pending. Staff must witness a fresh official Steam sign-in to TrucksBook, "
-                "match the displayed SteamID64 to the applicant's Steam-verified A&T profile, check the "
-                "resulting TrucksBook ID and active A&T company membership, and retain the review evidence "
-                "securely. Do not request credentials or codes. Then run `!approveprovider trucksbook "
-                "<observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> confirm-member` here.",
-                mention_author=False,
-            )
-            return
-        try:
-            await unified_driver_profiles.approve_trucksbook_claim_after_witness(
-                db_pool, applicant_id, ctx.author.id, observed_steam_id64,
-                observed_trucksbook_id, evidence_sha256, membership_confirmed=True,
-            )
-        except ValueError as error:
-            await ctx.reply(f"TrucksBook claim remains pending: {error}", mention_author=False)
-            return
-        except Exception as error:
-            print(f"V2 TRUCKSBOOK REVIEW ERROR: {type(error).__name__}: {error}")
-            await ctx.reply("The TrucksBook claim remains pending because its review could not be saved.", mention_author=False)
-            return
         await ctx.reply(
-            "TrucksBook ownership and A&T membership were recorded from the witnessed Steam-session review. "
-            "No mileage, achievements, roles, or Company Mods access were changed.",
+            "TrucksBook ownership approval is disabled pending provider-supported evidence. "
+            "TrucksBook uses email/password login; its initial Steam registration is not "
+            "a repeatable Steam sign-in. Steam verification remains separate. "
+            "The claim stays pending; no account, mileage or roles were changed.",
             mention_author=False,
         )
         return
@@ -8357,3 +8334,4 @@ else:
             "DISCORD_TOKEN has not been configured."
         )
     bot.run(TOKEN)
+

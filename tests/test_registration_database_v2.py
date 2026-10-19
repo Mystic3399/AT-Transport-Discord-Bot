@@ -455,65 +455,29 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(linked)
         self.assertEqual(profile_status, "pending")
 
-    async def test_witnessed_trucksbook_steam_review_matches_claim_and_stored_steam(self):
+    async def test_retired_trucksbook_steam_review_never_approves_claim(self):
         user = 991234567890123572
         reviewer = 991234567890123573
         steam = "76561198000000072"
-        digest = hashlib.sha256(b"private reviewed evidence").hexdigest()
+        digest = hashlib.sha256(b"unsupported witnessed review").hexdigest()
         await profiles.begin_registration(self.pool, user, 991234567890123574)
         async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO unified_steam_links(discord_user_id,steam_id64)
-                VALUES($1,$2)
-            """, user, steam)
+            await conn.execute("INSERT INTO unified_steam_links(discord_user_id,steam_id64) VALUES($1,$2)", user, steam)
         await profiles.submit_trucksbook_pending_claim(self.pool, user, "68097272")
-        with self.assertRaisesRegex(ValueError, "does not match the verified driver"):
+        with self.assertRaisesRegex(ValueError, "pending provider-supported evidence"):
             await profiles.approve_trucksbook_claim_after_witness(
-                self.pool, user, reviewer, "76561198000000073", "68097272", digest,
-                membership_confirmed=True,
-            )
-        with self.assertRaisesRegex(ValueError, "does not match the pending claim"):
-            await profiles.approve_trucksbook_claim_after_witness(
-                self.pool, user, reviewer, steam, "68097274", digest,
+                self.pool, user, reviewer, steam, "68097272", digest,
                 membership_confirmed=True,
             )
         async with self.pool.acquire() as conn:
-            self.assertEqual(await conn.fetchval("""
-                SELECT status FROM unified_provider_claims
-                WHERE discord_user_id=$1 AND provider='trucksbook'
-            """, user), "pending")
-            self.assertEqual(await conn.fetchval("""
-                SELECT count(*) FROM unified_provider_links
-                WHERE provider='trucksbook' AND discord_user_id=$1
-            """, user), 0)
-        approved = await profiles.approve_trucksbook_claim_after_witness(
-            self.pool, user, reviewer, steam, "68097272", digest,
-            membership_confirmed=True,
-        )
-        self.assertEqual(approved["status"], "verified")
-        async with self.pool.acquire() as conn:
-            claim = await conn.fetchrow("""
-                SELECT status,membership_confirmed,ownership_confirmed,
-                       ownership_evidence_kind,ownership_evidence_sha256,reviewed_by
-                FROM unified_provider_claims
-                WHERE discord_user_id=$1 AND provider='trucksbook'
-            """, user)
-            link = await conn.fetchrow("""
-                SELECT provider_account_id,verified_by FROM unified_provider_links
-                WHERE provider='trucksbook' AND discord_user_id=$1
-            """, user)
-        self.assertEqual(claim["status"], "approved")
-        self.assertTrue(claim["membership_confirmed"])
-        self.assertTrue(claim["ownership_confirmed"])
-        self.assertEqual(claim["ownership_evidence_kind"], "trucksbook_steam_authenticated_session")
-        self.assertEqual(claim["ownership_evidence_sha256"], digest)
-        self.assertEqual(claim["reviewed_by"], reviewer)
-        self.assertEqual(link["provider_account_id"], "68097272")
-        self.assertEqual(link["verified_by"], reviewer)
+            claim = await conn.fetchrow("SELECT status,ownership_confirmed FROM unified_provider_claims WHERE discord_user_id=$1 AND provider='trucksbook'", user)
+            self.assertEqual(claim["status"], "pending")
+            self.assertFalse(claim["ownership_confirmed"])
+            self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_provider_links WHERE provider='trucksbook' AND discord_user_id=$1", user), 0)
 
     async def test_boolean_only_trucksbook_approval_is_rejected(self):
         user = 991234567890123575
-        with self.assertRaisesRegex(ValueError, "witnessed Steam-session"):
+        with self.assertRaisesRegex(ValueError, "pending provider-supported verification"):
             await profiles.approve_provider_claim(
                 self.pool, user, "trucksbook", user + 1,
                 membership_confirmed=True, ownership_confirmed=True,
@@ -720,11 +684,11 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             case = await review.open_potential_duplicate(
                 self.pool, "8877665531", "8877665532", user
             )
-            resolved = await review.resolve_review_case(
-                self.pool, "8877665531", "8877665532",
-                "confirmed_duplicate", user, "independent_telemetry", digest,
-            )
-        self.assertEqual(resolved["status"], "confirmed_duplicate")
+            with self.assertRaisesRegex(ValueError, "Both job owners must be verified"):
+                await review.resolve_review_case(
+                    self.pool, "8877665531", "8877665532",
+                    "confirmed_duplicate", user, "independent_telemetry", digest,
+                )
         async with self.pool.acquire() as conn:
             status = await conn.fetchval("""
                 SELECT status FROM unified_job_reconciliation_cases WHERE case_id=$1
@@ -738,9 +702,9 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 FROM unified_provider_job_events WHERE provider_job_id IN
                     ('8877665531','8877665532')
             """)
-        self.assertEqual(status, "confirmed_duplicate")
-        self.assertEqual(audit["decision"], "confirmed_duplicate")
-        self.assertEqual(audit["evidence_sha256"], digest)
+        self.assertEqual(status, "potential_duplicate")
+        self.assertEqual(audit["decision"], "potential_duplicate")
+        self.assertIsNone(audit["evidence_sha256"])
         # Review leaves both immutable source observations in the ledger and does not credit either.
         self.assertEqual(miles["real"], Decimal("352.47"))
 
@@ -892,3 +856,4 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

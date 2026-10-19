@@ -54,10 +54,11 @@ def verified_job_evidence_reason(incoming):
         return "steam_identity_unverified"
     expected_evidence = {
         "trucky": {"trucky_signed_job_steam_match"},
-        # TrucksBook has no documented bot-verifiable ownership API. The
-        # accepted fallback is a recorded, staff-witnessed official Steam SSO
-        # session, never a public profile or display-name comparison.
-        "trucksbook": {"trucksbook_steam_authenticated_session"},
+        # Normal TrucksBook login is email/password. Its initial Steam
+        # registration does not establish a repeatable ownership assertion.
+        # No supported evidence mechanism has yet been verified for V2.
+        # Preserve old claims, but never use the retired SSO label for credit.
+        "trucksbook": set(),
     }[incoming["provider"]]
     if incoming.get("ownership_evidence_kind") not in expected_evidence:
         return "ownership_evidence_kind_unverified"
@@ -125,3 +126,4 @@ def canonical_credit_key(provider, provider_job_id, *, shared_journey_id=None,
             raise ValueError("Verified shared-journey evidence digest required")
         canonical = "shared:" + shared_journey_id
     return "v2:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+

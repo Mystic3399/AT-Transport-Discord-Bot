@@ -413,84 +413,19 @@ async def approve_trucksbook_claim_after_witness(
     pool, discord_user_id, reviewer_id, observed_steam_id64,
     observed_trucksbook_id, evidence_sha256, *, membership_confirmed,
 ):
-    """Approve only after staff witnesses the driver's fresh Steam SSO login to TrucksBook.
+    """Retired unsupported Steam-SSO review; never writes or acquires a database.
 
-    Reviewer must compare the SteamID64 from the authenticated Steam session to
-    the driver's verified Steam link, the resulting TrucksBook profile ID to
-    the pending claim, and active A&T company membership. Evidence stays with
-    the company; only its SHA-256 digest is stored here.
+    TrucksBook's Steam step is initial registration, not normal account login.
+    Email-session control and A&T Steam OpenID are separate evidence; neither
+    a reviewer-supplied Steam ID nor an evidence digest proves their linkage.
+    Retain the entry point so stale callers fail closed without changing data.
     """
-    import re
-    if reviewer_id == discord_user_id:
-        raise ValueError("You cannot approve your own tracking account")
-    if type(reviewer_id) is not int or reviewer_id <= 0:
-        raise ValueError("Reviewer identity is invalid")
-    if not isinstance(observed_steam_id64, str) or not re.fullmatch(r"7656119[0-9]{10}", observed_steam_id64):
-        raise ValueError("Observed Steam identity is invalid")
-    if (not isinstance(observed_trucksbook_id, str)
-            or not observed_trucksbook_id.isascii()
-            or not observed_trucksbook_id.isdecimal()):
-        raise ValueError("Observed TrucksBook account ID is invalid")
-    if not isinstance(evidence_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
-        raise ValueError("A SHA-256 digest of the retained review evidence is required")
-    if membership_confirmed is not True:
-        raise ValueError("Active A&T TrucksBook membership must be confirmed")
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            claim = await conn.fetchrow("""
-                SELECT provider_account_id,status FROM unified_provider_claims
-                WHERE discord_user_id=$1 AND provider='trucksbook' FOR UPDATE
-            """, discord_user_id)
-            if claim is None or claim["status"] != "pending":
-                raise ValueError("No pending TrucksBook claim for that driver")
-            if claim["provider_account_id"] != observed_trucksbook_id:
-                raise ValueError("Observed TrucksBook account does not match the pending claim")
-            stored_steam = await conn.fetchval("""
-                SELECT steam_id64 FROM unified_steam_links
-                WHERE discord_user_id=$1 AND verified_at IS NOT NULL FOR UPDATE
-            """, discord_user_id)
-            if stored_steam is None or stored_steam != observed_steam_id64:
-                raise ValueError("Observed Steam account does not match the verified driver identity")
-            existing = await conn.fetchrow("""
-                SELECT provider_account_id,discord_user_id FROM unified_provider_links
-                WHERE (provider='trucksbook' AND provider_account_id=$1)
-                   OR (provider='trucksbook' AND discord_user_id=$2)
-                FOR UPDATE
-            """, observed_trucksbook_id, discord_user_id)
-            if existing and (existing["provider_account_id"] != observed_trucksbook_id
-                             or existing["discord_user_id"] != discord_user_id):
-                raise ValueError("TrucksBook account is already linked to another driver")
-            await conn.execute("""
-                INSERT INTO unified_provider_links
-                  (provider,provider_account_id,discord_user_id,verified_at,verified_by)
-                VALUES('trucksbook',$1,$2,NOW(),$3)
-                ON CONFLICT(provider,provider_account_id) DO NOTHING
-            """, observed_trucksbook_id, discord_user_id, reviewer_id)
-            linked = await conn.fetchval("""
-                SELECT EXISTS(SELECT 1 FROM unified_provider_links
-                  WHERE provider='trucksbook' AND provider_account_id=$1
-                    AND discord_user_id=$2 AND verified_at IS NOT NULL)
-            """, observed_trucksbook_id, discord_user_id)
-            if not linked:
-                raise ValueError("TrucksBook account is already linked to another driver")
-            await conn.execute("""
-                UPDATE unified_provider_claims
-                SET status='approved',membership_confirmed=TRUE,ownership_confirmed=TRUE,
-                    reviewed_by=$2,reviewed_at=NOW(),
-                    ownership_evidence_kind='trucksbook_steam_authenticated_session',
-                    ownership_evidence_sha256=$3
-                WHERE discord_user_id=$1 AND provider='trucksbook'
-            """, discord_user_id, reviewer_id, evidence_sha256)
-            await conn.execute("""
-                UPDATE unified_driver_profiles
-                SET status='active',activated_at=COALESCE(activated_at,NOW())
-                WHERE discord_user_id=$1
-            """, discord_user_id)
-            await conn.execute("""
-                UPDATE unified_registration_sessions
-                SET status='approved',updated_at=NOW() WHERE discord_user_id=$1
-            """, discord_user_id)
-    return {"status": "verified", "provider": "trucksbook"}
+    raise ValueError(
+        "TrucksBook ownership verification is pending provider-supported evidence. "
+        "Normal TrucksBook login uses email/password; the former witnessed "
+        "Steam-login approval is disabled. No account or mileage was changed."
+    )
+
 
 async def activate_if_verified(pool, discord_user_id):
     """Only verified provider links may activate a profile; no mileage writes."""
@@ -666,7 +601,7 @@ async def approve_provider_claim(pool, discord_user_id, provider, reviewer_id,
     if provider == "trucky":
         raise ValueError("Trucky ownership requires a fresh signed job event matching Steam OpenID")
     if provider == "trucksbook":
-        raise ValueError("TrucksBook ownership requires the witnessed Steam-session verification flow")
+        raise ValueError("TrucksBook ownership is pending provider-supported verification; the Steam-login flow is disabled")
     if reviewer_id == discord_user_id:
         raise ValueError("You cannot approve your own tracking account")
     if not membership_confirmed or not ownership_confirmed:
@@ -1027,3 +962,4 @@ async def record_normalized_provider_job(
                     raise ValueError("Conflicting duplicate provider job requires review")
                 return False
             return True
+

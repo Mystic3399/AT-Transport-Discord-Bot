@@ -314,9 +314,8 @@ async def apply_verified_credit(
                        AND c.status='approved' AND c.ownership_confirmed=TRUE
                        AND c.membership_confirmed=TRUE
                        AND c.ownership_evidence_sha256 IS NOT NULL
-                       AND c.ownership_evidence_kind = CASE l.provider
-                         WHEN 'trucky' THEN 'trucky_signed_job_steam_match'
-                         ELSE 'trucksbook_steam_authenticated_session' END
+                       AND l.provider='trucky'
+                       AND c.ownership_evidence_kind='trucky_signed_job_steam_match'
                        AND (c.expires_at IS NULL OR c.expires_at>NOW())
                       JOIN unified_steam_links s
                         ON s.discord_user_id=e.discord_user_id AND s.verified_at IS NOT NULL
@@ -339,9 +338,8 @@ async def apply_verified_credit(
                     AND c.status='approved' AND c.ownership_confirmed=TRUE
                     AND c.membership_confirmed=TRUE
                     AND c.ownership_evidence_sha256=$4
-                    AND c.ownership_evidence_kind = CASE l.provider
-                      WHEN 'trucky' THEN 'trucky_signed_job_steam_match'
-                      ELSE 'trucksbook_steam_authenticated_session' END
+                    AND l.provider='trucky'
+                    AND c.ownership_evidence_kind='trucky_signed_job_steam_match'
                     AND (c.expires_at IS NULL OR c.expires_at>NOW())
                     AND s.verified_at IS NOT NULL
                 )
