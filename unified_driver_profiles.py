@@ -931,6 +931,7 @@ async def auto_approve_trucky_if_steam_matches(
                     ownership_evidence_kind='trucky_signed_job_steam_match',
                     ownership_evidence_sha256=$3
                 WHERE discord_user_id=$1 AND provider='trucky'
+                  AND provider_account_id=$2
             """,discord_user_id, account_id, payload_sha256)
             await conn.execute("""
                 UPDATE unified_driver_profiles
