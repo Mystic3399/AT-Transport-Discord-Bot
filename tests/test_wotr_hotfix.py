@@ -133,6 +133,7 @@ class AuditApplyTests(unittest.TestCase):
                     if 'FROM driver_progress' in sql: return {'real_miles': total[0], 'trucksbook_name': 'TruckTan'}
                     raise AssertionError(sql)
                 async def fetch(self, sql, *args):
+                    if 'FROM driver_links' in sql: return []
                     return [c for c in candidates.values() if not c.get('applied')]
                 async def fetchval(self, sql, *args):
                     if 'SELECT real_miles' in sql: return total[0]
@@ -171,7 +172,7 @@ class AuditApplyTests(unittest.TestCase):
             guild = SimpleNamespace(id=1, me=object(), text_channels=[channel])
             ctx = SimpleNamespace(guild=guild, reply=reply, send=reply, author=SimpleNamespace(id=99))
             discord = SimpleNamespace(Forbidden=type('Forbidden', (Exception,), {}), HTTPException=type('HTTPException', (Exception,), {}))
-            ns = dict(NS, db_pool=SimpleNamespace(acquire=Lease), GUILD_ID=1, discord=discord,
+            ns = dict(NS, json=__import__('json'), db_pool=SimpleNamespace(acquire=Lease), GUILD_ID=1, discord=discord,
                       find_driver_link=find, PROGRESSION_ROLES=[], sync_member_progression_role=sync,
                       sync_permanent_system_for_driver=sync, announce_pending_repair_achievements=announce,
                       refresh_driver_leaderboard=sync)
@@ -182,7 +183,7 @@ class AuditApplyTests(unittest.TestCase):
             self.assertEqual(set(candidates), {'68007306', '123'})
             self.assertEqual(candidates['123']['missing_distance'], 100)
             self.assertEqual(candidates['68007306']['repair_kind'], 'missing_wotr')
-            self.assertIn('driver not linked: `1`', replies[-1])
+            self.assertTrue(any('driver not linked: `1`' in text for text in replies))
             await apply(ctx)  # explicit confirmation is required
             self.assertEqual(total[0], 13)
             await apply(ctx, 'CONFIRM')
