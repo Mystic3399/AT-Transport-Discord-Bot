@@ -56,21 +56,20 @@ def production_activation_blockers(config=None, runtime=None):
         blockers.append("owner_approval_missing")
 
     expected = {
-        "AT_V2_RUNTIME_RAILWAY_ENVIRONMENT_ID": PRODUCTION_ENVIRONMENT_ID,
-        "AT_V2_RUNTIME_RAILWAY_SERVICE_ID": PRODUCTION_SERVICE_ID,
+        "RAILWAY_ENVIRONMENT_ID": PRODUCTION_ENVIRONMENT_ID,
+        "RAILWAY_SERVICE_ID": PRODUCTION_SERVICE_ID,
     }
     for key, value in expected.items():
-        if env.get(key) != value or observed.get(key.removeprefix("AT_V2_RUNTIME_")) != value:
+        if observed.get(key) != value:
             blockers.append("production_deployment_identity_mismatch")
             break
 
     approved_commit = env.get("AT_V2_APPROVED_RELEASE_COMMIT")
-    if (not approved_commit or observed.get("commit_sha") != approved_commit
+    if (not approved_commit or observed.get("RAILWAY_GIT_COMMIT_SHA") != approved_commit
             or not re.fullmatch(r"[0-9a-f]{40}", approved_commit)):
         blockers.append("approved_release_commit_mismatch")
     deployment_id = env.get("AT_V2_APPROVED_DEPLOYMENT_ID")
-    if (not deployment_id or observed.get("deployment_id") != deployment_id
-            or observed.get("deployment_id") != env.get("AT_V2_RUNTIME_DEPLOYMENT_ID")):
+    if (not deployment_id or observed.get("RAILWAY_DEPLOYMENT_ID") != deployment_id):
         blockers.append("approved_deployment_mismatch")
 
     expected_db = env.get("AT_V2_EXPECTED_DATABASE_FINGERPRINT") or ""

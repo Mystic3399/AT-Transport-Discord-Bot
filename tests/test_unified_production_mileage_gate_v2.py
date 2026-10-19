@@ -16,9 +16,6 @@ class ProductionMileageGateTests(unittest.IsolatedAsyncioTestCase):
         self.config = {
             "AT_V2_PRODUCTION_MILEAGE_ENABLED": "YES",
             "AT_V2_PRODUCTION_OWNER_APPROVAL_REF": "owner-approval-record",
-            "AT_V2_RUNTIME_RAILWAY_ENVIRONMENT_ID": PRODUCTION_ENVIRONMENT_ID,
-            "AT_V2_RUNTIME_RAILWAY_SERVICE_ID": PRODUCTION_SERVICE_ID,
-            "AT_V2_RUNTIME_DEPLOYMENT_ID": "deploy-production-01",
             "AT_V2_APPROVED_DEPLOYMENT_ID": "deploy-production-01",
             "AT_V2_APPROVED_RELEASE_COMMIT": "c" * 40,
             "AT_V2_EXPECTED_DATABASE_FINGERPRINT": self.fingerprint,
@@ -27,8 +24,8 @@ class ProductionMileageGateTests(unittest.IsolatedAsyncioTestCase):
         self.runtime = {
             "RAILWAY_ENVIRONMENT_ID": PRODUCTION_ENVIRONMENT_ID,
             "RAILWAY_SERVICE_ID": PRODUCTION_SERVICE_ID,
-            "deployment_id": "deploy-production-01",
-            "commit_sha": "c" * 40,
+            "RAILWAY_DEPLOYMENT_ID": "deploy-production-01",
+            "RAILWAY_GIT_COMMIT_SHA": "c" * 40,
             "database_fingerprint": self.fingerprint,
             "source_authentication_verified": True,
             "preflight_acceptance_passed": True,
@@ -57,7 +54,7 @@ class ProductionMileageGateTests(unittest.IsolatedAsyncioTestCase):
         for runtime_key, value, expected_reason in (
             ("RAILWAY_SERVICE_ID", "staging-service", "production_deployment_identity_mismatch"),
             ("database_fingerprint", "d" * 64, "production_database_identity_unverified"),
-            ("commit_sha", "e" * 40, "approved_release_commit_mismatch"),
+            ("RAILWAY_GIT_COMMIT_SHA", "e" * 40, "approved_release_commit_mismatch"),
             ("source_authentication_verified", False, "provider_source_authentication_unverified"),
             ("preflight_acceptance_passed", False, "preflight_acceptance_missing"),
             ("historical_overlap_audit_passed", False, "historical_overlap_audit_missing"),
