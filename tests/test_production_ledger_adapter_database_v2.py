@@ -164,14 +164,21 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_migration_refuses_without_explicit_production_preflight(self):
-        with self.assertRaisesRegex(RuntimeError, "Production ledger migration blocked"):
-            await install_production_ledger_schema(self.pool, config={}, runtime={})
         async with self.pool.acquire() as conn:
-            self.assertEqual(await conn.fetchval("""
+            before_count = await conn.fetchval("""
                 SELECT count(*) FROM information_schema.tables
                 WHERE table_schema=current_schema()
                   AND table_name LIKE 'unified_v2_production_%'
-            """), 0)
+            """)
+        with self.assertRaisesRegex(RuntimeError, "Production ledger migration blocked"):
+            await install_production_ledger_schema(self.pool, config={}, runtime={})
+        async with self.pool.acquire() as conn:
+            after_count = await conn.fetchval("""
+                SELECT count(*) FROM information_schema.tables
+                WHERE table_schema=current_schema()
+                  AND table_name LIKE 'unified_v2_production_%'
+            """)
+        self.assertEqual(after_count, before_count)
 
     async def award(self, job, **kwargs):
         return await apply_verified_credit(
