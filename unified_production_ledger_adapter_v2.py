@@ -1,0 +1,362 @@
+"""Fail-closed, additive V2 mileage ledger adapter for future production use.
+
+This adapter is deliberately not wired into bot.py, Discord roles, achievements,
+Company Mods, or the legacy driver_progress/processed_jobs tables. Its only
+write target is a separate V2 ledger and aggregate table. Every award call
+rechecks the production activation boundary and database identity.
+"""
+from decimal import Decimal, InvalidOperation
+
+from unified_mileage_engine_control_v2 import (
+    canonical_credit_key,
+    verified_job_evidence_reason,
+)
+from unified_production_mileage_gate_v2 import (
+    production_activation_blockers,
+    read_only_database_fingerprint,
+)
+
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS unified_v2_production_credit_ledger (
+ provider TEXT NOT NULL CHECK(provider IN ('trucksbook','trucky')),
+ provider_job_id TEXT NOT NULL,
+ discord_user_id BIGINT NOT NULL REFERENCES unified_driver_profiles(discord_user_id),
+ provider_account_id TEXT NOT NULL,
+ mileage_type TEXT NOT NULL CHECK(mileage_type IN ('real','race')),
+ miles NUMERIC(24,10) NOT NULL CHECK(miles > 0),
+ canonical_credit_key TEXT NOT NULL,
+ source_evidence_sha256 TEXT NOT NULL CHECK(source_evidence_sha256 ~ '^[0-9a-f]{64}$'),
+ ownership_evidence_sha256 TEXT NOT NULL CHECK(ownership_evidence_sha256 ~ '^[0-9a-f]{64}$'),
+ credited_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ PRIMARY KEY(provider,provider_job_id),
+ UNIQUE(discord_user_id,canonical_credit_key)
+);
+CREATE TABLE IF NOT EXISTS unified_v2_production_mileage_totals (
+ discord_user_id BIGINT PRIMARY KEY REFERENCES unified_driver_profiles(discord_user_id),
+ baseline_trucksbook_real_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(baseline_trucksbook_real_miles >= 0),
+ combined_real_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(combined_real_miles >= 0),
+ trucky_race_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(trucky_race_miles >= 0),
+ trucksbook_real_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(trucksbook_real_miles >= 0),
+ updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS unified_v2_production_mileage_decisions (
+ decision_id BIGSERIAL PRIMARY KEY,
+ provider TEXT NOT NULL CHECK(provider IN ('trucksbook','trucky')),
+ provider_job_id TEXT NOT NULL,
+ discord_user_id BIGINT,
+ decision TEXT NOT NULL CHECK(decision IN (
+   'credited','duplicate_provider_job','pending_reconciliation',
+   'duplicate_canonical_credit','rejected_evidence')),
+ reason_code TEXT NOT NULL,
+ evidence_sha256 TEXT CHECK(evidence_sha256 IS NULL OR evidence_sha256 ~ '^[0-9a-f]{64}$'),
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS unified_v2_prod_decisions_job_idx
+ ON unified_v2_production_mileage_decisions(provider,provider_job_id,created_at);
+"""
+
+
+def production_ledger_migration_plan():
+    """Return operator-facing migration guarantees; intentionally no DDL here."""
+    return {
+        "mode": "additive_only",
+        "legacy_tables_written": [],
+        "tables_created": [
+            "unified_v2_production_credit_ledger",
+            "unified_v2_production_mileage_totals",
+            "unified_v2_production_mileage_decisions",
+        ],
+        "rollback": "disable adapter; preserve V2 ledger rows; no DROP or legacy restore",
+        "historical_backfill": "one-time additive snapshot from driver_progress; conflicts never overwrite",
+        "cutover": "pause and drain legacy TrucksBook writer before taking the baseline snapshot",
+        "roles_achievements_company_mods": "not written by this adapter",
+    }
+
+
+async def install_production_ledger_schema(pool):
+    """Install only additive tables in one transaction; never alter legacy data."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            legacy_tables = await conn.fetchval("""
+                SELECT count(*) FROM information_schema.tables
+                WHERE table_schema=current_schema()
+                  AND table_name = ANY($1::text[])
+            """, ["driver_progress", "processed_jobs"])
+            if legacy_tables != 2:
+                raise RuntimeError("Required legacy mileage tables are missing; migration refused")
+            await conn.execute(SCHEMA)
+            await conn.execute("""
+                ALTER TABLE unified_v2_production_mileage_totals
+                  ADD COLUMN IF NOT EXISTS baseline_trucksbook_real_miles NUMERIC(24,10)
+                    NOT NULL DEFAULT 0 CHECK(baseline_trucksbook_real_miles >= 0)
+            """)
+            # Snapshot, never overwrite: migration retries cannot reset V2
+            # totals, and the original driver_progress row is read only.
+            await conn.execute("""
+                INSERT INTO unified_v2_production_mileage_totals
+                  (discord_user_id,baseline_trucksbook_real_miles,combined_real_miles,
+                   trucksbook_real_miles)
+                SELECT discord_user_id,real_miles,real_miles,real_miles
+                FROM driver_progress
+                ON CONFLICT(discord_user_id) DO NOTHING
+            """)
+            existing = await conn.fetchval("""
+                SELECT count(*) FROM information_schema.tables
+                WHERE table_schema=current_schema()
+                  AND table_name = ANY($1::text[])
+            """, [
+                "unified_v2_production_credit_ledger",
+                "unified_v2_production_mileage_totals",
+                "unified_v2_production_mileage_decisions",
+            ])
+            if existing != 3:
+                raise RuntimeError("Production ledger schema verification failed")
+
+
+def _decimal_miles(value):
+    try:
+        miles = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("Invalid mileage") from exc
+    if (not miles.is_finite() or miles <= 0
+            or miles != miles.quantize(Decimal("0.0000000001"))):
+        raise ValueError("Mileage must be positive and within ledger precision")
+    return miles
+
+
+async def apply_verified_credit(
+    pool, job, *, config, runtime, feed_evidence,
+    reconciliation_status, reconciliation_evidence_sha256=None,
+    reviewer_id=None,
+):
+    """Atomically credit a fully verified event to the separate V2 ledger.
+
+    `reconciliation_status` must be `no_candidate` with complete authenticated
+    feed/watermark evidence, `verified_independent` with a matching audited
+    review case, or `confirmed_duplicate` with an audited selected primary.
+    Pending and non-primary duplicate records never award mileage.
+    This function does not update any legacy totals or trigger external effects.
+    """
+    from unified_mileage_engine_control_v2 import feed_evidence_is_complete, policy_mileage_buckets
+
+    reason = verified_job_evidence_reason(job)
+    if reason:
+        return {"status": "rejected_evidence", "reason": reason}
+    if reconciliation_status not in (
+        "no_candidate", "verified_independent", "pending", "confirmed_duplicate"
+    ):
+        return {"status": "rejected_evidence", "reason": "reconciliation_status_invalid"}
+    pending_reason = None
+    feed_complete = (
+        isinstance(feed_evidence, dict)
+        and feed_evidence_is_complete(**feed_evidence)
+    )
+    if reconciliation_status == "pending":
+        pending_reason = reconciliation_status
+    elif not feed_complete:
+        pending_reason = "provider_feed_incomplete"
+    if reconciliation_status in ("verified_independent", "confirmed_duplicate"):
+        if (type(reviewer_id) is not int or reviewer_id <= 0
+                or not isinstance(reconciliation_evidence_sha256, str)
+                or len(reconciliation_evidence_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in reconciliation_evidence_sha256)):
+            pending_reason = "review_evidence_missing"
+    elif reconciliation_evidence_sha256 is None and feed_complete:
+        # A complete authenticated feed snapshot is itself the audit evidence.
+        reconciliation_evidence_sha256 = feed_evidence["snapshot_sha256"]
+
+    provider = job["provider"]
+    provider_job_id = job["provider_job_id"]
+    user_id = job["discord_user_id"]
+    account_id = job["provider_account_id"]
+    amount = _decimal_miles(job["miles"])
+    key = job.get("canonical_credit_key")
+    if (not isinstance(key, str) or not key.startswith("v2:") or len(key) != 67
+            or any(c not in "0123456789abcdef" for c in key[3:])):
+        return {"status": "rejected_evidence", "reason": "canonical_credit_key_invalid"}
+    if reconciliation_status in ("no_candidate", "verified_independent"):
+        if key != canonical_credit_key(provider, provider_job_id):
+            return {"status": "pending_reconciliation", "reason": "shared_key_requires_duplicate_review"}
+    if reconciliation_status == "confirmed_duplicate":
+        primary = job.get("reconciliation_primary") or {}
+        companion = job.get("reconciliation_companion") or {}
+        if (not isinstance(primary, dict)
+                or not isinstance(companion, dict)
+                or primary.get("provider") not in ("trucky", "trucksbook")
+                or companion.get("provider") not in ("trucky", "trucksbook")
+                or primary.get("provider") == companion.get("provider")
+                or not primary.get("provider_job_id")
+                or not companion.get("provider_job_id")):
+            pending_reason = pending_reason or "duplicate_review_pair_missing"
+        elif (primary.get("provider") != provider
+              or primary.get("provider_job_id") != provider_job_id):
+            pending_reason = pending_reason or "duplicate_not_selected_for_credit"
+    elif reconciliation_status == "verified_independent":
+        companion = job.get("reconciliation_companion") or {}
+        if (not isinstance(companion, dict)
+                or companion.get("provider") not in ("trucky", "trucksbook")
+                or companion.get("provider") == provider
+                or not companion.get("provider_job_id")):
+            pending_reason = pending_reason or "independent_review_pair_missing"
+    ownership_digest = job.get("ownership_evidence_sha256")
+    if (not isinstance(ownership_digest, str) or len(ownership_digest) != 64
+            or any(c not in "0123456789abcdef" for c in ownership_digest)):
+        return {"status": "rejected_evidence", "reason": "ownership_evidence_missing"}
+    buckets = policy_mileage_buckets(provider, job["mileage_type"], amount)
+
+    async with pool.acquire() as conn:
+        # Bind the approval to the actual database being written, not a caller
+        # supplied fingerprint. The following transaction writes only V2 tables.
+        actual_fingerprint = await read_only_database_fingerprint(conn)
+        observed = {**runtime, "database_fingerprint": actual_fingerprint}
+        blockers = production_activation_blockers(config, observed)
+        if blockers:
+            return {"status": "activation_blocked", "blockers": blockers}
+
+        async with conn.transaction():
+            async def log_decision(decision, reason):
+                await conn.execute("""
+                    INSERT INTO unified_v2_production_mileage_decisions
+                      (provider,provider_job_id,discord_user_id,decision,reason_code,evidence_sha256)
+                    VALUES($1,$2,$3,$4,$5,$6)
+                """, provider, provider_job_id, user_id, decision, reason,
+                     reconciliation_evidence_sha256)
+
+            if pending_reason:
+                await log_decision("pending_reconciliation", pending_reason)
+                return {"status": "pending_reconciliation", "reason": pending_reason}
+            if provider == "trucksbook":
+                historical = await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM processed_jobs WHERE job_id=$1)",
+                    provider_job_id,
+                )
+                if historical:
+                    await log_decision("pending_reconciliation", "historical_job_overlap")
+                    return {"status": "pending_reconciliation", "reason": "historical_job_overlap"}
+            event = await conn.fetchrow("""
+                SELECT discord_user_id,provider_account_id,real_miles,race_miles,source_payload
+                FROM unified_provider_job_events
+                WHERE provider=$1 AND provider_job_id=$2 FOR UPDATE
+            """, provider, provider_job_id)
+            if (event is None or event["discord_user_id"] != user_id
+                    or event["provider_account_id"] != account_id):
+                await log_decision("rejected_evidence", "provider_event_mismatch")
+                return {"status": "rejected_evidence", "reason": "provider_event_mismatch"}
+
+            if reconciliation_status in ("verified_independent", "confirmed_duplicate") and not pending_reason:
+                companion = job["reconciliation_companion"]
+                expected_trucky = provider_job_id if provider == "trucky" else companion["provider_job_id"]
+                expected_trucksbook = provider_job_id if provider == "trucksbook" else companion["provider_job_id"]
+                case_status = reconciliation_status
+                audited_case = await conn.fetchval("""
+                    SELECT EXISTS(
+                      SELECT 1 FROM unified_job_reconciliation_cases c
+                      JOIN unified_job_reconciliation_audit a ON a.case_id=c.case_id
+                      WHERE c.trucky_job_id=$1 AND c.trucksbook_job_id=$2
+                        AND c.discord_user_id=$3 AND c.status=$4
+                        AND a.decision=$4 AND a.reviewer_discord_id=$5
+                        AND a.evidence_sha256=$6
+                    )
+                """, expected_trucky, expected_trucksbook, user_id,
+                     case_status, reviewer_id, reconciliation_evidence_sha256)
+                other_provider_verified = await conn.fetchval("""
+                    SELECT EXISTS(
+                      SELECT 1 FROM unified_provider_job_events e
+                      JOIN unified_provider_links l
+                        ON l.provider=e.provider AND l.provider_account_id=e.provider_account_id
+                       AND l.discord_user_id=e.discord_user_id AND l.verified_at IS NOT NULL
+                      JOIN unified_provider_claims c
+                        ON c.provider=l.provider AND c.provider_account_id=l.provider_account_id
+                       AND c.discord_user_id=l.discord_user_id
+                       AND c.status='approved' AND c.ownership_confirmed=TRUE
+                      JOIN unified_steam_links s
+                        ON s.discord_user_id=e.discord_user_id AND s.verified_at IS NOT NULL
+                      WHERE e.provider=$1 AND e.provider_job_id=$2 AND e.discord_user_id=$3
+                    )
+                """, companion["provider"], companion["provider_job_id"], user_id)
+                if not audited_case or not other_provider_verified:
+                    await log_decision("pending_reconciliation", "review_case_or_companion_unverified")
+                    return {"status": "pending_reconciliation", "reason": "review_case_or_companion_unverified"}
+
+            ownership = await conn.fetchval("""
+                SELECT EXISTS(
+                  SELECT 1 FROM unified_provider_links l
+                  JOIN unified_provider_claims c
+                    ON c.provider=l.provider AND c.provider_account_id=l.provider_account_id
+                   AND c.discord_user_id=l.discord_user_id
+                  JOIN unified_steam_links s ON s.discord_user_id=l.discord_user_id
+                  WHERE l.provider=$1 AND l.provider_account_id=$2
+                    AND l.discord_user_id=$3 AND l.verified_at IS NOT NULL
+                    AND c.status='approved' AND c.ownership_confirmed=TRUE
+                    AND s.verified_at IS NOT NULL
+                )
+            """, provider, account_id, user_id)
+            if not ownership:
+                await log_decision("rejected_evidence", "provider_ownership_not_linked")
+                return {"status": "rejected_evidence", "reason": "provider_ownership_not_linked"}
+
+            expected_real = amount if job["mileage_type"] == "real" else Decimal(0)
+            expected_race = amount if job["mileage_type"] == "race" else Decimal(0)
+            # Legacy normalized event columns are NUMERIC(12,2). Compare the
+            # exact ten-place distance retained in the immutable source payload
+            # as well, so the new ledger does not inherit that display precision.
+            import json
+            source_payload = event["source_payload"]
+            if isinstance(source_payload, str):
+                source_payload = json.loads(source_payload)
+            try:
+                exact_event_miles = Decimal(str(source_payload["canonical_miles"]))
+            except (TypeError, KeyError, InvalidOperation):
+                exact_event_miles = None
+            stored_real = Decimal(str(event["real_miles"]))
+            stored_race = Decimal(str(event["race_miles"]))
+            if (exact_event_miles != amount
+                    or source_payload.get("mileage_type") != job["mileage_type"]
+                    or (job["mileage_type"] == "real" and (stored_real <= 0 or stored_race != 0))
+                    or (job["mileage_type"] == "race" and (stored_race <= 0 or stored_real != 0))):
+                await log_decision("rejected_evidence", "distance_or_classification_mismatch")
+                return {"status": "rejected_evidence", "reason": "distance_or_classification_mismatch"}
+
+            inserted = await conn.fetchval("""
+                INSERT INTO unified_v2_production_credit_ledger
+                  (provider,provider_job_id,discord_user_id,provider_account_id,
+                   mileage_type,miles,canonical_credit_key,
+                   source_evidence_sha256,ownership_evidence_sha256)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                ON CONFLICT DO NOTHING RETURNING provider_job_id
+            """, provider, provider_job_id, user_id, account_id,
+                 job["mileage_type"], amount, job["canonical_credit_key"],
+                 job["source_evidence_sha256"], job["ownership_evidence_sha256"])
+            if inserted is None:
+                existing = await conn.fetchrow("""
+                    SELECT discord_user_id,miles,mileage_type,canonical_credit_key
+                    FROM unified_v2_production_credit_ledger
+                    WHERE provider=$1 AND provider_job_id=$2
+                """, provider, provider_job_id)
+                if existing is not None:
+                    if (existing["discord_user_id"] != user_id
+                            or Decimal(str(existing["miles"])) != amount
+                            or existing["mileage_type"] != job["mileage_type"]
+                            or existing["canonical_credit_key"] != job["canonical_credit_key"]):
+                        await log_decision("rejected_evidence", "conflicting_provider_job_replay")
+                        return {"status": "rejected_evidence", "reason": "conflicting_provider_job_replay"}
+                    decision, reason_code = "duplicate_provider_job", "idempotent_replay"
+                else:
+                    decision, reason_code = "duplicate_canonical_credit", "canonical_key_already_credited"
+                await log_decision(decision, reason_code)
+                return {"status": decision, "reason": reason_code}
+
+            await conn.execute("""
+                INSERT INTO unified_v2_production_mileage_totals
+                  (discord_user_id,combined_real_miles,trucky_race_miles,trucksbook_real_miles)
+                VALUES($1,$2,$3,$4)
+                ON CONFLICT(discord_user_id) DO UPDATE SET
+                  combined_real_miles=unified_v2_production_mileage_totals.combined_real_miles+EXCLUDED.combined_real_miles,
+                  trucky_race_miles=unified_v2_production_mileage_totals.trucky_race_miles+EXCLUDED.trucky_race_miles,
+                  trucksbook_real_miles=unified_v2_production_mileage_totals.trucksbook_real_miles+EXCLUDED.trucksbook_real_miles,
+                  updated_at=NOW()
+            """, user_id, buckets["combined_real_miles"],
+                 buckets["trucky_race_miles"], buckets["company_mods_trucksbook_real_miles"])
+            await log_decision("credited", "verified_and_reconciled")
+            return {"status": "credited", "miles": str(amount), "policy_buckets": buckets}
