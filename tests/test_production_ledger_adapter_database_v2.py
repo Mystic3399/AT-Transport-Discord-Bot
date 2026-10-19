@@ -2,6 +2,7 @@
 import asyncio
 import os
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -54,6 +55,19 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
                   processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
             """)
         self.config, self.runtime = await self.approved_test_boundary()
+        injected = {
+            **self.config,
+            **{key: self.runtime[key] for key in (
+                "RAILWAY_ENVIRONMENT_ID", "RAILWAY_SERVICE_ID",
+                "RAILWAY_DEPLOYMENT_ID", "RAILWAY_GIT_COMMIT_SHA",
+            )},
+            "AT_V2_ISOLATED_STAGING": "",
+            "AT_V2_TEST_DATABASE_DISPOSABLE": "",
+            "AT_V2_MILEAGE_ENGINE_TEST_ENABLED": "",
+        }
+        patcher = patch.dict(os.environ, injected, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     async def asyncTearDown(self):
         await self.pool.close()
@@ -182,7 +196,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         async with self.pool.acquire() as conn:
             self.assertEqual(await conn.fetchval("SELECT real_miles FROM driver_progress WHERE discord_user_id=991234567890123701"), 40000)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM processed_jobs WHERE job_id='historical-991234567890123701'"), 1)
-            self.assertEqual(await conn.fetchval("SELECT baseline_trucksbook_real_miles FROM unified_v2_production_mileage_totals WHERE discord_user_id=991234567890123701"), Decimal("40000"))
+            self.assertEqual(await conn.fetchval("SELECT trucksbook_real_miles FROM unified_v2_production_mileage_baselines WHERE discord_user_id=991234567890123701"), 40000)
 
     async def test_provider_retries_fractionals_and_policy_buckets(self):
         await install_production_ledger_schema(self.pool)
@@ -230,7 +244,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         async with self.pool.acquire() as conn:
             self.assertEqual(await conn.fetchval("SELECT real_miles FROM driver_progress WHERE discord_user_id=$1", job["discord_user_id"]), 12345)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_credit_ledger WHERE provider_job_id=$1", job["provider_job_id"]), 0)
-            self.assertEqual(await conn.fetchval("SELECT baseline_trucksbook_real_miles FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", job["discord_user_id"]), Decimal("12345"))
+            self.assertEqual(await conn.fetchval("SELECT trucksbook_real_miles FROM unified_v2_production_mileage_baselines WHERE discord_user_id=$1", job["discord_user_id"]), 12345)
 
     async def test_decimal_miles_accumulate_without_whole_mile_rounding(self):
         await install_production_ledger_schema(self.pool)
@@ -330,6 +344,12 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "activation_blocked")
         async with self.pool.acquire() as conn:
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_credit_ledger WHERE provider_job_id=$1", job["provider_job_id"]), 0)
+        with patch.dict(os.environ, {"AT_V2_TEST_DATABASE_DISPOSABLE": "YES"}):
+            result = await apply_verified_credit(
+                self.pool, job, config=self.config, runtime=self.runtime,
+                feed_evidence=self.complete_feed(), reconciliation_status="no_candidate",
+            )
+        self.assertEqual(result["status"], "activation_blocked")
 
 
 if __name__ == "__main__":

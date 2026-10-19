@@ -6,6 +6,7 @@ write target is a separate V2 ledger and aggregate table. Every award call
 rechecks the production activation boundary and database identity.
 """
 from decimal import Decimal, InvalidOperation
+import os
 
 from unified_mileage_engine_control_v2 import (
     canonical_credit_key,
@@ -34,11 +35,15 @@ CREATE TABLE IF NOT EXISTS unified_v2_production_credit_ledger (
 );
 CREATE TABLE IF NOT EXISTS unified_v2_production_mileage_totals (
  discord_user_id BIGINT PRIMARY KEY REFERENCES unified_driver_profiles(discord_user_id),
- baseline_trucksbook_real_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(baseline_trucksbook_real_miles >= 0),
  combined_real_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(combined_real_miles >= 0),
  trucky_race_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(trucky_race_miles >= 0),
  trucksbook_real_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(trucksbook_real_miles >= 0),
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS unified_v2_production_mileage_baselines (
+ discord_user_id BIGINT PRIMARY KEY,
+ trucksbook_real_miles BIGINT NOT NULL CHECK(trucksbook_real_miles >= 0),
+ snapshotted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE TABLE IF NOT EXISTS unified_v2_production_mileage_decisions (
  decision_id BIGSERIAL PRIMARY KEY,
@@ -65,6 +70,7 @@ def production_ledger_migration_plan():
         "tables_created": [
             "unified_v2_production_credit_ledger",
             "unified_v2_production_mileage_totals",
+            "unified_v2_production_mileage_baselines",
             "unified_v2_production_mileage_decisions",
         ],
         "rollback": "disable adapter; preserve V2 ledger rows; no DROP or legacy restore",
@@ -86,18 +92,13 @@ async def install_production_ledger_schema(pool):
             if legacy_tables != 2:
                 raise RuntimeError("Required legacy mileage tables are missing; migration refused")
             await conn.execute(SCHEMA)
+            # Snapshot, never overwrite: migration retries cannot reset or
+            # rewrite legacy mileage; all Discord IDs remain represented even
+            # if unified profile backfill has not yet run for every driver.
             await conn.execute("""
-                ALTER TABLE unified_v2_production_mileage_totals
-                  ADD COLUMN IF NOT EXISTS baseline_trucksbook_real_miles NUMERIC(24,10)
-                    NOT NULL DEFAULT 0 CHECK(baseline_trucksbook_real_miles >= 0)
-            """)
-            # Snapshot, never overwrite: migration retries cannot reset V2
-            # totals, and the original driver_progress row is read only.
-            await conn.execute("""
-                INSERT INTO unified_v2_production_mileage_totals
-                  (discord_user_id,baseline_trucksbook_real_miles,combined_real_miles,
-                   trucksbook_real_miles)
-                SELECT discord_user_id,real_miles,real_miles,real_miles
+                INSERT INTO unified_v2_production_mileage_baselines
+                  (discord_user_id,trucksbook_real_miles)
+                SELECT discord_user_id,real_miles
                 FROM driver_progress
                 ON CONFLICT(discord_user_id) DO NOTHING
             """)
@@ -108,9 +109,10 @@ async def install_production_ledger_schema(pool):
             """, [
                 "unified_v2_production_credit_ledger",
                 "unified_v2_production_mileage_totals",
+                "unified_v2_production_mileage_baselines",
                 "unified_v2_production_mileage_decisions",
             ])
-            if existing != 3:
+            if existing != 4:
                 raise RuntimeError("Production ledger schema verification failed")
 
 
@@ -119,8 +121,11 @@ def _decimal_miles(value):
         miles = Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValueError("Invalid mileage") from exc
-    if (not miles.is_finite() or miles <= 0
-            or miles != miles.quantize(Decimal("0.0000000001"))):
+    try:
+        over_precision = miles != miles.quantize(Decimal("0.0000000001"))
+    except InvalidOperation as exc:
+        raise ValueError("Mileage exceeds ledger precision") from exc
+    if not miles.is_finite() or miles <= 0 or over_precision:
         raise ValueError("Mileage must be positive and within ledger precision")
     return miles
 
@@ -148,10 +153,15 @@ async def apply_verified_credit(
     ):
         return {"status": "rejected_evidence", "reason": "reconciliation_status_invalid"}
     pending_reason = None
-    feed_complete = (
-        isinstance(feed_evidence, dict)
-        and feed_evidence_is_complete(**feed_evidence)
-    )
+    try:
+        feed_complete = isinstance(feed_evidence, dict) and feed_evidence_is_complete(
+            authenticated=feed_evidence.get("authenticated"),
+            complete=feed_evidence.get("complete"),
+            watermark=feed_evidence.get("watermark"),
+            snapshot_sha256=feed_evidence.get("snapshot_sha256"),
+        )
+    except (TypeError, ValueError):
+        feed_complete = False
     if reconciliation_status == "pending":
         pending_reason = reconciliation_status
     elif not feed_complete:
@@ -209,8 +219,21 @@ async def apply_verified_credit(
         # Bind the approval to the actual database being written, not a caller
         # supplied fingerprint. The following transaction writes only V2 tables.
         actual_fingerprint = await read_only_database_fingerprint(conn)
-        observed = {**runtime, "database_fingerprint": actual_fingerprint}
-        blockers = production_activation_blockers(config, observed)
+        observed = dict(runtime or {})
+        # Railway's injected runtime identity is authoritative. A caller may
+        # supply test/preflight evidence, but cannot spoof the deployment.
+        for key in ("RAILWAY_ENVIRONMENT_ID", "RAILWAY_SERVICE_ID",
+                    "RAILWAY_DEPLOYMENT_ID", "RAILWAY_GIT_COMMIT_SHA"):
+            observed[key] = os.environ.get(key)
+        observed["database_fingerprint"] = actual_fingerprint
+        effective_config = dict(config or {})
+        # Process-level staging/disposable switches always win over injected
+        # config so a production call cannot hide a safety override.
+        for key in ("AT_V2_ISOLATED_STAGING", "AT_V2_TEST_DATABASE_DISPOSABLE",
+                    "AT_V2_MILEAGE_ENGINE_TEST_ENABLED"):
+            if os.environ.get(key) == "YES":
+                effective_config[key] = "YES"
+        blockers = production_activation_blockers(effective_config, observed)
         if blockers:
             return {"status": "activation_blocked", "blockers": blockers}
 
@@ -234,6 +257,18 @@ async def apply_verified_credit(
                 if historical:
                     await log_decision("pending_reconciliation", "historical_job_overlap")
                     return {"status": "pending_reconciliation", "reason": "historical_job_overlap"}
+            if reconciliation_status == "no_candidate":
+                unresolved = await conn.fetchval("""
+                    SELECT EXISTS(
+                      SELECT 1 FROM unified_job_reconciliation_cases
+                      WHERE status='potential_duplicate'
+                        AND (( $1='trucky' AND trucky_job_id=$2 )
+                          OR ( $1='trucksbook' AND trucksbook_job_id=$2 ))
+                    )
+                """, provider, provider_job_id)
+                if unresolved:
+                    await log_decision("pending_reconciliation", "open_duplicate_case")
+                    return {"status": "pending_reconciliation", "reason": "open_duplicate_case"}
             event = await conn.fetchrow("""
                 SELECT discord_user_id,provider_account_id,real_miles,race_miles,source_payload
                 FROM unified_provider_job_events
@@ -270,6 +305,8 @@ async def apply_verified_credit(
                         ON c.provider=l.provider AND c.provider_account_id=l.provider_account_id
                        AND c.discord_user_id=l.discord_user_id
                        AND c.status='approved' AND c.ownership_confirmed=TRUE
+                       AND c.membership_confirmed=TRUE
+                       AND (c.expires_at IS NULL OR c.expires_at>NOW())
                       JOIN unified_steam_links s
                         ON s.discord_user_id=e.discord_user_id AND s.verified_at IS NOT NULL
                       WHERE e.provider=$1 AND e.provider_job_id=$2 AND e.discord_user_id=$3
@@ -289,6 +326,8 @@ async def apply_verified_credit(
                   WHERE l.provider=$1 AND l.provider_account_id=$2
                     AND l.discord_user_id=$3 AND l.verified_at IS NOT NULL
                     AND c.status='approved' AND c.ownership_confirmed=TRUE
+                    AND c.membership_confirmed=TRUE
+                    AND (c.expires_at IS NULL OR c.expires_at>NOW())
                     AND s.verified_at IS NOT NULL
                 )
             """, provider, account_id, user_id)
