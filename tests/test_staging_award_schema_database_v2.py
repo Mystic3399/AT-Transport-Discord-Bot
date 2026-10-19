@@ -85,7 +85,7 @@ class StagingSchemaDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(duplicate["status"], "duplicate_provider_job")
 
     async def test_cross_provider_canonical_credit_is_atomic_under_concurrency(self):
-        user = 991234567890123450
+        user = 991234567890123500
         at = datetime(2026, 10, 18, 22, 29, tzinfo=timezone.utc)
         async with self.pool.acquire() as conn:
             await conn.execute("""
@@ -93,8 +93,8 @@ class StagingSchemaDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 VALUES($1) ON CONFLICT DO NOTHING
             """, user)
             for provider, account_id in (
-                ("trucksbook", "991234567890123451"),
-                ("trucky", "991234567890123452"),
+                ("trucksbook", "991234567890123501"),
+                ("trucky", "991234567890123502"),
             ):
                 await conn.execute("""
                     INSERT INTO unified_provider_links
@@ -103,8 +103,8 @@ class StagingSchemaDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 """, provider, account_id, user)
         await install_staging_awards(self.pool)
         for provider, job_id, account_id in (
-            ("trucksbook", "900000001", "991234567890123451"),
-            ("trucky", "900000002", "991234567890123452"),
+            ("trucksbook", "900000001", "991234567890123501"),
+            ("trucky", "900000002", "991234567890123502"),
         ):
             await record_normalized_provider_job(
                 self.pool, provider, job_id, user, "176", "mi",
@@ -142,8 +142,8 @@ class StagingSchemaDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(carry["fractional_miles"], Decimal("0"))
 
     async def test_failed_carry_update_rolls_back_credit_row(self):
-        user = 991234567890123460
-        account_id = "991234567890123461"
+        user = 991234567890123600
+        account_id = "991234567890123601"
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO unified_driver_profiles(discord_user_id)
@@ -165,7 +165,7 @@ class StagingSchemaDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 CREATE OR REPLACE FUNCTION test_fail_staging_carry_update()
                 RETURNS trigger LANGUAGE plpgsql AS $$
                 BEGIN
-                    IF NEW.discord_user_id = 991234567890123460 THEN
+                    IF NEW.discord_user_id = 991234567890123600 THEN
                         RAISE EXCEPTION 'injected staging transaction failure';
                     END IF;
                     RETURN NEW;
