@@ -16,7 +16,7 @@ def load_function(name, namespace):
     return namespace[name]
 
 NS = {'re': re}
-for name in ('is_real_statistics', 'extract_integer', 'extract_trucksbook_job_from_embed'):
+for name in ('is_real_statistics', 'extract_integer', 'extract_trucksbook_job_from_embed', 'trucksbook_author_user_id'):
     load_function(name, NS)
 
 class Embed:
@@ -43,7 +43,7 @@ class ClassificationTests(unittest.TestCase):
         async def run():
             calls = []
             async def noop(*args): pass
-            async def find(name): return 42
+            async def find(name, provider_id=None): return 42
             async def record(**kwargs):
                 calls.append(kwargs)
                 return {'status': 'duplicate'}
@@ -80,7 +80,7 @@ class RecoveryTests(unittest.TestCase):
                         SimpleNamespace(webhook_id=9, embeds=[Embed('888', 'Invalid, WoTr')]),
                         SimpleNamespace(webhook_id=9, embeds=[Embed('777', 'Real')])]
             async def reply(*args, **kwargs): replies.append(args[0])
-            async def find(name): return 42
+            async def find(name, provider_id=None): return 42
             async def replay(message):
                 parsed = NS['extract_trucksbook_job_from_embed'](message.embeds[0])
                 if parsed['job_id'] not in recorded:
@@ -153,10 +153,11 @@ class AuditApplyTests(unittest.TestCase):
                     else: raise AssertionError(sql)
             connection = Connection()
             async def reply(*args, **kwargs): replies.append(args[0])
-            async def find(name): return 42 if name == 'TruckTan' else None
+            async def find(name, provider_id=None): return 42 if name == 'TruckTan' and provider_id == 100 else None
             async def sync(*args, **kwargs): syncs.append(args)
             async def announce(*args): return (0, 0)
             event = Embed()
+            event.data['author']['url'] = 'https://trucksbook.eu/user/100'
             unlinked = Embed('125'); unlinked.data['author']['name'] = 'Unknown'
             class Channel:
                 id = 22
