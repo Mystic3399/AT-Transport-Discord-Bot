@@ -3316,6 +3316,7 @@ async def mileage_audit(ctx, message_limit: int = 0):
     missing_from_database = 0
     missing_event_jobs_staged = 0
     unlinked_event_jobs = 0
+    unresolved_links = []
     seen_jobs = set()
     channels_scanned = 0
     channels_skipped = 0
@@ -3393,6 +3394,15 @@ async def mileage_audit(ctx, message_limit: int = 0):
                         ) if name else None
                         if user_id is None:
                             unlinked_event_jobs += 1
+                            if len(unresolved_links) < 25:
+                                author = embed.to_dict().get("author") or {}
+                                unresolved_links.append({
+                                    "job_id": parsed["job_id"],
+                                    "name": name,
+                                    "miles": actual,
+                                    "provider_id": trucksbook_author_user_id(embed.to_dict()),
+                                    "profile_url": str(author.get("url") or "").split("?", 1)[0].split("#", 1)[0][:200],
+                                })
                             continue
                         credited = 0
                         repair_kind = "missing_wotr"
@@ -3486,6 +3496,22 @@ async def mileage_audit(ctx, message_limit: int = 0):
         "Review the Railway log/database backup, then explicitly run "
         "`!mileageapply CONFIRM` to apply these deltas."
     )
+
+    if unresolved_links:
+        # Read-only evidence for staff: do not change ownership or credit guessed links.
+        async with db_pool.acquire() as connection:
+            saved_links = await connection.fetch(
+                "SELECT discord_user_id, trucksbook_name, trucksbook_user_id "
+                "FROM driver_links ORDER BY trucksbook_name LIMIT 200;"
+            )
+        print("TRUCKSBOOK LINK AUDIT: " + json.dumps({
+            "unresolved": unresolved_links,
+            "saved_links": [dict(row) for row in saved_links],
+        }, ensure_ascii=True))
+        await ctx.send(
+            "⚠️ Account-link diagnostics recorded for "
+            f"{len(unresolved_links)} skipped event job(s). No links or mileage changed."
+        )
 
 
 async def announce_pending_repair_achievements(guild):
