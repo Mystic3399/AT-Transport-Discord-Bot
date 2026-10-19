@@ -161,6 +161,8 @@ class AuditApplyTests(unittest.TestCase):
             async def find(name, provider_id=None): return 42 if name == 'TruckTan' and provider_id == 100 else None
             async def sync(*args, **kwargs): syncs.append(args)
             async def announce(*args): return (0, 0)
+            reports = []
+            async def reconcile(ctx, sources, metadata): reports.append(sources)
             event = Embed()
             event.data['author']['url'] = 'https://trucksbook.eu/user/100'
             unlinked = Embed('125'); unlinked.data['author']['name'] = 'Unknown'
@@ -181,7 +183,7 @@ class AuditApplyTests(unittest.TestCase):
             ns = dict(NS, MILEAGE_AUDIT_CHANNEL_IDS={22: 'fixture'}, json=__import__('json'), db_pool=SimpleNamespace(acquire=Lease), GUILD_ID=1, discord=discord,
                       find_driver_link=find, PROGRESSION_ROLES=[], sync_member_progression_role=sync,
                       sync_permanent_system_for_driver=sync, announce_pending_repair_achievements=announce,
-                      refresh_driver_leaderboard=sync)
+                      refresh_driver_leaderboard=sync, send_mileage_reconciliation=reconcile)
             audit = load_function('mileage_audit', ns)
             apply = load_function('mileage_apply', ns)
             await audit(ctx)
@@ -192,6 +194,8 @@ class AuditApplyTests(unittest.TestCase):
             self.assertEqual(candidates['127']['repair_kind'], 'missing_real')
             self.assertTrue(any('Mileage channels scanned: `1`' in text for text in replies))
             self.assertNotIn('124', candidates)
+            self.assertEqual(len(reports[0]), 5)  # unique Real jobs, including older excluded jobs
+            self.assertIn('124', {job['job_id'] for job in reports[0]})
             self.assertTrue(any('driver not linked: `1`' in text for text in replies))
             await apply(ctx)  # explicit confirmation is required
             self.assertEqual(total[0], 13)

@@ -3304,6 +3304,73 @@ async def wot_recover(ctx, webhook_id: int, message_limit: int = 1000,
     )
 
 
+async def send_mileage_reconciliation(ctx, source_jobs, metadata):
+    """Export evidence only; unallocated totals are not proven import credits."""
+    async with db_pool.acquire() as connection:
+        async with connection.transaction(isolation="repeatable_read", readonly=True):
+            progress = [dict(row) for row in await connection.fetch(
+                "SELECT discord_user_id, trucksbook_name, real_miles FROM driver_progress "
+                "ORDER BY trucksbook_name"
+            )]
+            stored = [dict(row) for row in await connection.fetch(
+                "SELECT job_id, discord_user_id, trucksbook_name, accepted_distance, "
+                "statistics FROM processed_jobs ORDER BY job_id"
+            )]
+    stored_by_id = {row["job_id"]: row for row in stored}
+    drivers = {int(row["discord_user_id"]): dict(row, source_real_miles=0,
+               source_jobs=0, stored_real_job_miles=0, absent_source_miles=0)
+               for row in progress}
+    links = {}
+    absent = []
+    for job in source_jobs:
+        identity = (job["name"], job["provider_id"])
+        if identity not in links:
+            links[identity] = await find_driver_link(*identity) if job["name"] else None
+        user_id = links[identity]
+        job["linked_discord_user_id"] = user_id
+        job["stored_record"] = stored_by_id.get(job["job_id"])
+        if user_id is not None:
+            user_id = int(user_id)
+            driver = drivers.setdefault(user_id, dict(discord_user_id=user_id,
+                trucksbook_name=job["name"], real_miles=0, source_real_miles=0,
+                source_jobs=0, stored_real_job_miles=0, absent_source_miles=0))
+            driver["source_real_miles"] += job["accepted_distance"]
+            driver["source_jobs"] += 1
+        if job["stored_record"] is None:
+            absent.append(job)
+            if user_id is not None:
+                drivers[user_id]["absent_source_miles"] += job["accepted_distance"]
+    for row in stored:
+        user_id = int(row["discord_user_id"])
+        if user_id in drivers and is_real_statistics(row["statistics"]):
+            drivers[user_id]["stored_real_job_miles"] += int(row["accepted_distance"])
+    for driver in drivers.values():
+        driver["total_minus_stored_jobs"] = (int(driver["real_miles"])
+                                             - driver["stored_real_job_miles"])
+        driver["total_minus_scanned_source"] = (int(driver["real_miles"])
+                                                - driver["source_real_miles"])
+        print("MILEAGE RECONCILIATION DRIVER: " + json.dumps(driver, ensure_ascii=True))
+    for job in absent:
+        print("MILEAGE RECONCILIATION ABSENT: " + json.dumps(job, ensure_ascii=True))
+    report = dict(metadata, generated_at=datetime.now(timezone.utc).isoformat(),
+        explanation=("Evidence only. Source contains unique positive-distance Real/Real, WoTr "
+                     "jobs from scanned channels. Total minus stored jobs is an unexplained "
+                     "balance, NOT proof of a historical import. An absent job may already "
+                     "be covered by that balance. Do not apply absent miles automatically. "
+                     "Source history and database snapshot were collected at different times."),
+        drivers=list(drivers.values()), absent_jobs=absent, source_jobs=source_jobs,
+        stored_jobs=stored)
+    await ctx.send(
+        f"📋 **Mileage reconciliation evidence:** {len(absent):,} absent Real jobs listed. "
+        "The attached report includes each driver's current total, stored job miles, "
+        "scanned Real miles and unexplained balance. Older missing jobs require import "
+        "review; this report does not stage or apply extra mileage.",
+        file=discord.File(BytesIO(json.dumps(report, indent=2, ensure_ascii=True).encode()),
+                          filename="mileage-reconciliation.json"),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 @bot.command(name="mileageaudit")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
@@ -3345,6 +3412,7 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
     unlinked_event_jobs = 0
     unresolved_links = []
     seen_jobs = set()
+    source_jobs = []
     channels_scanned = 0
     channels_skipped = 0
     history_limit = message_limit or None
@@ -3384,6 +3452,12 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
                     if parsed["job_id"] in seen_jobs:
                         continue
                     seen_jobs.add(parsed["job_id"])
+                    author = embed.to_dict().get("author") or {}
+                    source_jobs.append(dict(parsed, name=str(author.get("name") or "").strip(),
+                        provider_id=trucksbook_author_user_id(embed.to_dict()),
+                        source_channel_id=channel.id, source_message_id=historical_message.id,
+                        source_message_at=historical_message.created_at.isoformat(),
+                        recovery_window_eligible=historical_message.created_at >= MILEAGE_LINK_RECOVERY_SINCE))
 
                     async with db_pool.acquire() as connection:
                         recorded = await connection.fetchrow(
@@ -3526,6 +3600,13 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
         "Review the Railway log/database backup, then explicitly run "
         "`!mileageapply CONFIRM` to apply these deltas."
     )
+
+    await send_mileage_reconciliation(ctx, source_jobs, {
+        "scope": scope, "message_limit_per_channel": message_limit,
+        "channels_scanned": channels_scanned, "channels_skipped": channels_skipped,
+        "configured_channels_unavailable": unavailable_channels,
+        "webhook_jobs_inspected": scanned,
+    })
 
     if unresolved_links:
         # Read-only evidence for staff: do not change ownership or credit guessed links.
