@@ -28,6 +28,11 @@ class SchemaIntegrityTests(unittest.TestCase):
         self.assertIn("steam_id64 TEXT NOT NULL UNIQUE", profiles.SCHEMA)
         self.assertIn("CHECK (steam_id64 ~ '^7656119[0-9]{10}$')", profiles.SCHEMA)
 
+    def test_claims_store_only_a_pending_claim_until_review_evidence_exists(self):
+        self.assertIn("ownership_evidence_kind TEXT", profiles.SCHEMA)
+        self.assertIn("ownership_evidence_sha256 TEXT", profiles.SCHEMA)
+        self.assertIn("ownership_evidence_sha256 ~ '^[0-9a-f]{64}$'", profiles.SCHEMA)
+
     def test_no_legacy_destructive_migrations(self):
         upper = profiles.SCHEMA.upper()
         for forbidden in ("DROP TABLE", "TRUNCATE", "DELETE FROM DRIVER_LINKS",

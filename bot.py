@@ -6140,10 +6140,10 @@ async def register_driver(ctx):
             "**Choose your tracking provider: TrucksBook, Trucky, or both.**\n"
             "Only one verified account is required to activate your A&T Driver Profile.\n\n"
             "First verify your identity with `!linksteam`.\n"
-            "**TrucksBook** — Submit `!trucksbook 123456` using your TrucksBook profile ID.\n"
+            "**TrucksBook** — Submit `!registertrucksbook 123456` using your TrucksBook profile ID. This records a pending claim only.\n"
             "**Trucky** — Submit `!registertrucky 209123` using your Trucky account ID.\n\n"
             "You may submit both IDs. Each provider requires independent membership "
-            "and ownership verification by A&T Management before activation.\n"
+            "and ownership verification by A&T Management before activation. TrucksBook review uses a witnessed official Steam sign-in; no Premium is needed.\n"
             "Steam verification is required before a new provider claim can be approved.\n\n"
             "If you started by mistake, type `!cancel`.\n"
             "🔒 This channel is private to you and authorised A&T Management."
@@ -6297,6 +6297,44 @@ async def steam_registration_status(ctx):
         )
 
 
+@bot.command(name="registertrucksbook")
+async def register_trucksbook_in_channel(ctx, account_id: str = None):
+    """Submit a pending TrucksBook claim; a supplied ID is never proof of ownership."""
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot:
+        return
+    if db_pool is None:
+        await ctx.reply("Registration database is unavailable.", mention_author=False)
+        return
+    verification = await get_verification_by_channel(ctx.channel.id)
+    if verification is None or int(verification["discord_user_id"]) != ctx.author.id:
+        await ctx.reply("Use this command in your own private /register channel.", mention_author=False)
+        return
+    if not account_id or not account_id.isascii() or not account_id.isdecimal():
+        await ctx.reply("Use `!registertrucksbook <numeric profile ID>` in this private channel.", mention_author=False)
+        return
+    try:
+        await unified_driver_profiles.submit_trucksbook_pending_claim(
+            db_pool, ctx.author.id, account_id
+        )
+    except ValueError as error:
+        await ctx.reply(str(error), mention_author=False)
+        return
+    except Exception as error:
+        print(f"V2 TRUCKSBOOK PENDING CLAIM ERROR: {type(error).__name__}: {error}")
+        await ctx.reply("Could not record your pending claim. Please contact A&T Management.", mention_author=False)
+        return
+    await ctx.reply(
+        "Your TrucksBook account ID is recorded as **pending verification**. "
+        "The ID and profile name alone do not prove ownership, so no verified link or mileage is created. "
+        "No Premium subscription is required. For review, arrange a private live screen-share with A&T "
+        "Management: sign out, use TrucksBook's official Steam sign-in with the Steam account already "
+        "verified for A&T, and show the resulting TrucksBook profile ID plus active A&T company membership. "
+        "Never share your password, Steam guard code, session cookie, or recovery code. If the Steam identity "
+        "cannot be independently seen and matched, the claim stays pending.",
+        mention_author=False,
+    )
+
+
 @bot.command(name="registertrucky")
 async def register_trucky_in_channel(ctx, account_id: str = None):
     """V2 beta: record an unverified Trucky claim inside the existing private channel."""
@@ -6347,7 +6385,11 @@ async def register_trucky_in_channel(ctx, account_id: str = None):
 
 
 @bot.command(name="approveprovider")
-async def approve_unified_provider(ctx, provider: str = None):
+async def approve_unified_provider(
+    ctx, provider: str = None, observed_steam_id64: str = None,
+    observed_trucksbook_id: str = None, evidence_sha256: str = None,
+    membership_confirmation: str = None,
+):
     """Management-only V2 beta approval within the applicant's private channel."""
     if ctx.guild is None or ctx.guild.id != GUILD_ID:
         return
@@ -6355,7 +6397,11 @@ async def approve_unified_provider(ctx, provider: str = None):
         await ctx.reply("Only authorised A&T Management can approve accounts.", mention_author=False)
         return
     if provider not in ("trucksbook", "trucky"):
-        await ctx.reply("Use `!approveprovider trucksbook` or `!approveprovider trucky` in the applicant's private channel.", mention_author=False)
+        await ctx.reply(
+            "Use `!approveprovider trucky`, or `!approveprovider trucksbook "
+            "<observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> confirm-member` "
+            "after the witnessed verification procedure.", mention_author=False,
+        )
         return
     if db_pool is None:
         await ctx.reply("Registration database unavailable.", mention_author=False)
@@ -6372,10 +6418,35 @@ async def approve_unified_provider(ctx, provider: str = None):
     if claim is None or claim["status"] != "pending":
         await ctx.reply("No pending V2 claim for that provider.", mention_author=False)
         return
-    # This beta approval is intentionally restricted to Trucky.
-    # TrucksBook must continue through its existing verification/approval flow.
     if provider == "trucksbook":
-        await ctx.reply("Use the existing TrucksBook verification process until V2 migration tests pass.", mention_author=False)
+        if (not all((observed_steam_id64, observed_trucksbook_id, evidence_sha256))
+                or membership_confirmation != "confirm-member"):
+            await ctx.reply(
+                "The claim remains pending. Staff must witness a fresh official Steam sign-in to TrucksBook, "
+                "match the displayed SteamID64 to the applicant's Steam-verified A&T profile, check the "
+                "resulting TrucksBook ID and active A&T company membership, and retain the review evidence "
+                "securely. Do not request credentials or codes. Then run `!approveprovider trucksbook "
+                "<observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> confirm-member` here.",
+                mention_author=False,
+            )
+            return
+        try:
+            await unified_driver_profiles.approve_trucksbook_claim_after_witness(
+                db_pool, applicant_id, ctx.author.id, observed_steam_id64,
+                observed_trucksbook_id, evidence_sha256, membership_confirmed=True,
+            )
+        except ValueError as error:
+            await ctx.reply(f"TrucksBook claim remains pending: {error}", mention_author=False)
+            return
+        except Exception as error:
+            print(f"V2 TRUCKSBOOK REVIEW ERROR: {type(error).__name__}: {error}")
+            await ctx.reply("The TrucksBook claim remains pending because its review could not be saved.", mention_author=False)
+            return
+        await ctx.reply(
+            "TrucksBook ownership and A&T membership were recorded from the witnessed Steam-session review. "
+            "No mileage, achievements, roles, or Company Mods access were changed.",
+            mention_author=False,
+        )
         return
     try:
         current_name = await trucky_membership_adapter.verify_member(claim["provider_account_id"])
