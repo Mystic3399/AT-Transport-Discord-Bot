@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS unified_registration_sessions (
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE unified_registration_sessions ADD COLUMN IF NOT EXISTS verification_message_id BIGINT;
 CREATE TABLE IF NOT EXISTS unified_provider_claims (
  discord_user_id BIGINT NOT NULL REFERENCES unified_driver_profiles(discord_user_id),
  provider TEXT NOT NULL CHECK(provider IN ('trucksbook','trucky')),
@@ -316,7 +317,12 @@ async def begin_registration(pool, discord_user_id, channel_id):
                 INSERT INTO unified_registration_sessions(discord_user_id,verification_channel_id)
                 VALUES($1,$2)
                 ON CONFLICT(discord_user_id) DO UPDATE SET
+                    verification_message_id=CASE WHEN unified_registration_sessions.verification_channel_id
+                        IS DISTINCT FROM EXCLUDED.verification_channel_id THEN NULL
+                        ELSE unified_registration_sessions.verification_message_id END,
                     verification_channel_id=EXCLUDED.verification_channel_id,
+                    status=CASE WHEN unified_registration_sessions.status='cancelled' THEN 'pending'
+                        ELSE unified_registration_sessions.status END,
                     updated_at=NOW()
             """, discord_user_id, channel_id)
 

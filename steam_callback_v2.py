@@ -16,11 +16,13 @@ import steam_openid_v2
 import unified_driver_profiles
 
 POOL_KEY = web.AppKey("pool", object)
+ON_STEAM_VERIFIED_KEY = web.AppKey("on_steam_verified", object)
 
 
 async def callback(request):
     # Isolated staging acceptance is read-only for driver registration.
-    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+    import unified_registration_workflow_v2 as registration
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES" and not registration.enabled():
         raise web.HTTPServiceUnavailable(
             text="Steam registration writes are disabled during staging acceptance"
         )
@@ -61,6 +63,16 @@ async def callback(request):
         )
     except (ValueError, asyncpg.UniqueViolationError):
         raise web.HTTPBadRequest(text="Steam verification failed or account already linked")
+    if registration.enabled():
+        await registration.complete_if_ready(pool, record["discord_user_id"])
+    notify = request.app.get(ON_STEAM_VERIFIED_KEY)
+    if notify is not None:
+        try:
+            await notify(record["discord_user_id"])
+        except Exception as error:
+            # Authentication committed successfully. A failed Discord edit must
+            # not ask the driver to replay a consumed OpenID callback.
+            print(f"STEAM REGISTRATION EMBED UPDATE FAILED: {type(error).__name__}", flush=True)
     return web.Response(
         text="Steam account verified for A&T registration. Return to your private Discord channel.",
         content_type="text/plain",

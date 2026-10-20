@@ -884,6 +884,64 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval("SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1",user),steam)
 
 
+    async def test_full_ordinary_registration_and_steam_embed_callback_without_staff_review(self):
+        from unittest.mock import AsyncMock, patch
+        from urllib.parse import urlsplit, parse_qs
+        from aiohttp.test_utils import TestClient, TestServer
+        from trucky_staging_receiver_v2 import create_integrations_app
+        import unified_registration_workflow_v2 as registration
+        import steam_openid_v2
+        user=991234567890126001
+        env={'AT_V2_ISOLATED_STAGING':'YES', 'AT_V2_STAGING_REGISTRATION_ENABLED':'YES',
+             'RAILWAY_ENVIRONMENT_ID':registration.STAGING_ENVIRONMENT,
+             'AT_STEAM_CALLBACK_URL':'https://example.test/auth/steam/callback'}
+        await profiles.begin_registration(self.pool,user,991234567890126002)
+        initial=await registration.state(self.pool,user)
+        self.assertEqual(initial['steam_status'],'Not Linked')
+        self.assertFalse(initial['ready'])
+        callback_url=await profiles.create_steam_auth_state(self.pool,user,env['AT_STEAM_CALLBACK_URL'])
+        token=parse_qs(urlsplit(callback_url).query)['state'][0]
+        notify=AsyncMock()
+        client=TestClient(TestServer(create_integrations_app(self.pool,on_steam_verified=notify)))
+        await client.start_server()
+        query={'state':token,'openid.return_to':callback_url,'openid.response_nonce':'registration-flow-unique-nonce'}
+        try:
+            with patch.dict(os.environ,env),patch.object(steam_openid_v2,'verify_steam_callback',AsyncMock(return_value='76561198099996001')):
+                response=await client.get('/auth/steam/callback',params=query)
+                self.assertEqual(response.status,200,await response.text())
+                notify.assert_awaited_once_with(user)
+                steam_only=await registration.state(self.pool,user)
+                self.assertEqual(steam_only['steam_status'],'Verified')
+                self.assertFalse(steam_only['ready'])
+                # Provider lookups are stubbed canonical names, NOT live ownership proof.
+                await registration.link_supported_account(self.pool,user,'trucksbook','991234567890126003','Test Driver')
+                tb=await registration.state(self.pool,user)
+                self.assertEqual(tb['accounts']['trucksbook']['status'],'Linked')
+                self.assertTrue(tb['ready'])
+                self.assertEqual(tb['session']['status'],'approved')
+                await registration.link_supported_account(self.pool,user,'trucky','991234567890126004','Test Driver')
+                await registration.link_supported_account(self.pool,user,'trucky','991234567890126004','Test Driver')
+                final=await registration.state(self.pool,user)
+                self.assertEqual([a['status'] for a in final['accounts'].values()],['Linked','Linked'])
+                self.assertTrue(final['ready'])
+                with self.assertRaisesRegex(ValueError,'existing account'):
+                    await registration.link_supported_account(self.pool,user,'trucky','991234567890126099','Different Account')
+                replay=await client.get('/auth/steam/callback',params=query)
+                self.assertEqual(replay.status,400)
+                notify.assert_awaited_once_with(user)
+                # Reopening /register updates the channel without erasing links/status.
+                await profiles.begin_registration(self.pool,user,991234567890126005)
+                self.assertTrue((await registration.state(self.pool,user))['ready'])
+            async with self.pool.acquire() as conn:
+                rows=await conn.fetch('SELECT status,ownership_confirmed,reviewed_by FROM unified_provider_claims WHERE discord_user_id=$1',user)
+                self.assertEqual(len(rows),2)
+                self.assertTrue(all(r['status']=='pending' and not r['ownership_confirmed'] and r['reviewed_by'] is None for r in rows))
+                self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM unified_provider_links WHERE discord_user_id=$1 AND verified_at IS NOT NULL',user),0)
+                self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM unified_provider_job_events WHERE discord_user_id=$1',user),0)
+        finally:
+            await client.close()
+
+
 
 if __name__ == "__main__":
     unittest.main()

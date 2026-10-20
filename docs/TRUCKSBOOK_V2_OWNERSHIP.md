@@ -1,3 +1,9 @@
+> Ordinary registration does **not** require staff-witnessed review. Steam
+> authentication and provider account linking are separate registration steps.
+> The optional review below concerns stronger ownership evidence only; it must
+> never block onboarding, imply job ownership or award mileage. See
+> `REGISTRATION_WORKFLOW_V2.md` for the current registration contract.
+
 # TrucksBook V2 ownership — authenticated profile review
 
 ## Corrected provider contract

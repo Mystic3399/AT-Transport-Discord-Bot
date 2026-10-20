@@ -548,6 +548,92 @@ unified_schema_ready = False
 staging_trucky_probe_ran = False
 
 
+registration_embed_locks = {}
+
+
+async def refresh_unified_registration(discord_user_id):
+    """Update one durable verification embed; never call role/mileage writers."""
+    import unified_registration_workflow_v2 as registration
+    if not registration.enabled() or db_pool is None:
+        return
+    lock = registration_embed_locks.setdefault(discord_user_id, asyncio.Lock())
+    async with lock:
+        view = await registration.state(db_pool, discord_user_id)
+        session = view["session"]
+        if not session or session["status"] == "cancelled":
+            return
+        channel = bot.get_channel(session["verification_channel_id"])
+        if channel is None or getattr(getattr(channel, "guild", None), "id", None) != GUILD_ID:
+            raise ValueError("Registration channel unavailable in configured staging guild")
+        embed = discord.Embed(
+            title="A&T — Driver Registration",
+            description=("Registration complete. You can link another tracking account below."
+                         if view["ready"] else
+                         "Verify Steam with !linksteam, then link TrucksBook with !trucksbook <ID> "
+                         "or Trucky with !registertrucky <ID>. You may link both."),
+            colour=discord.Colour.blue(),
+        )
+        steam = (f"[Confirmed Steam account](https://steamcommunity.com/profiles/{view['steam_id64']})"
+                 if view["steam_id64"] else "Use !linksteam")
+        embed.add_field(name="Steam — " + view["steam_status"], value=steam, inline=False)
+        for provider, label in (("trucksbook", "TrucksBook"), ("trucky", "Trucky")):
+            account = view["accounts"][provider]
+            details = discord.utils.escape_markdown(account["display_name"] or "")[:150]
+            if account["account_id"]:
+                details += f" (ID {account['account_id']})"
+            embed.add_field(name=f"{label} — {account['status']}", value=details or "No account linked", inline=False)
+        embed.set_footer(text="Linked records your chosen provider account. Verified requires ownership evidence. Mileage is processed separately.")
+        message_id = session.get("verification_message_id")
+        message = None
+        if message_id:
+            try:
+                message = await channel.fetch_message(message_id)
+            except discord.NotFound:
+                pass
+        if message is None:
+            message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE unified_registration_sessions SET verification_message_id=$2 WHERE discord_user_id=$1", discord_user_id, message.id)
+        else:
+            await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
+
+async def link_registration_provider(ctx, provider, account_id):
+    """Reuse provider lookups; link existence is distinct from ownership proof."""
+    import unified_registration_workflow_v2 as registration
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot or db_pool is None:
+        return
+    verification = await get_verification_by_channel(ctx.channel.id)
+    if not verification or int(verification["discord_user_id"]) != ctx.author.id:
+        await ctx.reply("Use this command in your own private /register channel.", mention_author=False)
+        return
+    if not account_id or not account_id.isascii() or not account_id.isdecimal() or len(account_id) > 30 or int(account_id) <= 0:
+        await ctx.reply("Supply your numeric provider profile ID, not a username.", mention_author=False)
+        return
+    try:
+        if provider == "trucksbook":
+            profile = await fetch_trucksbook_profile(int(account_id))
+            if not profile.get("success") or not profile.get("belongs_to_at"):
+                await ctx.reply("TrucksBook could not confirm this account's A&T membership. No verified ownership was claimed. Try again later.", mention_author=False)
+                return
+            canonical_name = profile["trucksbook_name"]
+        else:
+            canonical_name = await trucky_membership_adapter.verify_member(account_id)
+            if canonical_name is None:
+                await ctx.reply("Trucky could not confirm this account's active A&T membership.", mention_author=False)
+                return
+        await registration.link_supported_account(db_pool, ctx.author.id, provider, str(int(account_id)), canonical_name)
+        await refresh_unified_registration(ctx.author.id)
+    except ValueError as error:
+        await ctx.reply(str(error), mention_author=False)
+        return
+    except Exception as error:
+        print(f"REGISTRATION PROVIDER LINK FAILED: {type(error).__name__}", flush=True)
+        await ctx.reply("Account linking is temporarily unavailable. Existing accounts are unchanged; retry /register to refresh status.", mention_author=False)
+        return
+    await ctx.reply("Account linked and registration updated. Account ownership is not independently verified by this lookup; no mileage or roles were awarded.", mention_author=False)
+
+
 async def start_public_integrations():
     """Start Railway's HTTP listener after database/schema readiness."""
     global public_http_runner
@@ -565,7 +651,8 @@ async def start_public_integrations():
 
         runner = web.AppRunner(
             trucky_staging_receiver_v2.create_integrations_app(
-                db_pool, on_trucky_linked=on_trucky_linked
+                db_pool, on_trucky_linked=on_trucky_linked,
+                on_steam_verified=refresh_unified_registration
             ),
             access_log=None,
         )
@@ -5910,7 +5997,7 @@ async def register_driver(ctx):
         member.id
     )
 
-    if existing and (existing_driver_linked or existing["status"] in ("pending", "confirmed")):
+    if existing and (existing_driver_linked or existing["status"] in ("pending", "confirmed", "completed")):
         existing_channel_id = (
             existing[
                 "verification_channel_id"
@@ -5925,6 +6012,10 @@ async def register_driver(ctx):
             )
 
             if existing_channel:
+                import unified_registration_workflow_v2 as registration
+                if registration.enabled():
+                    await unified_driver_profiles.begin_registration(db_pool, member.id, existing_channel.id)
+                    await refresh_unified_registration(member.id)
                 await onboarding_reply(
                     (
                         f"{member.mention}, you already "
@@ -6070,7 +6161,7 @@ async def register_driver(ctx):
     # ------------------------------------------
 
     try:
-        if existing_driver_linked:
+        if existing_driver_linked or existing:
             saved = await save_existing_driver_verification_channel(
                 member.id, verification_channel.id
             )
@@ -6158,10 +6249,11 @@ async def register_driver(ctx):
         )
     )
 
-    await verification_channel.send(
-        content=member.mention,
-        embed=embed,
-    )
+    import unified_registration_workflow_v2 as registration
+    if registration.enabled():
+        await refresh_unified_registration(member.id)
+    else:
+        await verification_channel.send(content=member.mention, embed=embed)
 
     await onboarding_reply(
         (
@@ -6231,6 +6323,7 @@ async def link_steam_for_registration(ctx):
         print(f"STEAM LINK ERROR: {type(error).__name__}: {error}")
         await ctx.reply("Could not create a secure Steam login. Please try later.", mention_author=False)
         return
+    await refresh_unified_registration(ctx.author.id)
     await ctx.reply(
         "🔐 **Verify your Steam account**\n"
         f"Sign in with Steam using this one-time link (expires in 10 minutes):\n{url}\n"
@@ -6284,6 +6377,7 @@ async def steam_registration_status(ctx):
             "SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1",
             ctx.author.id,
         )
+    await refresh_unified_registration(ctx.author.id)
     if steam_id:
         await ctx.reply(
             f"✅ Steam identity verified and linked: `{steam_id}`. "
@@ -6300,6 +6394,10 @@ async def steam_registration_status(ctx):
 @bot.command(name="registertrucksbook")
 async def register_trucksbook_in_channel(ctx, account_id: str = None):
     """Submit a pending TrucksBook claim; a supplied ID is never proof of ownership."""
+    import unified_registration_workflow_v2 as registration
+    if registration.enabled():
+        await link_registration_provider(ctx, "trucksbook", account_id)
+        return
     if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot:
         return
     if db_pool is None:
@@ -6334,9 +6432,13 @@ async def register_trucksbook_in_channel(ctx, account_id: str = None):
     )
 
 
-@bot.command(name="registertrucky")
+@bot.command(name="registertrucky", aliases=["trucky"])
 async def register_trucky_in_channel(ctx, account_id: str = None):
     """V2 beta: record an unverified Trucky claim inside the existing private channel."""
+    import unified_registration_workflow_v2 as registration
+    if registration.enabled():
+        await link_registration_provider(ctx, "trucky", account_id)
+        return
     if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot:
         return
     if db_pool is None:
@@ -6980,6 +7082,14 @@ async def myregistration(ctx):
     if db_pool is None:
         await respond("The driver database is temporarily unavailable. Please try again shortly.")
         return
+    import unified_registration_workflow_v2 as registration
+    if registration.enabled():
+        view = await registration.state(db_pool, ctx.author.id)
+        lines = ["A&T Driver Registration", "Steam: " + view["steam_status"]]
+        lines += [f"{name.title()}: {account['status']}" for name, account in view["accounts"].items()]
+        lines.append("Registration complete" if view["ready"] else "Use /register to continue")
+        await respond("\n".join(lines))
+        return
     try:
         async with db_pool.acquire() as conn:
             tb = await conn.fetchrow("SELECT trucksbook_name FROM driver_links WHERE discord_user_id=$1", ctx.author.id)
@@ -7027,6 +7137,11 @@ async def submit_trucksbook(
     ctx,
     trucksbook_user_id: str = None,
 ):
+    import unified_registration_workflow_v2 as registration
+    if registration.enabled():
+        await link_registration_provider(ctx, "trucksbook", trucksbook_user_id)
+        return
+
     if ctx.guild is None:
         return
 
@@ -7576,6 +7691,16 @@ async def submit_trucksbook(
 async def confirm_verification(
     ctx,
 ):
+    import unified_registration_workflow_v2 as registration
+    if registration.enabled():
+        verification = await get_verification_by_channel(ctx.channel.id)
+        if ctx.guild is None or ctx.guild.id != GUILD_ID or not verification or int(verification["discord_user_id"]) != ctx.author.id:
+            return
+        completed = await registration.complete_if_ready(db_pool, ctx.author.id)
+        await refresh_unified_registration(ctx.author.id)
+        await ctx.reply("Registration complete." if completed else "Verify Steam and link at least one tracking account first.", mention_author=False)
+        return
+
     if ctx.guild is None:
         return
 
