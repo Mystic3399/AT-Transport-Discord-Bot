@@ -539,6 +539,24 @@ MILEAGE_AUDIT_CHANNEL_IDS = {
 # imported baseline and remain excluded. Every source job still needs a link.
 MILEAGE_LINK_RECOVERY_SINCE = datetime(2026, 10, 17, 15, 3, 35, tzinfo=timezone.utc)
 
+# Verified against the complete 2026-10-19 reconciliation: no imported balance,
+# official Real source, absent processed job, 772-mile shortfall for this driver.
+VERIFIED_HISTORICAL_REAL_REPAIRS = {
+    "67800837": (146691735865655297, 583698, 772,
+                 1541473875773362276, 1556301076901142614),
+}
+
+
+def verified_historical_real_repair(parsed, embed, message, user_id=None):
+    expected = VERIFIED_HISTORICAL_REAL_REPAIRS.get(parsed["job_id"])
+    if expected is None or not is_real_statistics(parsed["statistics"]):
+        return False
+    driver_id, provider_id, distance, channel_id, message_id = expected
+    return (trucksbook_author_user_id(embed.to_dict()) == provider_id
+            and parsed["accepted_distance"] == distance
+            and message.channel.id == channel_id and message.id == message_id
+            and (user_id is None or int(user_id) == driver_id))
+
 DRIVER_MAPPINGS = {
     "Mystical Custom": int(
         os.getenv("DRIVER_MYSTICAL_CUSTOM")
@@ -3478,7 +3496,9 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
                             missing_from_database += 1
                             event_job = "wotr" in [x.strip().casefold() for x in
                                                    parsed["statistics"].split(",")]
-                            if not event_job and historical_message.created_at < MILEAGE_LINK_RECOVERY_SINCE:
+                            verified_historical = verified_historical_real_repair(
+                                parsed, embed, historical_message)
+                            if not event_job and historical_message.created_at < MILEAGE_LINK_RECOVERY_SINCE and not verified_historical:
                                 continue
                             name = ((embed.to_dict().get("author") or {})
                                     .get("name") or "").strip()
@@ -3492,6 +3512,9 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
                         user_id = await find_driver_link(
                             name, trucksbook_author_user_id(embed.to_dict())
                         ) if name else None
+                        if verified_historical and not verified_historical_real_repair(
+                                parsed, embed, historical_message, user_id):
+                            continue
                         if user_id is None:
                             unlinked_event_jobs += 1
                             if len(unresolved_links) < 25:
@@ -3592,7 +3615,7 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
         f"Candidates found/updated this run: `{staged:,}`\n"
         f"Webhook jobs absent from processed_jobs: `{missing_from_database:,}`\n"
         f"Missing Real, WoTr jobs staged: `{missing_event_jobs_staged:,}`\n"
-        f"Missing Real jobs staged (link incident): `{missing_real_jobs_staged:,}`\n"
+        f"Missing Real jobs staged (incident / verified history): `{missing_real_jobs_staged:,}`\n"
         f"Jobs skipped — driver not linked: `{unlinked_event_jobs:,}`\n"
         f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
         f"`{int(totals['drivers']):,}` drivers\n"
@@ -3791,6 +3814,17 @@ async def mileage_apply(ctx, confirmation: str = ""):
 
                 user_id = int(candidate["discord_user_id"])
                 delta = int(candidate["missing_distance"])
+                verified_repair = VERIFIED_HISTORICAL_REAL_REPAIRS.get(candidate["job_id"])
+                if verified_repair is not None and (
+                    user_id != verified_repair[0]
+                    or int(candidate["actual_distance"]) != verified_repair[2]
+                    or delta != verified_repair[2]
+                    or int(candidate["recorded_distance"]) != 0
+                    or int(candidate["source_channel_id"]) != verified_repair[3]
+                    or int(candidate["source_message_id"]) != verified_repair[4]
+                    or not missing_job
+                ):
+                    continue
                 previous_total = int(
                     await connection.fetchval(
                         """

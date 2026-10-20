@@ -50,3 +50,20 @@ class ReconciliationTests(unittest.TestCase):
             self.assertIsNone(report['absent_jobs'][1]['linked_discord_user_id'])
             self.assertEqual(progress[0]['real_miles'], 1602)
         asyncio.run(run())
+
+class VerifiedHistoryTests(unittest.TestCase):
+    def test_only_exact_verified_source_and_identity_are_eligible(self):
+        from test_wotr_hotfix import Embed
+        check = NS['verified_historical_real_repair']
+        e = Embed('67800837', 'Real', 772)
+        e.data['author']['url'] = 'https://trucksbook.eu/profile/583698'
+        job = NS['extract_trucksbook_job_from_embed'](e)
+        msg = SimpleNamespace(id=1556301076901142614,
+                              channel=SimpleNamespace(id=1541473875773362276))
+        self.assertTrue(check(job, e, msg, 146691735865655297))
+        self.assertFalse(check(job, e, msg, 99))
+        self.assertFalse(check(dict(job, accepted_distance=773), e, msg))
+        self.assertFalse(check(dict(job, statistics='Race'), e, msg))
+        self.assertFalse(check(dict(job, job_id='67866354'), e, msg))
+        msg.id = 123
+        self.assertFalse(check(job, e, msg))

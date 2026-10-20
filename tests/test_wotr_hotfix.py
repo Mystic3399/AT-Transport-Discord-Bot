@@ -18,9 +18,9 @@ def load_function(name, namespace):
 from datetime import datetime, timezone
 NS = {'re': re, 'datetime': datetime, 'timezone': timezone}
 for node in TREE.body:
-    if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in {'TRUCKSBOOK_NAME_ALIASES', 'MILEAGE_AUDIT_CHANNEL_IDS', 'MILEAGE_LINK_RECOVERY_SINCE'} for t in node.targets):
+    if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in {'TRUCKSBOOK_NAME_ALIASES', 'MILEAGE_AUDIT_CHANNEL_IDS', 'MILEAGE_LINK_RECOVERY_SINCE', 'VERIFIED_HISTORICAL_REAL_REPAIRS'} for t in node.targets):
         exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), NS)
-for name in ('is_real_statistics', 'extract_integer', 'extract_trucksbook_job_from_embed', 'trucksbook_author_user_id'):
+for name in ('is_real_statistics', 'extract_integer', 'extract_trucksbook_job_from_embed', 'trucksbook_author_user_id', 'verified_historical_real_repair'):
     load_function(name, NS)
 
 class Embed:
