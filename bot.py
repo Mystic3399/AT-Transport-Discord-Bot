@@ -6485,7 +6485,7 @@ def is_authorised_staging_owner(discord_user_id):
 
 
 @bot.command(name="stagingidentityaudit")
-async def staging_identity_audit(ctx):
+async def staging_identity_audit(ctx, trucksbook_id: str = None, observed_steam_sha256: str = None):
     """Read only self-audit of Steam and Trucky link state in staging."""
     if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
         await ctx.reply(
@@ -6516,6 +6516,35 @@ async def staging_identity_audit(ctx):
     except Exception as error:
         print(f"STAGING IDENTITY AUDIT ERROR: {type(error).__name__}", flush=True)
         await ctx.reply("The read-only identity audit failed.", mention_author=False)
+        return
+    if trucksbook_id is not None or observed_steam_sha256 is not None:
+        try:
+            comparison = await unified_driver_profiles.audit_trucksbook_observed_identity(
+                db_pool, ctx.author.id, trucksbook_id, observed_steam_sha256
+            )
+        except ValueError:
+            await ctx.reply(
+                "Use !stagingidentityaudit <TrucksBook profile ID> <SHA-256 of observed SteamID64>. "
+                "Supply both values. Never supply passwords or session credentials.",
+                mention_author=False,
+            )
+            return
+        except Exception as error:
+            print(f"STAGING TRUCKSBOOK IDENTITY AUDIT ERROR: {type(error).__name__}", flush=True)
+            await ctx.reply("The read-only TrucksBook comparison failed.", mention_author=False)
+            return
+        flags = "; ".join(
+            f"{key}={'yes' if comparison[key] else 'no'}" for key in (
+                "steam_verified", "observed_steam_match", "claim_matches",
+                "existing_link_matches", "conflicting_owner",
+            )
+        )
+        await ctx.reply(
+            f"TrucksBook observed-identity comparison (read-only): {flags}. "
+            "Ownership not approved. A supplied digest does not authenticate provider evidence; "
+            "independent staff review of the signed-in provider mapping is still required. "
+            "No registration, mileage, roles or achievements changed.", mention_author=False,
+        )
         return
     claim_status = state["trucky_claim_status"] or "none"
     claim_link_match = state["claim_link_match"]

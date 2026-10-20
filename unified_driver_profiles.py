@@ -497,6 +497,54 @@ async def get_trucky_identity_link_diagnostics(pool, discord_user_id):
         "claim_link_match": row["claim_link_match"],
     }
 
+async def audit_trucksbook_observed_identity(pool, discord_user_id, account_id, steam_sha256):
+    """Compare witnessed provider evidence to stored identity; never approve it.
+
+    The digest avoids echoing the observed SteamID in Discord. It is a comparison
+    input, NOT provider authentication. The authenticated browser observation and
+    an independent staff review must be retained separately.
+    """
+    import hashlib
+    import hmac
+    import re
+
+    if (not isinstance(account_id, str)
+            or not re.fullmatch(r"[0-9]{1,30}", account_id)):
+        raise ValueError("Invalid TrucksBook account ID")
+    if not isinstance(steam_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", steam_sha256):
+        raise ValueError("Invalid observed Steam digest")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT s.steam_id64,s.verified_at AS steam_verified_at,
+              (SELECT provider_account_id FROM unified_provider_claims
+               WHERE discord_user_id=$1 AND provider='trucksbook') AS claimed_account,
+              (SELECT status FROM unified_provider_claims
+               WHERE discord_user_id=$1 AND provider='trucksbook') AS claim_status,
+              (SELECT provider_account_id FROM unified_provider_links
+               WHERE discord_user_id=$1 AND provider='trucksbook') AS linked_account,
+              EXISTS(SELECT 1 FROM unified_provider_links
+                     WHERE provider='trucksbook' AND provider_account_id=$2
+                       AND discord_user_id<>$1) OR
+              EXISTS(SELECT 1 FROM unified_provider_claims
+                     WHERE provider='trucksbook' AND provider_account_id=$2
+                       AND discord_user_id<>$1 AND status IN ('pending','approved'))
+              AS conflicting_owner
+            FROM (SELECT $1::bigint AS discord_user_id) applicant
+            LEFT JOIN unified_steam_links s USING(discord_user_id)
+        """, discord_user_id, account_id)
+    verified = row["steam_verified_at"] is not None and bool(row["steam_id64"])
+    return {
+        "steam_verified": verified,
+        "observed_steam_match": bool(verified and hmac.compare_digest(
+            hashlib.sha256(row["steam_id64"].encode("ascii")).hexdigest(), steam_sha256)),
+        "claim_status": row["claim_status"],
+        "claim_matches": row["claimed_account"] == account_id,
+        "existing_link_matches": row["linked_account"] == account_id,
+        "conflicting_owner": bool(row["conflicting_owner"]),
+        "ownership_approved": False,
+    }
+
+
 async def verify_trucky_event_against_verified_links(pool, account_id, provider_steam_id):
     """Read-only comparison of signed event identity with an existing verified profile.
 
