@@ -67,3 +67,38 @@ class RegistrationEmbedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([f['name'] for f in embed.fields],['Steam — Verified','TrucksBook — Linked','Trucky — Not Linked'])
         self.assertIn('Registration complete',embed.description)
         self.assertIn('steamcommunity.com/profiles/',embed.fields[0]['value'])
+
+class StagingSlashSyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_register_sync_is_guild_only_and_idempotent(self):
+        tree=ast.parse(Path('bot.py').read_text())
+        node=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='sync_staging_registration_commands')
+        copy=unittest.mock.Mock()
+        sync=AsyncMock(return_value=['register','myregistration'])
+        ns=dict(os=os,GUILD_ID=123,staging_registration_commands_synced=False,
+                discord=SimpleNamespace(Object=lambda **kwargs:SimpleNamespace(**kwargs)),
+                bot=SimpleNamespace(tree=SimpleNamespace(copy_global_to=copy,sync=sync)))
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'bot.py','exec'),ns)
+        env={**ENV,'STAGING_GUILD_ID':'123'}
+        with patch.dict(os.environ,env,clear=True):
+            await ns['sync_staging_registration_commands']()
+            await ns['sync_staging_registration_commands']()
+        sync.assert_awaited_once()
+        self.assertEqual(sync.await_args.kwargs['guild'].id,123)
+        self.assertTrue(ns['staging_registration_commands_synced'])
+        # No global sync or application-command deletion is exposed to helper.
+        self.assertEqual(copy.call_count,1)
+
+    async def test_no_sync_outside_isolated_registration_or_wrong_guild(self):
+        tree=ast.parse(Path('bot.py').read_text())
+        node=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='sync_staging_registration_commands')
+        for env in ({}, {**ENV,'STAGING_GUILD_ID':'999'}):
+            sync=AsyncMock()
+            ns=dict(os=os,GUILD_ID=123,staging_registration_commands_synced=False,
+                    bot=SimpleNamespace(tree=SimpleNamespace(sync=sync)))
+            exec(compile(ast.Module(body=[node],type_ignores=[]),'bot.py','exec'),ns)
+            with patch.dict(os.environ,env,clear=True):
+                if env:
+                    with self.assertRaises(ValueError): await ns['sync_staging_registration_commands']()
+                else:
+                    await ns['sync_staging_registration_commands']()
+            sync.assert_not_awaited()

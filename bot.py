@@ -548,6 +548,24 @@ unified_schema_ready = False
 staging_trucky_probe_ran = False
 
 
+staging_registration_commands_synced = False
+
+
+async def sync_staging_registration_commands():
+    """Register application commands in the isolated guild, never globally."""
+    global staging_registration_commands_synced
+    import unified_registration_workflow_v2 as registration
+    if not registration.enabled() or staging_registration_commands_synced:
+        return
+    if str(GUILD_ID) != os.getenv("STAGING_GUILD_ID"):
+        raise ValueError("Staging slash-command guild mismatch")
+    home = discord.Object(id=GUILD_ID)
+    bot.tree.copy_global_to(guild=home)
+    synced = await bot.tree.sync(guild=home)
+    staging_registration_commands_synced = True
+    print(f"STAGING REGISTRATION SLASH COMMANDS SYNCED count={len(synced)}", flush=True)
+
+
 registration_embed_locks = {}
 
 
@@ -2706,6 +2724,10 @@ async def on_ready():
                     f"{type(error).__name__}",
                     flush=True,
                 )
+        try:
+            await sync_staging_registration_commands()
+        except Exception as error:
+            print(f"STAGING REGISTRATION COMMAND SYNC FAILED: {type(error).__name__}", flush=True)
         print("STAGING SAFE MODE: historical role sync and leaderboard startup disabled")
         return
 
@@ -5942,7 +5964,7 @@ async def driver_links_overview(ctx):
 
 @bot.hybrid_command(
     name="register",
-    description="Start private A&T TrucksBook driver registration",
+    description="Start private A&T Steam and tracking-account registration",
 )
 async def register_driver(ctx):
     async def onboarding_reply(message, **kwargs):
