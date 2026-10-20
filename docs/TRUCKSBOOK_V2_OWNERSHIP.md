@@ -20,9 +20,9 @@ SHA-256 digest alone does not authenticate the underlying assertion.
 ## Current safe behaviour
 
 - `!registertrucksbook <numeric profile ID>` retains a pending claim only.
-- `!approveprovider trucksbook ...` explains the ownership blocker and performs
-  no approval. The obsolete witnessed-Steam function also rejects before any
-  database access, including stale callers with apparently matching IDs.
+- The obsolete witnessed-Steam function still rejects before database access.
+  A distinct independent-staff profile review is available in isolated staging
+  only; it cannot authorise mileage or cross-provider reconciliation.
 - The old `trucksbook_steam_authenticated_session` evidence label cannot
   authorise V2 mileage or resolve cross-provider review cases.
 - Existing profiles, links, mileage, ranks and achievements are not deleted,
@@ -71,12 +71,31 @@ not proof that the relationship is permanently immutable.
    approve their own claim. Preserve a redacted evidence record, reviewer and
    observation time. Never reuse the retired Steam-login evidence label.
 
-**Current software boundary:** this release adds the read-only comparison only.
-Provider approval remains disabled; no staff attestation is silently converted
-into a verified link. A new reviewed evidence type, expiry/revalidation policy
-and transactional approval path require separate tested implementation before
-this manual method can authorise V2 credits. Existing stored links are not
-rewritten. Public profile, CSV or webhook name matching remains insufficient.
+**Current software boundary:** independent staff can record this new review in
+isolated staging using the existing private applicant-channel command:
+`!approveprovider trucksbook <observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> witnessed-profile-steam-member`.
+The explicit marker attests that staff actually witnessed the authenticated
+account, read-only mapping and active membership; it is not an automated
+provider API assertion. Existing staff-role and no-self-review checks apply.
+The transaction verifies the stored Steam link and claimed account, rejects
+conflicting ownership and saves the reviewer and evidence reference under
+`trucksbook_staff_reviewed_profile_steam_mapping`. It does not activate the
+profile, registration session, mileage, roles or achievements. Unique provider
+links and transaction rollback prevent partial account reassignment. An additive
+JSONB history column preserves the preceding review provenance; exact retries
+do not overwrite or append a second review. Old
+self-approved claims can be independently re-reviewed; their provenance is
+never upgraded automatically. The old marker `confirm-member` remains invalid.
+
+This **new staff evidence is still rejected by the mileage engine and production
+ledger adapter**. Separate reviewed job evidence, duplicate reconciliation,
+feed completeness and release approval are required before any credits.
+
+Live read-only staging comparison on 20 October confirmed matching observed
+Steam, claim and existing provider link, with no conflicting owner. The old
+stored claim had no ownership evidence kind and was self-reviewed. It was left
+unchanged; a different authorised staff member must witness and record a fresh
+review. No owner action can substitute for the independent reviewer requirement.
 
 ## Reconciliation boundary
 

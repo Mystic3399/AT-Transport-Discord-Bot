@@ -79,3 +79,62 @@ class ObservedIdentityCommandTests(StagingIdentityAuditCommandTests):
             audit.reset_mock()
             await self.run_command(context(user_id=42), '123456', DIGEST)
             audit.assert_not_awaited()
+
+class ProfileReviewFailClosedTests(unittest.IsolatedAsyncioTestCase):
+    async def test_requires_isolated_staging_independent_reviewer_and_complete_evidence(self):
+        class NoDB:
+            def acquire(self): raise AssertionError('Must reject before database access')
+        for env, reviewer, witnessed, account, digest in (
+            ({}, 222, True, '123456', DIGEST),
+            ({'AT_V2_ISOLATED_STAGING':'YES'}, 111, True, '123456', DIGEST),
+            ({'AT_V2_ISOLATED_STAGING':'YES'}, 222, False, '123456', DIGEST),
+            ({'AT_V2_ISOLATED_STAGING':'YES'}, 222, True, 'bad', DIGEST),
+            ({'AT_V2_ISOLATED_STAGING':'YES'}, 222, True, '123456', 'bad'),
+        ):
+            with self.subTest(reviewer=reviewer, env=env), patch.dict(os.environ, env, clear=True):
+                with self.assertRaises(ValueError):
+                    await profiles.review_trucksbook_authenticated_profile(
+                        NoDB(), 111, reviewer, STEAM, account, digest,
+                        witnessed_profile_mapping=witnessed)
+
+    def test_staff_review_category_cannot_authorise_automatic_mileage(self):
+        from unified_mileage_engine_control_v2 import verified_job_evidence_reason
+        job = dict(provider='trucksbook', provider_job_id='68093174',
+                   provider_account_id='123456', discord_user_id=111,
+                   provider_authenticated=True, completed=True, job_status='completed',
+                   ownership_verified=True, steam_identity_verified=True,
+                   ownership_evidence_kind='trucksbook_staff_reviewed_profile_steam_mapping')
+        self.assertEqual(verified_job_evidence_reason(job), 'ownership_evidence_kind_unverified')
+
+class ProfileReviewCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_staff_review_routes_only_in_staging_without_role_or_mileage_calls(self):
+        import ast
+        from pathlib import Path
+        command = next(n for n in ast.parse(Path('bot.py').read_text()).body
+                       if isinstance(n, ast.AsyncFunctionDef) and n.name == 'approve_unified_provider')
+        command.decorator_list = []
+        for staging, staff, reviewer, marker, accepted in (
+            ('YES', True, 222, 'witnessed-profile-steam-member', True),
+            ('NO', True, 222, 'witnessed-profile-steam-member', False),
+            ('YES', False, 222, 'witnessed-profile-steam-member', False),
+            ('YES', True, 111, 'witnessed-profile-steam-member', False),
+            ('YES', True, 222, 'confirm-member', False),
+        ):
+            review = AsyncMock()
+            helper = SimpleNamespace(
+                get_pending_claim=AsyncMock(return_value={'status':'approved'}),
+                review_trucksbook_authenticated_profile=review)
+            namespace = dict(os=os, GUILD_ID=1, db_pool=object(), unified_driver_profiles=helper,
+                    member_is_verification_staff=lambda author: staff,
+                    get_verification_by_channel=AsyncMock(return_value={'discord_user_id':111}))
+            exec(compile(ast.Module(body=[command],type_ignores=[]),'bot.py','exec'), namespace)
+            ctx = SimpleNamespace(guild=SimpleNamespace(id=1), channel=SimpleNamespace(id=2),
+                                  author=SimpleNamespace(id=reviewer), reply=AsyncMock())
+            with self.subTest(staging=staging, reviewer=reviewer, marker=marker), \
+                    patch.dict(os.environ, {'AT_V2_ISOLATED_STAGING':staging}, clear=True):
+                await namespace['approve_unified_provider'](ctx,'trucksbook',STEAM,'123456',DIGEST,marker)
+                if accepted:
+                    review.assert_awaited_once_with(namespace['db_pool'],111,reviewer,STEAM,'123456',DIGEST,witnessed_profile_mapping=True)
+                    self.assertIn('No mileage, roles, achievements',ctx.reply.await_args.args[0])
+                else:
+                    review.assert_not_awaited()

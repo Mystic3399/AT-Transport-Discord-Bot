@@ -76,6 +76,8 @@ CREATE TABLE IF NOT EXISTS unified_provider_claims (
  UNIQUE(provider,provider_account_id)
 );
 ALTER TABLE unified_provider_claims
+ ADD COLUMN IF NOT EXISTS ownership_review_history JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE unified_provider_claims
  ADD COLUMN IF NOT EXISTS ownership_evidence_kind TEXT;
 ALTER TABLE unified_provider_claims
  ADD COLUMN IF NOT EXISTS ownership_evidence_sha256 TEXT;
@@ -425,6 +427,104 @@ async def approve_trucksbook_claim_after_witness(
         "Normal TrucksBook login uses email/password; the former witnessed "
         "Steam-login approval is disabled. No account or mileage was changed."
     )
+
+
+async def review_trucksbook_authenticated_profile(
+    pool, discord_user_id, reviewer_id, observed_steam_id64,
+    observed_trucksbook_id, evidence_sha256, *, witnessed_profile_mapping,
+):
+    """Record an independent staff attestation; never approve mileage or roles.
+
+    Caller must enforce staff permission and private applicant channel. Staff
+    witness the authenticated account, read-only provider Steam field and active
+    A&T membership. The digest references the evidence; it does not authenticate
+    it. This new evidence category deliberately remains ineligible for mileage
+    until the separate production policy gates accept it. No legacy label is
+    reused and no registration session/profile activation is performed.
+    """
+    import os
+    import re
+    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+        raise ValueError("Authenticated profile review is restricted to isolated staging")
+    if reviewer_id == discord_user_id:
+        raise ValueError("An independent staff member must review this account")
+    if witnessed_profile_mapping is not True:
+        raise ValueError("Witness the authenticated profile, read-only Steam mapping and active membership")
+    if not isinstance(observed_steam_id64, str) or not re.fullmatch(r"7656119[0-9]{10}", observed_steam_id64):
+        raise ValueError("Invalid observed SteamID64")
+    if not isinstance(observed_trucksbook_id, str) or not re.fullmatch(r"[0-9]{1,30}", observed_trucksbook_id):
+        raise ValueError("Invalid observed TrucksBook ID")
+    if not isinstance(evidence_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
+        raise ValueError("Record a SHA-256 reference to the witnessed evidence")
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            claim = await conn.fetchrow("""
+                SELECT provider_account_id,status,ownership_evidence_kind,ownership_evidence_sha256,reviewed_by,
+                       membership_confirmed,ownership_confirmed FROM unified_provider_claims
+                WHERE discord_user_id=$1 AND provider='trucksbook' FOR UPDATE
+            """, discord_user_id)
+            if not claim or claim["status"] not in ("pending", "approved"):
+                raise ValueError("No reviewable TrucksBook claim")
+            if claim["provider_account_id"] != observed_trucksbook_id:
+                raise ValueError("Observed TrucksBook account does not match the claim")
+            steam = await conn.fetchrow("""
+                SELECT steam_id64,verified_at FROM unified_steam_links
+                WHERE discord_user_id=$1 FOR UPDATE
+            """, discord_user_id)
+            if not steam or steam["verified_at"] is None or steam["steam_id64"] != observed_steam_id64:
+                raise ValueError("Provider Steam mapping does not match verified A&T Steam identity")
+            existing_row = await conn.fetchrow("""
+                SELECT provider_account_id,verified_at FROM unified_provider_links
+                WHERE discord_user_id=$1 AND provider='trucksbook' FOR UPDATE
+            """, discord_user_id)
+            existing = existing_row["provider_account_id"] if existing_row else None
+            if existing is not None and existing != observed_trucksbook_id:
+                raise ValueError("A different TrucksBook account is linked; manual investigation required")
+            conflicting = await conn.fetchval("""
+                SELECT EXISTS(SELECT 1 FROM unified_provider_claims
+                    WHERE provider='trucksbook' AND provider_account_id=$1
+                      AND discord_user_id<>$2 AND status IN ('pending','approved'))
+            """, observed_trucksbook_id, discord_user_id)
+            if conflicting:
+                raise ValueError("TrucksBook account has a conflicting ownership claim")
+            if (claim["status"] == "approved" and claim["membership_confirmed"]
+                    and claim["ownership_confirmed"]
+                    and claim["ownership_evidence_kind"] == "trucksbook_staff_reviewed_profile_steam_mapping"
+                    and claim["ownership_evidence_sha256"] == evidence_sha256
+                    and claim["reviewed_by"] == reviewer_id and existing == observed_trucksbook_id
+                    and existing_row["verified_at"] is not None):
+                return {"status": "already_reviewed", "mileage_eligible": False}
+            await conn.execute("""
+                INSERT INTO unified_provider_links
+                    (provider,provider_account_id,discord_user_id,verified_at,verified_by)
+                VALUES('trucksbook',$1,$2,NOW(),$3)
+                ON CONFLICT(provider,provider_account_id) DO UPDATE SET
+                    verified_at=EXCLUDED.verified_at,verified_by=EXCLUDED.verified_by
+                WHERE unified_provider_links.discord_user_id=EXCLUDED.discord_user_id
+            """, observed_trucksbook_id, discord_user_id, reviewer_id)
+            linked = await conn.fetchval("""
+                SELECT EXISTS(SELECT 1 FROM unified_provider_links
+                    WHERE provider='trucksbook' AND provider_account_id=$1
+                      AND discord_user_id=$2 AND verified_at IS NOT NULL)
+            """, observed_trucksbook_id, discord_user_id)
+            if not linked:
+                raise ValueError("TrucksBook account belongs to another driver")
+            await conn.execute("""
+                UPDATE unified_provider_claims SET
+                    ownership_review_history=ownership_review_history || jsonb_build_array(
+                        jsonb_build_object('reviewed_at',NOW(),'reviewer_id',$3::bigint,
+                            'evidence_sha256',$2::text,
+                            'previous_status',status,'previous_reviewer_id',reviewed_by,
+                            'previous_reviewed_at',reviewed_at,
+                            'previous_evidence_kind',ownership_evidence_kind,
+                            'previous_evidence_sha256',ownership_evidence_sha256)),
+                    status='approved',
+                    membership_confirmed=TRUE,ownership_confirmed=TRUE,
+                    ownership_evidence_kind='trucksbook_staff_reviewed_profile_steam_mapping',
+                    ownership_evidence_sha256=$2,reviewed_by=$3,reviewed_at=NOW()
+                WHERE discord_user_id=$1 AND provider='trucksbook'
+            """, discord_user_id, evidence_sha256, reviewer_id)
+    return {"status": "staff_review_recorded", "mileage_eligible": False}
 
 
 async def activate_if_verified(pool, discord_user_id):

@@ -853,6 +853,37 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows["cases"], 1)
         self.assertEqual(rows["audits"], 1)
 
+    async def test_authenticated_trucksbook_staff_review_preserves_identity_and_rejects_mismatch(self):
+        from unittest.mock import patch
+        user, reviewer, account = 991234567890125001, 991234567890125002, '991234567890125003'
+        steam = '76561198099995001'
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO unified_driver_profiles(discord_user_id) VALUES($1) ON CONFLICT DO NOTHING",user)
+            await conn.execute("INSERT INTO unified_steam_links(discord_user_id,steam_id64) VALUES($1,$2) ON CONFLICT DO NOTHING",user,steam)
+            await conn.execute("INSERT INTO unified_provider_claims(discord_user_id,provider,provider_account_id) VALUES($1,'trucksbook',$2) ON CONFLICT DO NOTHING",user,account)
+            before = await conn.fetchrow("SELECT * FROM unified_driver_profiles WHERE discord_user_id=$1",user)
+        with patch.dict(os.environ, {'AT_V2_ISOLATED_STAGING':'YES'}):
+            with self.assertRaisesRegex(ValueError,'does not match verified'):
+                await profiles.review_trucksbook_authenticated_profile(self.pool,user,reviewer,'76561198099995002',account,'a'*64,witnessed_profile_mapping=True)
+            report = await profiles.audit_trucksbook_observed_identity(self.pool,user,account,hashlib.sha256(steam.encode()).hexdigest())
+            self.assertTrue(report['observed_steam_match'])
+            self.assertEqual(report['claim_status'],'pending')
+            result = await profiles.review_trucksbook_authenticated_profile(self.pool,user,reviewer,steam,account,'a'*64,witnessed_profile_mapping=True)
+            self.assertFalse(result['mileage_eligible'])
+            # Retry reattests the same link; uniqueness prevents extra accounts.
+            await profiles.review_trucksbook_authenticated_profile(self.pool,user,reviewer,steam,account,'a'*64,witnessed_profile_mapping=True)
+        async with self.pool.acquire() as conn:
+            after = await conn.fetchrow("SELECT * FROM unified_driver_profiles WHERE discord_user_id=$1",user)
+            self.assertEqual(dict(before),dict(after))
+            self.assertEqual(await conn.fetchval("SELECT COUNT(*) FROM unified_provider_links WHERE provider='trucksbook' AND discord_user_id=$1",user),1)
+            claim = await conn.fetchrow("SELECT status,ownership_evidence_kind,reviewed_by,ownership_review_history FROM unified_provider_claims WHERE discord_user_id=$1 AND provider='trucksbook'",user)
+            self.assertEqual(claim['status'],'approved')
+            self.assertEqual(claim['reviewed_by'],reviewer)
+            self.assertEqual(len(json.loads(claim['ownership_review_history'])),1)
+            self.assertEqual(claim['ownership_evidence_kind'],'trucksbook_staff_reviewed_profile_steam_mapping')
+            self.assertEqual(await conn.fetchval("SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1",user),steam)
+
+
 
 if __name__ == "__main__":
     unittest.main()

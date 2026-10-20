@@ -6327,8 +6327,9 @@ async def register_trucksbook_in_channel(ctx, account_id: str = None):
         "Your TrucksBook account ID is recorded as **pending verification**. "
         "The ID and profile name alone do not prove ownership, so no verified link or mileage is created. "
         "TrucksBook normally uses email/password login. Verify Steam separately with A&T. "
-        "The former Steam-login review is disabled while a provider-supported ownership method "
-        "is verified. Do not share passwords, authentication codes, session cookies or recovery codes.",
+        "In isolated staging, independent staff can review your signed-in TrucksBook profile, "
+        "its read-only Steam mapping and A&T membership. The old Steam-login flow stays disabled. "
+        "Do not share passwords, authentication codes, session cookies or recovery codes.",
         mention_author=False,
     )
 
@@ -6397,8 +6398,8 @@ async def approve_unified_provider(
     if provider not in ("trucksbook", "trucky"):
         await ctx.reply(
             "Use `!approveprovider trucky`, or `!approveprovider trucksbook "
-            "<observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> confirm-member` "
-            "TrucksBook approval is currently disabled pending provider-supported ownership evidence.", mention_author=False,
+            "<observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> witnessed-profile-steam-member` "
+            "Independent TrucksBook profile review is staging-only and cannot authorise mileage.", mention_author=False,
         )
         return
     if db_pool is None:
@@ -6413,15 +6414,38 @@ async def approve_unified_provider(
         await ctx.reply("You cannot approve your own account.", mention_author=False)
         return
     claim = await unified_driver_profiles.get_pending_claim(db_pool, applicant_id, provider)
-    if claim is None or claim["status"] != "pending":
-        await ctx.reply("No pending V2 claim for that provider.", mention_author=False)
+    if claim is None or (claim["status"] != "pending" and not (provider == "trucksbook" and claim["status"] == "approved")):
+        await ctx.reply("No reviewable V2 claim for that provider.", mention_author=False)
         return
     if provider == "trucksbook":
+        if (os.getenv("AT_V2_ISOLATED_STAGING") != "YES"
+                or membership_confirmation != "witnessed-profile-steam-member"):
+            await ctx.reply(
+                "TrucksBook automatic approval is disabled. In isolated staging only, "
+                "independent staff may witness the applicant's signed-in account, matching "
+                "read-only Steam mapping and active A&T membership, then use "
+                "!approveprovider trucksbook <observed SteamID64> <observed TrucksBook ID> "
+                "<evidence SHA-256> witnessed-profile-steam-member. "
+                "The old confirm-member / Steam-login flow cannot approve ownership.",
+                mention_author=False,
+            )
+            return
+        try:
+            await unified_driver_profiles.review_trucksbook_authenticated_profile(
+                db_pool, applicant_id, ctx.author.id, observed_steam_id64,
+                observed_trucksbook_id, evidence_sha256, witnessed_profile_mapping=True,
+            )
+        except ValueError as error:
+            await ctx.reply(str(error), mention_author=False)
+            return
+        except Exception as error:
+            print(f"TRUCKSBOOK PROFILE REVIEW ERROR: {type(error).__name__}", flush=True)
+            await ctx.reply("Review failed; no partial approval was saved.", mention_author=False)
+            return
         await ctx.reply(
-            "TrucksBook ownership approval is disabled pending provider-supported evidence. "
-            "TrucksBook uses email/password login; its initial Steam registration is not "
-            "a repeatable Steam sign-in. Steam verification remains separate. "
-            "The claim stays pending; no account, mileage or roles were changed.",
+            "Independent staff profile review recorded in staging. "
+            "This does not authorise job credit or duplicate reconciliation. "
+            "No mileage, roles, achievements or Company Mods access changed.",
             mention_author=False,
         )
         return
