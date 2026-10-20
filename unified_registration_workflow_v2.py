@@ -107,3 +107,62 @@ async def complete_if_ready(pool, user_id):
             await conn.execute("UPDATE unified_registration_sessions SET status='approved',updated_at=NOW() WHERE discord_user_id=$1 AND status<>'approved'", user_id)
             await conn.execute("UPDATE unified_driver_profiles SET status='active',activated_at=COALESCE(activated_at,NOW()) WHERE discord_user_id=$1 AND status='pending'", user_id)
     return True
+
+
+async def list_registration_statuses(pool, page=1, page_size=10):
+    """Read a bounded, consistent admin page; return no external account IDs.
+
+    Provider/Steam evidence is read internally only to derive the same statuses
+    used by the applicant embed. Registration and mileage tables are not written.
+    """
+    if not enabled():
+        raise ValueError('Verification overview is available only in isolated staging')
+    if type(page) is not int or not 1 <= page <= 1000000:
+        raise ValueError('Use a positive page number')
+    if type(page_size) is not int or not 1 <= page_size <= 10:
+        raise ValueError('Invalid page size')
+    async with pool.acquire() as conn:
+        async with conn.transaction(isolation='repeatable_read', readonly=True):
+            total = await conn.fetchval('SELECT COUNT(*) FROM unified_driver_profiles')
+            pages = max(1, (total + page_size - 1) // page_size)
+            if page > pages:
+                raise ValueError('That verification page does not exist')
+            users = await conn.fetch("""
+                SELECT p.discord_user_id,p.status AS profile_status,
+                       s.verified_at IS NOT NULL AS steam_verified,
+                       r.status AS registration_status,
+                       EXISTS(SELECT 1 FROM unified_steam_auth_states a
+                         WHERE a.discord_user_id=p.discord_user_id
+                           AND a.expires_at>NOW() AND a.consumed_at IS NULL) AS steam_pending
+                FROM unified_driver_profiles p
+                LEFT JOIN unified_steam_links s USING(discord_user_id)
+                LEFT JOIN unified_registration_sessions r USING(discord_user_id)
+                ORDER BY p.discord_user_id LIMIT $1 OFFSET $2
+            """, page_size, (page - 1) * page_size)
+            ids = [r['discord_user_id'] for r in users]
+            links = await conn.fetch("""
+                SELECT discord_user_id,provider,provider_account_id,verified_at
+                FROM unified_provider_links WHERE discord_user_id=ANY($1::bigint[])
+            """, ids)
+            claims = await conn.fetch("""
+                SELECT discord_user_id,provider,provider_account_id,status,
+                       ownership_confirmed,ownership_evidence_kind
+                FROM unified_provider_claims WHERE discord_user_id=ANY($1::bigint[])
+            """, ids)
+    result = []
+    for row in users:
+        statuses = {}
+        for provider in ('trucksbook', 'trucky'):
+            link = next((r for r in links if r['discord_user_id'] == row['discord_user_id'] and r['provider'] == provider), None)
+            claim = next((r for r in claims if r['discord_user_id'] == row['discord_user_id'] and r['provider'] == provider), None)
+            statuses[provider] = account_status(link, claim, provider)
+        complete = (row['registration_status'] == 'approved' and row['steam_verified']
+                    and any(v in ('Linked', 'Verified') for v in statuses.values())
+                    and row['profile_status'] != 'suspended'
+                    and row['registration_status'] != 'cancelled')
+        result.append({
+            'discord_user_id': row['discord_user_id'],
+            'steam': 'Verified' if row['steam_verified'] else 'Pending' if row['steam_pending'] else 'Not Linked',
+            **statuses, 'registration': 'Complete' if complete else 'Incomplete',
+        })
+    return {'page': page, 'pages': pages, 'total': total, 'members': result}

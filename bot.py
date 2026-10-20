@@ -7088,6 +7088,88 @@ async def confirm_unified_provider(ctx, provider: str = None, ownership_evidence
     )
 
 
+
+
+def is_private_verification_admin_channel(ctx):
+    """Require a configured private management channel, not an applicant channel."""
+    raw = os.getenv("AT_V2_VERIFICATIONS_ADMIN_CHANNEL_IDS", "")
+    parts = raw.split(",")
+    if not parts or any(not p.strip().isascii() or not p.strip().isdecimal()
+                        or not 17 <= len(p.strip()) <= 20 for p in parts):
+        return False
+    if ctx.channel.id not in {int(p.strip()) for p in parts}:
+        return False
+    if getattr(ctx.channel, "parent", None) is not None:
+        # Thread access can differ from its parent; require a normal admin channel.
+        return False
+    if ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+        return False
+    for target, overwrite in ctx.channel.overwrites.items():
+        if overwrite.view_channel is not True:
+            continue
+        if target.id == getattr(ctx.guild.me, "id", None):
+            continue
+        if getattr(target, "roles", None) is not None:
+            if not (member_is_verification_staff(target)
+                    or target.guild_permissions.administrator):
+                return False
+        elif not (target.id in VERIFICATION_STAFF_ROLE_IDS
+                  or target.permissions.administrator):
+            return False
+    return True
+
+
+@bot.command(name="verifications")
+async def verification_status_overview(ctx, page: int = 1):
+    """Management-only read-only registration overview; never grants access."""
+    import unified_registration_workflow_v2 as registration
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot:
+        return
+    if not member_is_verification_staff(ctx.author):
+        await ctx.reply("Only authorised A&T Management can view verification status.", mention_author=False)
+        return
+    if not registration.enabled():
+        await ctx.reply("This overview is available only in isolated staging.", mention_author=False)
+        return
+    if not is_private_verification_admin_channel(ctx):
+        await ctx.reply(
+            "Use a private management channel configured in AT_V2_VERIFICATIONS_ADMIN_CHANNEL_IDS. "
+            "No member records were read.", mention_author=False)
+        return
+    if db_pool is None:
+        await ctx.reply("The registration database is unavailable.", mention_author=False)
+        return
+    try:
+        report = await registration.list_registration_statuses(db_pool, page)
+    except ValueError as error:
+        await ctx.reply(str(error), mention_author=False)
+        return
+    except Exception as error:
+        print(f"VERIFICATIONS OVERVIEW FAILED: {type(error).__name__}", flush=True)
+        await ctx.reply("Verification status is temporarily unavailable.", mention_author=False)
+        return
+    embed = discord.Embed(
+        title="A&T — Member Verification Status",
+        description=f"Page {report['page']}/{report['pages']} • {report['total']} registration records",
+        colour=discord.Colour.blue(),
+    )
+    for row in report["members"]:
+        member = ctx.guild.get_member(row["discord_user_id"])
+        name = discord.utils.escape_markdown(member.display_name)[:80] if member else "Registered member"
+        embed.add_field(
+            name=name,
+            value=(f"<@{row['discord_user_id']}>\n"
+                   f"Steam: **{row['steam']}**\n"
+                   f"TrucksBook: **{row['trucksbook']}** • Trucky: **{row['trucky']}**\n"
+                   f"Registration: **{row['registration']}**"),
+            inline=False,
+        )
+    if not report["members"]:
+        embed.description += "\nNo registration records yet."
+    embed.set_footer(text="Linked is not verified ownership. Read-only; no mileage, roles or registrations changed.")
+    await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+
+
 @bot.hybrid_command(name="myregistration", description="Privately view your A&T driver account registration status")
 async def myregistration(ctx):
     if ctx.guild is None or ctx.guild.id != GUILD_ID:

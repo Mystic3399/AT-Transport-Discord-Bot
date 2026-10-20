@@ -943,6 +943,38 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+    async def test_admin_overview_pagination_preserves_registration_records(self):
+        from unittest.mock import patch
+        import unified_registration_workflow_v2 as registration
+        from tests.test_registration_workflow_v2 import ENV
+        user = 991234567890127010
+        await profiles.begin_registration(self.pool,user,991234567890127011)
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO unified_steam_links(discord_user_id,steam_id64) VALUES($1,'76561198099997010') ON CONFLICT DO NOTHING", user)
+            await conn.execute("INSERT INTO unified_provider_links(provider,provider_account_id,discord_user_id) VALUES('trucksbook','991234567890127012',$1) ON CONFLICT DO NOTHING", user)
+            before = dict(await conn.fetchrow("SELECT * FROM unified_driver_profiles WHERE discord_user_id=$1", user))
+        with patch.dict(os.environ, ENV):
+            first = await registration.list_registration_statuses(self.pool, 1, 2)
+            all_rows = []
+            for page in range(1, first["pages"] + 1):
+                result = await registration.list_registration_statuses(self.pool, page, 2)
+                self.assertLessEqual(len(result["members"]),2)
+                all_rows += result["members"]
+            target = next(row for row in all_rows if row["discord_user_id"] == user)
+            self.assertEqual(target["steam"], "Verified")
+            self.assertEqual(target["trucksbook"], "Linked")
+            self.assertEqual(target["trucky"], "Not Linked")
+            self.assertEqual(target["registration"], "Incomplete")
+            self.assertEqual(len({r["discord_user_id"] for r in all_rows}),first["total"])
+            with self.assertRaisesRegex(ValueError, "does not exist"):
+                await registration.list_registration_statuses(self.pool, first["pages"] + 1, 2)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(before,dict(await conn.fetchrow("SELECT * FROM unified_driver_profiles WHERE discord_user_id=$1", user)))
+            self.assertEqual(await conn.fetchval("SELECT status FROM unified_registration_sessions WHERE discord_user_id=$1",user),"pending")
+            self.assertIsNone(await conn.fetchval("SELECT verified_at FROM unified_provider_links WHERE discord_user_id=$1 AND provider='trucksbook'", user))
+
+
+
 if __name__ == "__main__":
     unittest.main()
 
