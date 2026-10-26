@@ -267,17 +267,18 @@ async def apply_verified_credit(
                     await log_decision("pending_reconciliation", "historical_job_overlap")
                     return {"status": "pending_reconciliation", "reason": "historical_job_overlap"}
             if reconciliation_status == "no_candidate":
+                # A resolved case still binds these provider jobs. A caller
+                # cannot discard its audit by relabelling it as no_candidate.
                 unresolved = await conn.fetchval("""
                     SELECT EXISTS(
                       SELECT 1 FROM unified_job_reconciliation_cases
-                      WHERE status='potential_duplicate'
-                        AND (( $1='trucky' AND trucky_job_id=$2 )
+                      WHERE (( $1='trucky' AND trucky_job_id=$2 )
                           OR ( $1='trucksbook' AND trucksbook_job_id=$2 ))
                     )
                 """, provider, provider_job_id)
                 if unresolved:
-                    await log_decision("pending_reconciliation", "open_duplicate_case")
-                    return {"status": "pending_reconciliation", "reason": "open_duplicate_case"}
+                    await log_decision("pending_reconciliation", "existing_case_requires_audited_review")
+                    return {"status": "pending_reconciliation", "reason": "existing_case_requires_audited_review"}
             event = await conn.fetchrow("""
                 SELECT discord_user_id,provider_account_id,real_miles,race_miles,source_payload
                 FROM unified_provider_job_events

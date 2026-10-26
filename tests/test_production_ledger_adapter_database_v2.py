@@ -252,6 +252,25 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_decisions WHERE provider_job_id=$1 AND decision='pending_reconciliation'", job["provider_job_id"]), 1)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", job["discord_user_id"]), 0)
 
+    async def test_existing_review_cannot_be_bypassed_as_no_candidate(self):
+        await self.install_ledger()
+        for index, status in enumerate(("potential_duplicate", "confirmed_duplicate", "verified_independent")):
+            user = 991234567890124000 + index
+            job = await self.seed_verified_driver_job(user, "trucky", str(991234567890124010 + index), str(991234567890124020 + index), "364.1235186511")
+            async with self.pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO unified_job_reconciliation_cases
+                      (trucky_job_id,trucksbook_job_id,discord_user_id,status,opened_by)
+                    VALUES($1,$2,$3,$4,777)
+                """, job["provider_job_id"], str(991234567890124030 + index), user, status)
+            results = await asyncio.gather(self.award(job), self.award(job))
+            expected = {"status":"pending_reconciliation", "reason":"existing_case_requires_audited_review"}
+            self.assertEqual(results, [expected, expected])
+            async with self.pool.acquire() as conn:
+                self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1", user), 0)
+                self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", user), 0)
+                self.assertEqual(await conn.fetchval("SELECT status FROM unified_job_reconciliation_cases WHERE trucky_job_id=$1", job["provider_job_id"]), status)
+
     async def test_historical_trucksbook_job_is_held_without_changing_totals(self):
         job = await self.seed_verified_driver_job(991234567890123725, "trucksbook", "991234567890123726", "991234567890123727", "88")
         async with self.pool.acquire() as conn:
