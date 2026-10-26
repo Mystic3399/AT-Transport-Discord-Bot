@@ -64,14 +64,20 @@ def trucksbook_export_row(row):
     return result
 
 
-def trucky_export_row(row):
+def trucky_export_row(row, *, max_speed_unit=None):
     if not TRUCKY_REQUIRED.issubset(row):raise ValueError('Trucky export columns changed')
     if row['Company ID'] != 49041:raise ValueError('Unexpected Trucky company')
     result=_base('trucky',row['#'],row['Game'],row['Driver'],row['Source City'],row['Destination City'],row['Cargo'])
     # The column explicitly says km; Distance Unit is a separate display field.
     distance=_number(row['Distance (km)']);speed=_number(row['Max Speed'])
+    # Unit is configured from the owner-confirmed export contract, never
+    # inferred from the distance display preference or raw speed magnitude.
+    if max_speed_unit not in (None,'km/h','mph'):
+        raise ValueError('Unsupported maximum speed unit')
     statistics={'real_miles':'Real','race_miles':'Race'}.get(row['Stats Type'])
-    result.update(distance=str(distance),unit='km',max_speed=str(speed),speed_unit=None,
+    result.update(distance=str(distance),unit='km',max_speed=str(speed),speed_unit=max_speed_unit,
+                  max_speed_mph=(str(speed/Decimal('1.609344')) if max_speed_unit=='km/h'
+                                 else str(speed) if max_speed_unit=='mph' else None),
                   statistics=statistics,source_statistics=row['Stats Type'],source_status=row['Status'],
                   source_last_update=_timestamp(row['Last Update']),source_started_at=_timestamp(row['Started at']),
                   source_timezone=row['Timezone'])
@@ -79,9 +85,14 @@ def trucky_export_row(row):
     # nor prove that the latest update is the authoritative completion time.
     if row['Status']!='completed':result['evidence_issues'].append('job_not_completed')
     if statistics is None:result['evidence_issues'].append('unsupported_provider_classification')
-    if row['Game']=='ATS':result['evidence_issues'].append('max_speed_unit_unverified')
-    kind=classify_job_mileage('trucky',statistics,game=row['Game'],max_speed=speed,speed_unit=None) if statistics else None
+    if row['Game']=='ATS' and max_speed_unit is None:
+        result['evidence_issues'].append('max_speed_unit_unverified')
+    kind=classify_job_mileage('trucky',statistics,game=row['Game'],max_speed=speed,speed_unit=max_speed_unit) if statistics else None
     result['company_policy_classification']=kind.mileage_type if kind else None
+    if row['Game']=='ATS' and statistics and max_speed_unit is not None and kind is None:
+        result['evidence_issues'].append('ats_speed_outside_approved_ranges')
+    if kind and statistics and kind.mileage_type!=statistics.lower():
+        result['evidence_issues'].append('company_policy_differs_from_provider_classification')
     return result
 
 

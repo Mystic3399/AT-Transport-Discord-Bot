@@ -27,6 +27,22 @@ class ExportAdapterTests(unittest.TestCase):
         self.assertIn('max_speed_unit_unverified',row['evidence_issues'])
         self.assertIsNone(row['delivered_at'])
 
+    def test_confirmed_trucky_top_speed_converted_to_mph_for_ats(self):
+        from decimal import Decimal
+        row=trucky_export_row(TR,max_speed_unit='km/h')
+        self.assertEqual(row['company_policy_classification'],'real')
+        self.assertEqual(Decimal(row['max_speed_mph']),Decimal(130)/Decimal('1.609344'))
+        self.assertEqual(row['source_statistics'],'real_miles')
+        self.assertNotIn('max_speed_unit_unverified',row['evidence_issues'])
+        self.assertFalse(row['ownership_verified'])
+        self.assertFalse(row['eligible_for_award'])
+        for speed,kind in ((132,'race'),(131,None),(181,None)):
+            result=trucky_export_row({**TR,'Max Speed':speed},max_speed_unit='km/h')
+            self.assertEqual(result['company_policy_classification'],kind)
+        changed=trucky_export_row({**TR,'Max Speed':132},max_speed_unit='km/h')
+        self.assertIn('company_policy_differs_from_provider_classification',changed['evidence_issues'])
+        self.assertEqual(changed['source_statistics'],'real_miles')
+
     def test_road_trips_invalid_and_wrong_company_remain_untrusted(self):
         for kind in ('road_trip_real_miles','road_trip_race_miles','invalid'):
             row=trucky_export_row({**TR,'Stats Type':kind,'Game':'ETS2'})
