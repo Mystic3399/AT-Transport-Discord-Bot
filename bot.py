@@ -630,10 +630,7 @@ async def refresh_unified_registration(discord_user_id):
             raise ValueError("Registration channel unavailable in configured staging guild")
         embed = discord.Embed(
             title="A&T — Driver Registration",
-            description=("Registration complete. You can link another tracking account below."
-                         if view["ready"] else
-                         "Verify Steam with !linksteam, then link TrucksBook with !trucksbook <ID> "
-                         "or Trucky with !registertrucky <ID>. You may link both."),
+            description=registration.next_steps(view),
             colour=discord.Colour.blue(),
         )
         steam = (f"[Confirmed Steam account](https://steamcommunity.com/profiles/{view['steam_id64']})"
@@ -697,7 +694,7 @@ async def link_registration_provider(ctx, provider, account_id):
         print(f"REGISTRATION PROVIDER LINK FAILED: {type(error).__name__}", flush=True)
         await ctx.reply("Account linking is temporarily unavailable. Existing accounts are unchanged; retry /register to refresh status.", mention_author=False)
         return
-    await ctx.reply("Account linked and registration updated. Account ownership is not independently verified by this lookup; no mileage or roles were awarded.", mention_author=False)
+    await ctx.reply("Account linked and registration updated. Account ownership is not independently verified by this lookup; no mileage or roles were awarded. Run `!confirm` to finish and close this channel, or link your other tracking account first.", mention_author=False)
 
 
 async def start_public_integrations():
@@ -8018,12 +8015,38 @@ async def confirm_verification(
 ):
     import unified_registration_workflow_v2 as registration
     if registration.enabled():
-        verification = await get_verification_by_channel(ctx.channel.id)
-        if ctx.guild is None or ctx.guild.id != GUILD_ID or not verification or int(verification["discord_user_id"]) != ctx.author.id:
+        if ctx.guild is None or ctx.guild.id != GUILD_ID or ctx.author.bot or db_pool is None:
             return
-        completed = await registration.complete_if_ready(db_pool, ctx.author.id)
-        await refresh_unified_registration(ctx.author.id)
-        await ctx.reply("Registration complete." if completed else "Verify Steam and link at least one tracking account first.", mention_author=False)
+        verification = await get_verification_by_channel(ctx.channel.id)
+        if not verification or int(verification["discord_user_id"]) != ctx.author.id:
+            await ctx.reply("Use !confirm in your own private registration channel.", mention_author=False)
+            return
+        try:
+            completed = await registration.complete_if_ready(db_pool, ctx.author.id, channel_id=ctx.channel.id)
+            await refresh_unified_registration(ctx.author.id)
+        except Exception as error:
+            print(f"REGISTRATION CONFIRM FAILED: {type(error).__name__}", flush=True)
+            await ctx.reply("Registration could not be confirmed. Your channel and account links are preserved; retry !confirm shortly.", mention_author=False)
+            return
+        if not completed:
+            view = await registration.state(db_pool, ctx.author.id)
+            await ctx.reply(registration.next_steps(view), mention_author=False)
+            return
+        await ctx.reply("✅ Registration complete. Your linked accounts and existing driver history are retained. This private channel closes in **30 seconds**. No mileage or roles were awarded.", mention_author=False)
+        await asyncio.sleep(30)
+        # Recheck after the grace period: cancellation/suspension or a different
+        # registration channel must not cause deletion of the wrong channel.
+        view = await registration.state(db_pool, ctx.author.id)
+        if not view['ready'] or not view['session'] or view['session']['verification_channel_id'] != ctx.channel.id:
+            return
+        try:
+            await ctx.channel.delete(reason="A&T driver registration confirmed by applicant")
+        except discord.NotFound:
+            pass
+        except discord.Forbidden:
+            await ctx.reply("Registration is complete, but I need Manage Channels permission to close this channel. Please contact management.", mention_author=False)
+        except discord.HTTPException:
+            await ctx.reply("Registration is complete, but Discord could not close this channel. Retry !confirm or contact management.", mention_author=False)
         return
 
     if ctx.guild is None:

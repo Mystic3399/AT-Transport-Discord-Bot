@@ -1072,6 +1072,28 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await profiles.bind_verified_steam(self.pool, user, '76561198888888020', digest, 'race-nonce-retry-881020')
 
 
+
+    async def test_confirm_completes_only_matching_onboarding_and_preserves_links(self):
+        from unittest.mock import patch
+        import unified_registration_workflow_v2 as workflow
+        from tests.test_registration_workflow_v2 import ENV
+        user, channel = 991234568882001, 991234568882002
+        await profiles.begin_registration(self.pool, user, channel)
+        await self._legacy_cancel_fixture(user, channel)
+        await self.conn.execute('INSERT INTO unified_steam_links(discord_user_id,steam_id64) VALUES($1,$2)', user, '76561198888888201')
+        with patch.dict(os.environ, ENV, clear=True):
+            await workflow.link_supported_account(self.pool, user, 'trucksbook', '998882001', 'Retained Driver')
+            before = dict(await self.conn.fetchrow("SELECT * FROM unified_provider_links WHERE discord_user_id=$1", user))
+            self.assertFalse(await workflow.complete_if_ready(self.pool, user, channel_id=channel+1))
+            self.assertEqual(await self.conn.fetchval('SELECT status FROM driver_verifications WHERE discord_user_id=$1',user),'pending')
+            self.assertTrue(await workflow.complete_if_ready(self.pool, user, channel_id=channel))
+            completed_at = await self.conn.fetchval('SELECT completed_at FROM driver_verifications WHERE discord_user_id=$1',user)
+            self.assertTrue(await workflow.complete_if_ready(self.pool, user, channel_id=channel))
+        self.assertEqual(await self.conn.fetchval('SELECT status FROM driver_verifications WHERE discord_user_id=$1',user),'completed')
+        self.assertEqual(await self.conn.fetchval('SELECT completed_at FROM driver_verifications WHERE discord_user_id=$1',user),completed_at)
+        self.assertEqual(dict(await self.conn.fetchrow('SELECT * FROM unified_provider_links WHERE discord_user_id=$1',user)),before)
+
+
 if __name__ == "__main__":
     unittest.main()
 

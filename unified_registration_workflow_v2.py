@@ -41,6 +41,23 @@ def account_status(link, claim, provider=None):
     return 'Pending' if claim and claim['status'] != 'rejected' else 'Not Linked'
 
 
+def next_steps(view):
+    """Explain the next action without changing onboarding or ownership state."""
+    if view['steam_status'] != 'Verified':
+        return ('**Step 1 — Verify Steam:** run `!linksteam`, open the one-time sign-in link, '
+                'then return here. The registration message updates automatically. '
+                '**Step 2:** link TrucksBook with `!trucksbook <profile ID>` or Trucky '
+                'with `!registertrucky <account ID>`.')
+    linked = [p for p, a in view['accounts'].items() if a['status'] in ('Linked', 'Verified')]
+    if not linked:
+        return ('**Steam verified. Next:** run `!trucksbook <profile ID>` or '
+                '`!registertrucky <account ID>`. Find the numeric ID in your provider profile URL. '
+                'You can link both accounts. After linking, run `!confirm` to finish and close this channel.')
+    return ('**Accounts linked. Next:** run `!confirm` to finish and close this channel. '
+            'You may first add the other account with `!trucksbook <profile ID>` or '
+            '`!registertrucky <account ID>`. Account linking does not award mileage.')
+
+
 async def state(pool, user_id):
     async with pool.acquire() as conn:
         async with conn.transaction(isolation='repeatable_read', readonly=True):
@@ -120,15 +137,17 @@ async def link_supported_account(pool, user_id, provider, account_id, canonical_
     return await complete_if_ready(pool, user_id)
 
 
-async def complete_if_ready(pool, user_id):
+async def complete_if_ready(pool, user_id, channel_id=None):
     if not enabled():
         raise ValueError('V2 registration is not enabled for this deployment')
     # Lock session and Steam/provider rows so cancellation and account changes
     # cannot race the onboarding decision. No mileage eligibility is implied.
     async with pool.acquire() as conn:
         async with conn.transaction():
-            session = await conn.fetchrow('SELECT status FROM unified_registration_sessions WHERE discord_user_id=$1 FOR UPDATE', user_id)
+            session = await conn.fetchrow('SELECT status,verification_channel_id FROM unified_registration_sessions WHERE discord_user_id=$1 FOR UPDATE', user_id)
             if not session or session['status'] == 'cancelled':
+                return False
+            if channel_id is not None and session['verification_channel_id'] != channel_id:
                 return False
             profile = await conn.fetchrow('SELECT status FROM unified_driver_profiles WHERE discord_user_id=$1 FOR UPDATE', user_id)
             if not profile or profile['status'] == 'suspended':
@@ -139,6 +158,12 @@ async def complete_if_ready(pool, user_id):
                 return False
             await conn.execute("UPDATE unified_registration_sessions SET status='approved',updated_at=NOW() WHERE discord_user_id=$1 AND status<>'approved'", user_id)
             await conn.execute("UPDATE unified_driver_profiles SET status='active',activated_at=COALESCE(activated_at,NOW()) WHERE discord_user_id=$1 AND status='pending'", user_id)
+            if channel_id is not None:
+                # Applicant confirmation completes only this legacy onboarding row;
+                # preserve account IDs, mileage and historical profile records.
+                await conn.execute("""UPDATE driver_verifications SET status='completed',completed_at=COALESCE(completed_at,NOW())
+                    WHERE discord_user_id=$1 AND verification_channel_id=$2
+                      AND status IN ('pending','confirmed')""", user_id, channel_id)
     return True
 
 

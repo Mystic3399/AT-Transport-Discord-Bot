@@ -92,7 +92,7 @@ class RegistrationEmbedTests(unittest.IsolatedAsyncioTestCase):
         channel.send.assert_not_awaited()
         embed=message.edit.await_args.kwargs['embed']
         self.assertEqual([f['name'] for f in embed.fields],['Steam — Verified','TrucksBook — Linked','Trucky — Not Linked'])
-        self.assertIn('Registration complete',embed.description)
+        self.assertIn('!confirm',embed.description)
         self.assertIn('steamcommunity.com/profiles/',embed.fields[0]['value'])
 
 class StagingSlashSyncTests(unittest.IsolatedAsyncioTestCase):
