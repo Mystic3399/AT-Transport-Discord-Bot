@@ -130,3 +130,19 @@ class RegistrationAuditTests(unittest.IsolatedAsyncioTestCase):
         audit,ctx=self.audit(logger)
         await audit(ctx,'trucky','linked','123')
         logger.assert_awaited_once()
+
+
+class ClosedRegistrationRefreshTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_registration_does_not_recreate_closed_channel(self):
+        tree=ast.parse(Path('bot.py').read_text())
+        fn=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='refresh_unified_registration')
+        ns=dict(asyncio=asyncio,registration_embed_locks={},db_pool=object(),
+                bot=SimpleNamespace(get_channel=lambda _:None),GUILD_ID=1)
+        exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'),ns)
+        view=dict(session={'status':'approved','verification_channel_id':22},ready=True)
+        with patch.dict(os.environ,ENV,clear=True),patch.object(workflow,'state',AsyncMock(return_value=view)):
+            await ns['refresh_unified_registration'](11)
+        view['session']['status']='pending';view['ready']=False
+        with patch.dict(os.environ,ENV,clear=True),patch.object(workflow,'state',AsyncMock(return_value=view)):
+            with self.assertRaisesRegex(ValueError,'channel unavailable'):
+                await ns['refresh_unified_registration'](11)

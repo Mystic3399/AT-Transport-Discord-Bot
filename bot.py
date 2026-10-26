@@ -626,8 +626,12 @@ async def refresh_unified_registration(discord_user_id):
         if not session or session["status"] == "cancelled":
             return
         channel = bot.get_channel(session["verification_channel_id"])
+        if channel is None and session["status"] == "approved" and view["ready"]:
+            # !confirm intentionally closes completed onboarding channels.
+            # Later signed ownership upgrades must not recreate that channel.
+            return
         if channel is None or getattr(getattr(channel, "guild", None), "id", None) != GUILD_ID:
-            raise ValueError("Registration channel unavailable in configured staging guild")
+            raise ValueError("Registration channel unavailable in configured guild")
         embed = discord.Embed(
             title="A&T — Driver Registration",
             description=registration.next_steps(view),
