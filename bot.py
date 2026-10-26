@@ -1552,6 +1552,7 @@ async def reconcile_permanent_records(
     trucksbook_name,
     real_miles,
     is_active,
+    *, company_mods_eligible=None,
 ):
     """Persist every earned achievement and the driver's permanent HOF record."""
     new_achievements = []
@@ -1560,7 +1561,10 @@ async def reconcile_permanent_records(
     async with db_pool.acquire() as connection:
         async with connection.transaction():
             for threshold, _, achievement_name in ACHIEVEMENT_ROLES:
-                if real_miles < threshold:
+                eligible = real_miles >= threshold
+                if threshold == 40000 and company_mods_eligible is not None:
+                    eligible = company_mods_eligible
+                if not eligible:
                     continue
                 inserted = await connection.fetchval(
                     """
@@ -1672,7 +1676,7 @@ async def reconcile_permanent_records(
     }
 
 
-async def sync_member_permanent_roles(guild, discord_user_id, real_miles):
+async def sync_member_permanent_roles(guild, discord_user_id, real_miles, *, company_mods_eligible=None):
     """Add cumulative achievement roles and enforce one highest HOF role."""
     member = guild.get_member(discord_user_id)
     if member is None:
@@ -1680,7 +1684,10 @@ async def sync_member_permanent_roles(guild, discord_user_id, real_miles):
 
     add_roles = []
     for threshold, role_id, _ in ACHIEVEMENT_ROLES:
-        if role_id and real_miles >= threshold:
+        eligible = (real_miles >= threshold)
+        if threshold == 40000 and company_mods_eligible is not None:
+            eligible = company_mods_eligible
+        if role_id and eligible:
             role = guild.get_role(role_id)
             if role and role not in member.roles:
                 add_roles.append(role)
@@ -2728,6 +2735,43 @@ async def rotate_bot_status():
 async def before_rotate_bot_status():
     await bot.wait_until_ready()
     
+async def apply_verified_v2_progression(discord_user_id, real_miles, company_mods_eligible):
+    """Idempotent role delivery from committed credits; never grants from a claim."""
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return {'status': 'guild_missing'}
+    rank = await sync_member_progression_role(guild, discord_user_id, real_miles)
+    if rank.get('status') not in ('updated', 'correct'):
+        return rank
+    async with db_pool.acquire() as conn:
+        name = await conn.fetchval("""SELECT COALESCE(
+            (SELECT trucksbook_name FROM driver_links WHERE discord_user_id=$1),
+            (SELECT provider_display_name FROM unified_provider_links WHERE discord_user_id=$1
+             ORDER BY provider LIMIT 1),'A&T Driver')""", discord_user_id)
+    await reconcile_permanent_records(discord_user_id, name, int(real_miles), True,
+        company_mods_eligible=company_mods_eligible)
+    return await sync_member_permanent_roles(guild, discord_user_id, real_miles,
+        company_mods_eligible=company_mods_eligible)
+
+
+@tasks.loop(seconds=30)
+async def deliver_v2_progression():
+    """Recover pending V2 role deliveries only behind the full activation gate."""
+    if db_pool is None or os.getenv('AT_V2_ISOLATED_STAGING') == 'YES':
+        return
+    import unified_production_ledger_adapter_v2 as ledger
+    try:
+        runtime = ledger.read_approved_progression_preflight()
+        if runtime is None:
+            return
+        result = await ledger.deliver_pending_progression(db_pool, apply_verified_v2_progression,
+            runtime=runtime)
+        if result['status'] == 'activation_blocked':
+            print('V2 PROGRESSION BLOCKED: ' + ','.join(result['blockers']), flush=True)
+    except Exception as error:
+        print(f'V2 PROGRESSION RETRY PENDING: {type(error).__name__}', flush=True)
+
+
 @bot.event
 async def on_ready():
     global db_pool, unified_schema_ready, staging_trucky_probe_ran
@@ -2763,6 +2807,9 @@ async def on_ready():
 
     if db_pool is not None and unified_schema_ready:
         await start_public_integrations()
+        if (not isolated_staging and os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES'
+                and not deliver_v2_progression.is_running()):
+            deliver_v2_progression.start()
 
     if isolated_staging:
         import trucky_jobs_probe_v2

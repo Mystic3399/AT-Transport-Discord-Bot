@@ -84,6 +84,8 @@ def production_activation_blockers(config=None, runtime=None):
     if (not SHA256_RE.fullmatch(preflight_digest)
             or observed.get("preflight_sha256") != preflight_digest):
         blockers.append("preflight_digest_mismatch")
+    if observed.get("legacy_writer_drained") is not True:
+        blockers.append("legacy_writer_not_drained")
     if observed.get("historical_overlap_audit_passed") is not True:
         blockers.append("historical_overlap_audit_missing")
     if observed.get("backup_restore_rollback_rehearsal_passed") is not True:
@@ -94,3 +96,4 @@ def production_activation_blockers(config=None, runtime=None):
 def production_activation_allowed(config=None, runtime=None):
     """True only when every production-only gate is independently satisfied."""
     return not production_activation_blockers(config, runtime)
+

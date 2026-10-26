@@ -30,6 +30,7 @@ class ProductionMileageGateTests(unittest.IsolatedAsyncioTestCase):
             "source_authentication_verified": True,
             "preflight_acceptance_passed": True,
             "preflight_sha256": self.preflight,
+            "legacy_writer_drained": True,
             "historical_overlap_audit_passed": True,
             "backup_restore_rollback_rehearsal_passed": True,
         }
@@ -57,6 +58,7 @@ class ProductionMileageGateTests(unittest.IsolatedAsyncioTestCase):
             ("RAILWAY_GIT_COMMIT_SHA", "e" * 40, "approved_release_commit_mismatch"),
             ("source_authentication_verified", False, "provider_source_authentication_unverified"),
             ("preflight_acceptance_passed", False, "preflight_acceptance_missing"),
+            ("legacy_writer_drained", False, "legacy_writer_not_drained"),
             ("historical_overlap_audit_passed", False, "historical_overlap_audit_missing"),
             ("backup_restore_rollback_rehearsal_passed", False,
              "backup_restore_rollback_rehearsal_missing"),
@@ -99,3 +101,4 @@ class ProductionMileageGateTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

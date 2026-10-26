@@ -1,8 +1,8 @@
 """Fail-closed, additive V2 mileage ledger adapter for future production use.
 
-This adapter is deliberately not wired into bot.py, Discord roles, achievements,
-Company Mods, or the legacy driver_progress/processed_jobs tables. Its only
-write target is a separate V2 ledger and aggregate table. Every award call
+This adapter writes only separate V2 ledger/aggregate/decision tables. Its
+durable progression outbox is consumed by the separately gated bot role worker.
+No legacy mileage totals are written. Every award call
 rechecks the production activation boundary and database identity.
 """
 from decimal import Decimal, InvalidOperation
@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS unified_v2_production_mileage_decisions (
  evidence_sha256 TEXT CHECK(evidence_sha256 IS NULL OR evidence_sha256 ~ '^[0-9a-f]{64}$'),
  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE unified_v2_production_mileage_decisions
+ ADD COLUMN IF NOT EXISTS progression_delivered_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS unified_v2_prod_decisions_job_idx
  ON unified_v2_production_mileage_decisions(provider,provider_job_id,created_at);
 """
@@ -400,6 +402,11 @@ async def apply_verified_credit(
                 return {"status": decision, "reason": reason_code}
 
             await conn.execute("""
+                INSERT INTO unified_v2_production_mileage_baselines(discord_user_id,trucksbook_real_miles)
+                VALUES($1,COALESCE((SELECT real_miles FROM driver_progress WHERE discord_user_id=$1),0))
+                ON CONFLICT(discord_user_id) DO NOTHING
+            """, user_id)
+            await conn.execute("""
                 INSERT INTO unified_v2_production_mileage_totals
                   (discord_user_id,combined_real_miles,trucky_race_miles,trucksbook_real_miles)
                 VALUES($1,$2,$3,$4)
@@ -412,3 +419,78 @@ async def apply_verified_credit(
                  buckets["trucky_race_miles"], buckets["company_mods_trucksbook_real_miles"])
             await log_decision("credited", "verified_and_reconciled")
             return {"status": "credited", "miles": str(amount), "policy_buckets": buckets}
+
+
+
+async def deliver_pending_progression(pool, apply_roles, *, config=None, runtime=None, limit=20):
+    """Retry idempotent role sync only after committed credits and full preflight.
+
+    The decision row is the durable outbox: failed Discord writes roll back only
+    its delivery marker, never the already committed mileage. SKIP LOCKED lets
+    concurrent workers handle different decisions without duplicate delivery.
+    The callback must be idempotent and must not send milestone announcements.
+    """
+    env = os.environ if config is None else config
+    if env.get('AT_V2_PROGRESSION_ENABLED') != 'YES':
+        return {'status': 'disabled', 'delivered': 0}
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError('Invalid progression batch size')
+    delivered = 0
+    async with pool.acquire() as conn:
+        blockers = await _activation_blockers_for_connection(conn, env, runtime)
+        if blockers:
+            return {'status': 'activation_blocked', 'blockers': blockers, 'delivered': 0}
+        for _ in range(limit):
+            async with conn.transaction():
+                row = await conn.fetchrow("""
+                    SELECT decision_id,discord_user_id
+                    FROM unified_v2_production_mileage_decisions
+                    WHERE decision='credited' AND progression_delivered_at IS NULL
+                    ORDER BY decision_id FOR UPDATE SKIP LOCKED LIMIT 1
+                """)
+                if row is None:
+                    break
+                totals = await conn.fetchrow("""
+                    SELECT b.trucksbook_real_miles + COALESCE(t.combined_real_miles,0) AS real_miles,
+                           b.trucksbook_real_miles + COALESCE(t.trucksbook_real_miles,0) AS trucksbook_real_miles,
+                           COALESCE(t.trucky_race_miles,0) AS trucky_race_miles
+                    FROM unified_v2_production_mileage_baselines b
+                    LEFT JOIN unified_v2_production_mileage_totals t USING(discord_user_id)
+                    WHERE b.discord_user_id=$1
+                """, row['discord_user_id'])
+                if totals is None:
+                    raise RuntimeError('Historical progression baseline missing')
+                eligible = (totals['trucksbook_real_miles'] >= Decimal('40000')
+                            or totals['trucky_race_miles'] >= Decimal('60000'))
+                result = await apply_roles(row['discord_user_id'], totals['real_miles'],
+                    eligible and env.get('AT_V2_COMPANY_MODS_ENABLED') == 'YES')
+                if not result or result.get('status') not in ('updated', 'correct'):
+                    raise RuntimeError('Progression role delivery incomplete')
+                await conn.execute("""UPDATE unified_v2_production_mileage_decisions
+                    SET progression_delivered_at=NOW() WHERE decision_id=$1""", row['decision_id'])
+                delivered += 1
+    return {'status': 'processed', 'delivered': delivered}
+
+
+def read_approved_progression_preflight(environ=None):
+    """Load only the owner-approved, checksum-bound local acceptance manifest."""
+    import hashlib
+    import json
+    from pathlib import Path
+    env = os.environ if environ is None else environ
+    if env.get('AT_V2_PROGRESSION_ENABLED') != 'YES':
+        return None
+    expected = env.get('AT_V2_APPROVED_PREFLIGHT_SHA256', '')
+    if len(expected) != 64 or any(c not in '0123456789abcdef' for c in expected):
+        raise ValueError('Approved preflight digest missing')
+    path = env.get('AT_V2_APPROVED_PREFLIGHT_PATH')
+    if not path:
+        raise ValueError('Approved preflight manifest missing')
+    raw = Path(path).read_bytes()
+    if len(raw) > 65536 or hashlib.sha256(raw).hexdigest() != expected:
+        raise ValueError('Preflight manifest checksum mismatch')
+    facts = json.loads(raw)
+    if not isinstance(facts, dict):
+        raise ValueError('Invalid preflight manifest')
+    facts['preflight_sha256'] = expected
+    return facts

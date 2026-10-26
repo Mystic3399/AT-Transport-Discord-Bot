@@ -93,6 +93,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             "source_authentication_verified": True,
             "preflight_acceptance_passed": True,
             "preflight_sha256": preflight,
+            "legacy_writer_drained": True,
             "historical_overlap_audit_passed": True,
             "backup_restore_rollback_rehearsal_passed": True,
         })
@@ -377,6 +378,35 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "activation_blocked")
 
 
+    async def test_committed_progression_outbox_retries_without_recrediting(self):
+        from unittest.mock import AsyncMock
+        from unified_production_ledger_adapter_v2 import deliver_pending_progression
+        await self.install_ledger()
+        # Isolate this disposable outbox fixture from credits in other tests.
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE unified_v2_production_mileage_decisions SET progression_delivered_at=NOW() WHERE decision='credited'")
+        user = 991234567890125501
+        job = await self.seed_verified_driver_job(user, 'trucky', '998825501', '8825501', '40000.125')
+        self.assertEqual((await self.award(job))['status'], 'credited')
+        config = {**self.config, 'AT_V2_PROGRESSION_ENABLED':'YES'}
+        callback = AsyncMock(side_effect=RuntimeError('Discord temporarily unavailable'))
+        with self.assertRaises(RuntimeError):
+            await deliver_pending_progression(self.pool,callback,config=config,runtime=self.runtime)
+        async with self.pool.acquire() as conn:
+            self.assertIsNone(await conn.fetchval("SELECT progression_delivered_at FROM unified_v2_production_mileage_decisions WHERE provider_job_id=$1 AND decision='credited'",job['provider_job_id']))
+            before = dict(await conn.fetchrow('SELECT * FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1',user))
+        callback = AsyncMock(return_value={'status':'correct'})
+        results = await asyncio.gather(*[deliver_pending_progression(self.pool,callback,config=config,runtime=self.runtime) for _ in range(2)])
+        self.assertEqual(sum(r['delivered'] for r in results),1)
+        callback.assert_awaited_once_with(user,Decimal('40000.125'),False)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(before,dict(await conn.fetchrow('SELECT * FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1',user)))
+        callback.reset_mock()
+        self.assertEqual((await deliver_pending_progression(self.pool,callback,config=config,runtime=self.runtime))['delivered'],0)
+        callback.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
