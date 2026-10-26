@@ -15,8 +15,12 @@ def load_function(name, namespace):
     exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), namespace)
     return namespace[name]
 
-NS = {'re': re}
-for name in ('is_real_statistics', 'extract_integer', 'extract_trucksbook_job_from_embed'):
+from datetime import datetime, timezone
+NS = {'re': re, 'datetime': datetime, 'timezone': timezone}
+for node in TREE.body:
+    if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id in {'TRUCKSBOOK_NAME_ALIASES', 'MILEAGE_AUDIT_CHANNEL_IDS', 'MILEAGE_LINK_RECOVERY_SINCE', 'VERIFIED_HISTORICAL_REAL_REPAIRS'} for t in node.targets):
+        exec(compile(ast.Module(body=[node], type_ignores=[]), 'bot.py', 'exec'), NS)
+for name in ('is_real_statistics', 'extract_integer', 'extract_trucksbook_job_from_embed', 'trucksbook_author_user_id', 'verified_historical_real_repair'):
     load_function(name, NS)
 
 class Embed:
@@ -43,7 +47,7 @@ class ClassificationTests(unittest.TestCase):
         async def run():
             calls = []
             async def noop(*args): pass
-            async def find(name): return 42
+            async def find(name, provider_id=None): return 42
             async def record(**kwargs):
                 calls.append(kwargs)
                 return {'status': 'duplicate'}
@@ -80,7 +84,7 @@ class RecoveryTests(unittest.TestCase):
                         SimpleNamespace(webhook_id=9, embeds=[Embed('888', 'Invalid, WoTr')]),
                         SimpleNamespace(webhook_id=9, embeds=[Embed('777', 'Real')])]
             async def reply(*args, **kwargs): replies.append(args[0])
-            async def find(name): return 42
+            async def find(name, provider_id=None): return 42
             async def replay(message):
                 parsed = NS['extract_trucksbook_job_from_embed'](message.embeds[0])
                 if parsed['job_id'] not in recorded:
@@ -133,6 +137,7 @@ class AuditApplyTests(unittest.TestCase):
                     if 'FROM driver_progress' in sql: return {'real_miles': total[0], 'trucksbook_name': 'TruckTan'}
                     raise AssertionError(sql)
                 async def fetch(self, sql, *args):
+                    if 'FROM driver_links' in sql: return []
                     return [c for c in candidates.values() if not c.get('applied')]
                 async def fetchval(self, sql, *args):
                     if 'SELECT real_miles' in sql: return total[0]
@@ -153,49 +158,60 @@ class AuditApplyTests(unittest.TestCase):
                     else: raise AssertionError(sql)
             connection = Connection()
             async def reply(*args, **kwargs): replies.append(args[0])
-            async def find(name): return 42 if name == 'TruckTan' else None
+            async def find(name, provider_id=None): return 42 if name == 'TruckTan' and provider_id == 100 else None
             async def sync(*args, **kwargs): syncs.append(args)
             async def announce(*args): return (0, 0)
+            reports = []
+            async def reconcile(ctx, sources, metadata): reports.append(sources)
             event = Embed()
+            event.data['author']['url'] = 'https://trucksbook.eu/user/100'
             unlinked = Embed('125'); unlinked.data['author']['name'] = 'Unknown'
+            modern = Embed('127', 'Real', 120)
+            modern.data['author']['url'] = 'https://trucksbook.eu/profile/100'
             class Channel:
                 id = 22
                 def permissions_for(self, _): return SimpleNamespace(view_channel=True, read_message_history=True)
                 def history(self, **kwargs):
                     async def gen():
-                        for i, e in enumerate([event, event, Embed('123', 'Real', 103), Embed('124', 'Real', 500), unlinked, Embed('126', 'Race, WoTr')]):
-                            yield SimpleNamespace(webhook_id=9, embeds=[e], id=i, created_at=delivered)
+                        for i, e in enumerate([event, event, Embed('123', 'Real', 103), Embed('124', 'Real', 500), unlinked, Embed('126', 'Race, WoTr'), modern]):
+                            yield SimpleNamespace(webhook_id=9, embeds=[e], id=i, created_at=(datetime(2026, 10, 18, tzinfo=timezone.utc) if e is modern else delivered))
                     return gen()
             channel = Channel()
-            guild = SimpleNamespace(id=1, me=object(), text_channels=[channel])
+            guild = SimpleNamespace(id=1, me=object(), text_channels=[channel, SimpleNamespace(id=999, name='unrelated', permissions_for=lambda _: SimpleNamespace(view_channel=False, read_message_history=False))])
             ctx = SimpleNamespace(guild=guild, reply=reply, send=reply, author=SimpleNamespace(id=99))
             discord = SimpleNamespace(Forbidden=type('Forbidden', (Exception,), {}), HTTPException=type('HTTPException', (Exception,), {}))
-            ns = dict(NS, db_pool=SimpleNamespace(acquire=Lease), GUILD_ID=1, discord=discord,
+            ns = dict(NS, MILEAGE_AUDIT_CHANNEL_IDS={22: 'fixture'}, json=__import__('json'), db_pool=SimpleNamespace(acquire=Lease), GUILD_ID=1, discord=discord,
                       find_driver_link=find, PROGRESSION_ROLES=[], sync_member_progression_role=sync,
                       sync_permanent_system_for_driver=sync, announce_pending_repair_achievements=announce,
-                      refresh_driver_leaderboard=sync)
+                      refresh_driver_leaderboard=sync, send_mileage_reconciliation=reconcile)
             audit = load_function('mileage_audit', ns)
             apply = load_function('mileage_apply', ns)
             await audit(ctx)
             self.assertEqual(total[0], 13)  # preview never credits mileage
-            self.assertEqual(set(candidates), {'68007306', '123'})
+            self.assertEqual(set(candidates), {'68007306', '123', '127'})
             self.assertEqual(candidates['123']['missing_distance'], 100)
             self.assertEqual(candidates['68007306']['repair_kind'], 'missing_wotr')
-            self.assertIn('driver not linked: `1`', replies[-1])
+            self.assertEqual(candidates['127']['repair_kind'], 'missing_real')
+            self.assertTrue(any('Mileage channels scanned: `1`' in text for text in replies))
+            self.assertNotIn('124', candidates)
+            self.assertEqual(len(reports[0]), 5)  # unique Real jobs, including older excluded jobs
+            self.assertIn('124', {job['job_id'] for job in reports[0]})
+            self.assertTrue(any('driver not linked: `1`' in text for text in replies))
             await apply(ctx)  # explicit confirmation is required
             self.assertEqual(total[0], 13)
             await apply(ctx, 'CONFIRM')
-            self.assertEqual(total[0], 216)  # existing 13 + missing 103 + correction 100
+            self.assertEqual(total[0], 336)  # existing 13 + event 103 + correction 100 + incident Real 120
             self.assertEqual(jobs['68007306']['processed_at'], delivered)
             self.assertTrue(connection.asserted_insert)
             self.assertGreater(len(syncs), 0)
             await audit(ctx)
             await apply(ctx, 'CONFIRM')
-            self.assertEqual(total[0], 216)
+            self.assertEqual(total[0], 336)
             # If a live delivery wins after audit, consume its candidate with no credit.
             candidates['68007306']['applied'] = False
             await apply(ctx, 'CONFIRM')
-            self.assertEqual(total[0], 216)
+            self.assertEqual(total[0], 336)
         asyncio.run(run())
 
 if __name__ == '__main__': unittest.main()
+

@@ -463,6 +463,14 @@ async def sync_member_role_category_dividers(member):
     if member.guild.id != GUILD_ID:
         return {"added": 0, "removed": 0, "missing": []}
 
+    bot_member = member.guild.me
+    if (bot_member is None or not bot_member.guild_permissions.manage_roles
+            or member.id == member.guild.owner_id
+            or member.top_role >= bot_member.top_role):
+        print(f"ROLE DIVIDER SKIPPED: {member.id}: Discord role hierarchy/Manage Roles; "
+              "staff must manage this member's decorative dividers manually.")
+        return {"added": 0, "removed": 0, "missing": [], "skipped": 1}
+
     roles_by_name = {
         normalise_role_name(role.name): role for role in member.guild.roles
     }
@@ -505,6 +513,7 @@ async def sync_all_role_category_dividers(guild):
     removed = 0
     missing = set()
     failures = 0
+    skipped = 0
 
     for member in guild.members:
         try:
@@ -512,13 +521,14 @@ async def sync_all_role_category_dividers(guild):
             added += result["added"]
             removed += result["removed"]
             missing.update(result["missing"])
+            skipped += result.get("skipped", 0)
         except (discord.Forbidden, discord.HTTPException) as error:
             failures += 1
             print(f"ROLE DIVIDER SYNC ERROR: {member.id}: {error}")
 
     print(
         "Role category divider sync complete: "
-        f"{added} added, {removed} removed, {failures} failed."
+        f"{added} added, {removed} removed, {skipped} skipped (permissions), {failures} failed."
     )
     if missing:
         print(
@@ -530,6 +540,40 @@ async def sync_all_role_category_dividers(guild):
 # --------------------------------------------------
 # TEMPORARY FALLBACK DRIVER MAPPING
 # --------------------------------------------------
+
+# Explicit owner-confirmed historical display-name alias. This reuses the
+# established link; it does not create a new identity or change verification.
+TRUCKSBOOK_NAME_ALIASES = {"mystic3399": "Mystical Custom"}
+
+MILEAGE_AUDIT_CHANNEL_IDS = {
+    1549420615868481656: "job-tracker",
+    1541473875773362276: "ets2-logbook",
+    1541473916147605534: "ats-logbook",
+    1541473951899852800: "trucky-tracker",
+}
+
+# Re-import ordinary Real jobs only within the observed name-link incident
+# window, after the deployed Oct 17 release. Older missing jobs may be in an
+# imported baseline and remain excluded. Every source job still needs a link.
+MILEAGE_LINK_RECOVERY_SINCE = datetime(2026, 10, 17, 15, 3, 35, tzinfo=timezone.utc)
+
+# Verified against the complete 2026-10-19 reconciliation: no imported balance,
+# official Real source, absent processed job, 772-mile shortfall for this driver.
+VERIFIED_HISTORICAL_REAL_REPAIRS = {
+    "67800837": (146691735865655297, 583698, 772,
+                 1541473875773362276, 1556301076901142614),
+}
+
+
+def verified_historical_real_repair(parsed, embed, message, user_id=None):
+    expected = VERIFIED_HISTORICAL_REAL_REPAIRS.get(parsed["job_id"])
+    if expected is None or not is_real_statistics(parsed["statistics"]):
+        return False
+    driver_id, provider_id, distance, channel_id, message_id = expected
+    return (trucksbook_author_user_id(embed.to_dict()) == provider_id
+            and parsed["accepted_distance"] == distance
+            and message.channel.id == channel_id and message.id == message_id
+            and (user_id is None or int(user_id) == driver_id))
 
 DRIVER_MAPPINGS = {
     "Mystical Custom": int(
@@ -1073,50 +1117,65 @@ def normalise_trucksbook_name(trucksbook_name):
     ).strip()
 
 
+def trucksbook_author_user_id(data):
+    """Read the stable provider ID from an exact TrucksBook author profile URL."""
+    url = ((data.get("author") or {}).get("url") or "").strip()
+    match = re.fullmatch(
+        r"https?://(?:www\.)?trucksbook\.eu/(?:user|profile)/([1-9]\d*)(?:[/?#].*)?",
+        url, re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = int(match.group(1))
+    return value if value <= 9223372036854775807 else None
+
+
 async def find_driver_link(
     trucksbook_name,
+    trucksbook_user_id=None,
 ):
     if db_pool is None:
         return None
 
-    normalised_name = normalise_trucksbook_name(
-        trucksbook_name
-    )
+    if trucksbook_user_id is not None:
+        async with db_pool.acquire() as connection:
+            user_id = await connection.fetchval(
+                "SELECT discord_user_id FROM driver_links "
+                "WHERE trucksbook_user_id = $1;",
+                trucksbook_user_id,
+            )
+        if user_id is not None:
+            return int(user_id)
 
+    normalised_name = normalise_trucksbook_name(trucksbook_name)
+    normalised_name = TRUCKSBOOK_NAME_ALIASES.get(
+        normalised_name.casefold(), normalised_name
+    )
     if not normalised_name:
         return None
-
     async with db_pool.acquire() as connection:
-        discord_user_id = (
-            await connection.fetchval(
-                """
-                SELECT discord_user_id
-                FROM driver_links
-                WHERE LOWER(
-                    REGEXP_REPLACE(
-                        BTRIM(trucksbook_name),
-                        '^a\\s*&\\s*t(\\s+|$)',
-                        '',
-                        'i'
-                    )
-                ) = LOWER($1);
-                """,
-                normalised_name,
-            )
+        rows = await connection.fetch(
+            """
+            SELECT discord_user_id, trucksbook_user_id
+            FROM driver_links
+            WHERE LOWER(REGEXP_REPLACE(BTRIM(trucksbook_name),
+                  '^a\\s*&\\s*t(\\s+|$)', '', 'i')) = LOWER($1);
+            """,
+            normalised_name,
         )
-
-    if discord_user_id:
-        return int(discord_user_id)
-
-    for mapped_name, mapped_user_id in (
-        DRIVER_MAPPINGS.items()
-    ):
-        if (
-            normalise_trucksbook_name(mapped_name).casefold()
-            == normalised_name.casefold()
-        ):
+    # Retain exact-name compatibility for older verified links without IDs.
+    # Never let an unknown profile ID override a different saved numeric ID.
+    if len(rows) == 1:
+        row = rows[0]
+        saved_id = row["trucksbook_user_id"]
+        if trucksbook_user_id is None or saved_id is None or int(saved_id) == trucksbook_user_id:
+            return int(row["discord_user_id"])
+        return None
+    if rows or trucksbook_user_id is not None:
+        return None
+    for mapped_name, mapped_user_id in DRIVER_MAPPINGS.items():
+        if normalise_trucksbook_name(mapped_name).casefold() == normalised_name.casefold():
             return mapped_user_id
-
     return None
 
 
@@ -3236,7 +3295,8 @@ async def on_message(message):
 
         discord_user_id = (
             await find_driver_link(
-                trucksbook_name
+                trucksbook_name,
+                trucksbook_author_user_id(data),
             )
         )
 
@@ -3561,7 +3621,9 @@ async def wot_recover(ctx, webhook_id: int, message_limit: int = 1000,
                 duplicates += 1
                 continue
             name = (message.embeds[0].to_dict().get("author") or {}).get("name", "")
-            if not name.strip() or await find_driver_link(name.strip()) is None:
+            if not name.strip() or await find_driver_link(
+                name.strip(), trucksbook_author_user_id(message.embeds[0].to_dict())
+            ) is None:
                 unlinked += 1
                 continue
             if apply:
@@ -3595,10 +3657,77 @@ async def wot_recover(ctx, webhook_id: int, message_limit: int = 1000,
     )
 
 
+async def send_mileage_reconciliation(ctx, source_jobs, metadata):
+    """Export evidence only; unallocated totals are not proven import credits."""
+    async with db_pool.acquire() as connection:
+        async with connection.transaction(isolation="repeatable_read", readonly=True):
+            progress = [dict(row) for row in await connection.fetch(
+                "SELECT discord_user_id, trucksbook_name, real_miles FROM driver_progress "
+                "ORDER BY trucksbook_name"
+            )]
+            stored = [dict(row) for row in await connection.fetch(
+                "SELECT job_id, discord_user_id, trucksbook_name, accepted_distance, "
+                "statistics FROM processed_jobs ORDER BY job_id"
+            )]
+    stored_by_id = {row["job_id"]: row for row in stored}
+    drivers = {int(row["discord_user_id"]): dict(row, source_real_miles=0,
+               source_jobs=0, stored_real_job_miles=0, absent_source_miles=0)
+               for row in progress}
+    links = {}
+    absent = []
+    for job in source_jobs:
+        identity = (job["name"], job["provider_id"])
+        if identity not in links:
+            links[identity] = await find_driver_link(*identity) if job["name"] else None
+        user_id = links[identity]
+        job["linked_discord_user_id"] = user_id
+        job["stored_record"] = stored_by_id.get(job["job_id"])
+        if user_id is not None:
+            user_id = int(user_id)
+            driver = drivers.setdefault(user_id, dict(discord_user_id=user_id,
+                trucksbook_name=job["name"], real_miles=0, source_real_miles=0,
+                source_jobs=0, stored_real_job_miles=0, absent_source_miles=0))
+            driver["source_real_miles"] += job["accepted_distance"]
+            driver["source_jobs"] += 1
+        if job["stored_record"] is None:
+            absent.append(job)
+            if user_id is not None:
+                drivers[user_id]["absent_source_miles"] += job["accepted_distance"]
+    for row in stored:
+        user_id = int(row["discord_user_id"])
+        if user_id in drivers and is_real_statistics(row["statistics"]):
+            drivers[user_id]["stored_real_job_miles"] += int(row["accepted_distance"])
+    for driver in drivers.values():
+        driver["total_minus_stored_jobs"] = (int(driver["real_miles"])
+                                             - driver["stored_real_job_miles"])
+        driver["total_minus_scanned_source"] = (int(driver["real_miles"])
+                                                - driver["source_real_miles"])
+        print("MILEAGE RECONCILIATION DRIVER: " + json.dumps(driver, ensure_ascii=True))
+    for job in absent:
+        print("MILEAGE RECONCILIATION ABSENT: " + json.dumps(job, ensure_ascii=True))
+    report = dict(metadata, generated_at=datetime.now(timezone.utc).isoformat(),
+        explanation=("Evidence only. Source contains unique positive-distance Real/Real, WoTr "
+                     "jobs from scanned channels. Total minus stored jobs is an unexplained "
+                     "balance, NOT proof of a historical import. An absent job may already "
+                     "be covered by that balance. Do not apply absent miles automatically. "
+                     "Source history and database snapshot were collected at different times."),
+        drivers=list(drivers.values()), absent_jobs=absent, source_jobs=source_jobs,
+        stored_jobs=stored)
+    await ctx.send(
+        f"📋 **Mileage reconciliation evidence:** {len(absent):,} absent Real jobs listed. "
+        "The attached report includes each driver's current total, stored job miles, "
+        "scanned Real miles and unexplained balance. Older missing jobs require import "
+        "review; this report does not stage or apply extra mileage.",
+        file=discord.File(BytesIO(json.dumps(report, indent=2, ensure_ascii=True).encode()),
+                          filename="mileage-reconciliation.json"),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 @bot.command(name="mileageaudit")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
-async def mileage_audit(ctx, message_limit: int = 0):
+async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
     """Dry-run audit of TrucksBook embeds across readable guild channels."""
     if ctx.guild.id != GUILD_ID:
         return False
@@ -3612,8 +3741,18 @@ async def mileage_audit(ctx, message_limit: int = 0):
         )
         return
 
+    if scope not in ("configured", "all"):
+        await ctx.reply("Use `!mileageaudit` for the four mileage channels, or "
+                        "`!mileageaudit 0 all` for a full-server audit.", mention_author=False)
+        return
+    audit_channels = [channel for channel in ctx.guild.text_channels
+                      if scope == "all" or channel.id in MILEAGE_AUDIT_CHANNEL_IDS]
+    unavailable_channels = (0 if scope == "all" else len(
+        set(MILEAGE_AUDIT_CHANNEL_IDS) - {c.id for c in audit_channels}
+    ))
     await ctx.reply(
-        "🔎 Starting a server-wide dry-run audit. No mileage will be changed.",
+        "🔎 Starting a " + ("server-wide" if scope == "all" else "four-channel mileage")
+        + " dry-run audit. No mileage will be changed.",
         mention_author=False,
     )
 
@@ -3622,13 +3761,16 @@ async def mileage_audit(ctx, message_limit: int = 0):
     staged = 0
     missing_from_database = 0
     missing_event_jobs_staged = 0
+    missing_real_jobs_staged = 0
     unlinked_event_jobs = 0
+    unresolved_links = []
     seen_jobs = set()
+    source_jobs = []
     channels_scanned = 0
     channels_skipped = 0
     history_limit = message_limit or None
 
-    for channel in ctx.guild.text_channels:
+    for channel in audit_channels:
         bot_member = ctx.guild.me
         permissions = channel.permissions_for(bot_member)
         if not (
@@ -3663,6 +3805,12 @@ async def mileage_audit(ctx, message_limit: int = 0):
                     if parsed["job_id"] in seen_jobs:
                         continue
                     seen_jobs.add(parsed["job_id"])
+                    author = embed.to_dict().get("author") or {}
+                    source_jobs.append(dict(parsed, name=str(author.get("name") or "").strip(),
+                        provider_id=trucksbook_author_user_id(embed.to_dict()),
+                        source_channel_id=channel.id, source_message_id=historical_message.id,
+                        source_message_at=historical_message.created_at.isoformat(),
+                        recovery_window_eligible=historical_message.created_at >= MILEAGE_LINK_RECOVERY_SINCE))
 
                     async with db_pool.acquire() as connection:
                         recorded = await connection.fetchrow(
@@ -3681,10 +3829,11 @@ async def mileage_audit(ctx, message_limit: int = 0):
                         repair_kind = "distance_correction"
                         if recorded is None:
                             missing_from_database += 1
-                            # Ordinary missing historical jobs may already be in an
-                            # imported baseline. Only recover explicit Real, WoTr jobs.
-                            if "wotr" not in [x.strip().casefold() for x in
-                                              parsed["statistics"].split(",")]:
+                            event_job = "wotr" in [x.strip().casefold() for x in
+                                                   parsed["statistics"].split(",")]
+                            verified_historical = verified_historical_real_repair(
+                                parsed, embed, historical_message)
+                            if not event_job and historical_message.created_at < MILEAGE_LINK_RECOVERY_SINCE and not verified_historical:
                                 continue
                             name = ((embed.to_dict().get("author") or {})
                                     .get("name") or "").strip()
@@ -3695,12 +3844,26 @@ async def mileage_audit(ctx, message_limit: int = 0):
                                 continue
                             matched += 1
                     if recorded is None:
-                        user_id = await find_driver_link(name) if name else None
+                        user_id = await find_driver_link(
+                            name, trucksbook_author_user_id(embed.to_dict())
+                        ) if name else None
+                        if verified_historical and not verified_historical_real_repair(
+                                parsed, embed, historical_message, user_id):
+                            continue
                         if user_id is None:
                             unlinked_event_jobs += 1
+                            if len(unresolved_links) < 25:
+                                author = embed.to_dict().get("author") or {}
+                                unresolved_links.append({
+                                    "job_id": parsed["job_id"],
+                                    "name": name,
+                                    "miles": actual,
+                                    "provider_id": trucksbook_author_user_id(embed.to_dict()),
+                                    "profile_url": str(author.get("url") or "").split("?", 1)[0].split("#", 1)[0][:200],
+                                })
                             continue
                         credited = 0
-                        repair_kind = "missing_wotr"
+                        repair_kind = "missing_wotr" if event_job else "missing_real"
                     else:
                         user_id = int(recorded["discord_user_id"])
                         name = recorded["trucksbook_name"]
@@ -3752,6 +3915,8 @@ async def mileage_audit(ctx, message_limit: int = 0):
                         staged += 1
                         if repair_kind == "missing_wotr":
                             missing_event_jobs_staged += 1
+                        elif repair_kind == "missing_real":
+                            missing_real_jobs_staged += 1
 
             channels_scanned += 1
 
@@ -3777,20 +3942,45 @@ async def mileage_audit(ctx, message_limit: int = 0):
 
     await ctx.send(
         "✅ **Dry-run audit complete — no mileage changed.**\n"
-        f"Server channels scanned: `{channels_scanned:,}`\n"
+        f"Mileage channels scanned: `{channels_scanned:,}`\n"
+        f"Configured channels unavailable: `{unavailable_channels:,}`\n"
         f"Channels skipped (permissions/API): `{channels_skipped:,}`\n"
         f"Webhook jobs inspected: `{scanned:,}`\n"
         f"Previously processed Real jobs matched: `{matched:,}`\n"
         f"Candidates found/updated this run: `{staged:,}`\n"
         f"Webhook jobs absent from processed_jobs: `{missing_from_database:,}`\n"
         f"Missing Real, WoTr jobs staged: `{missing_event_jobs_staged:,}`\n"
-        f"Event jobs skipped — driver not linked: `{unlinked_event_jobs:,}`\n"
+        f"Missing Real jobs staged (incident / verified history): `{missing_real_jobs_staged:,}`\n"
+        f"Jobs skipped — driver not linked: `{unlinked_event_jobs:,}`\n"
         f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
         f"`{int(totals['drivers']):,}` drivers\n"
         f"Missing mileage pending: `{int(totals['missing_miles']):,}`\n\n"
         "Review the Railway log/database backup, then explicitly run "
         "`!mileageapply CONFIRM` to apply these deltas."
     )
+
+    await send_mileage_reconciliation(ctx, source_jobs, {
+        "scope": scope, "message_limit_per_channel": message_limit,
+        "channels_scanned": channels_scanned, "channels_skipped": channels_skipped,
+        "configured_channels_unavailable": unavailable_channels,
+        "webhook_jobs_inspected": scanned,
+    })
+
+    if unresolved_links:
+        # Read-only evidence for staff: do not change ownership or credit guessed links.
+        async with db_pool.acquire() as connection:
+            saved_links = await connection.fetch(
+                "SELECT discord_user_id, trucksbook_name, trucksbook_user_id "
+                "FROM driver_links ORDER BY trucksbook_name LIMIT 200;"
+            )
+        print("TRUCKSBOOK LINK AUDIT: " + json.dumps({
+            "unresolved": unresolved_links,
+            "saved_links": [dict(row) for row in saved_links],
+        }, ensure_ascii=True))
+        await ctx.send(
+            "⚠️ Account-link diagnostics recorded for "
+            f"{len(unresolved_links)} skipped event job(s). No links or mileage changed."
+        )
 
 
 async def announce_pending_repair_achievements(guild):
@@ -3936,7 +4126,7 @@ async def mileage_apply(ctx, confirmation: str = ""):
                     """,
                     candidate["job_id"],
                 )
-                missing_job = candidate["repair_kind"] == "missing_wotr"
+                missing_job = candidate["repair_kind"] in ("missing_wotr", "missing_real")
                 if missing_job:
                     # If live delivery or another recovery already inserted it,
                     # consume the candidate without adding another mile.
@@ -3959,6 +4149,17 @@ async def mileage_apply(ctx, confirmation: str = ""):
 
                 user_id = int(candidate["discord_user_id"])
                 delta = int(candidate["missing_distance"])
+                verified_repair = VERIFIED_HISTORICAL_REAL_REPAIRS.get(candidate["job_id"])
+                if verified_repair is not None and (
+                    user_id != verified_repair[0]
+                    or int(candidate["actual_distance"]) != verified_repair[2]
+                    or delta != verified_repair[2]
+                    or int(candidate["recorded_distance"]) != 0
+                    or int(candidate["source_channel_id"]) != verified_repair[3]
+                    or int(candidate["source_message_id"]) != verified_repair[4]
+                    or not missing_job
+                ):
+                    continue
                 previous_total = int(
                     await connection.fetchval(
                         """
@@ -8616,4 +8817,5 @@ else:
             "DISCORD_TOKEN has not been configured."
         )
     bot.run(TOKEN)
+
 
