@@ -73,6 +73,13 @@ class AdminOverviewCommandTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, self.env, clear=True):
             self.assertTrue(self.ns["is_private_verification_admin_channel"](ctx))
 
+    async def test_production_registration_does_not_enable_staging_admin_command(self):
+        ctx = context()
+        with patch.dict(os.environ, {}, clear=True), patch.object(workflow, 'enabled', return_value=True), patch.object(workflow, 'list_registration_statuses', self.reader):
+            await self.ns['verification_status_overview'](ctx)
+        self.reader.assert_not_awaited()
+        self.assertIn('isolated staging', ctx.reply.await_args.args[0])
+
     async def test_unauthorised_public_wrong_guild_and_invalid_config_never_read_database(self):
         for failure in ("nonstaff", "guild", "public", "channel", "missing", "malformed",
                         "thread", "member_leak", "role_leak", "production"):
@@ -143,3 +150,4 @@ class ReadOnlyOverviewTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

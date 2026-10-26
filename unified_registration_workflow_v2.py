@@ -3,13 +3,28 @@ import os
 import re
 
 STAGING_ENVIRONMENT = '59f25900-3c94-4db1-a802-06e064d87274'
+PRODUCTION_ENVIRONMENT = '72d029c5-98b4-4440-8492-8db12620d9da'
+PROJECT_ID = '00313eef-3512-45ec-a4fa-fdcb815235a2'
+PRODUCTION_SERVICE = '73f8817c-36be-423a-b68b-b457232cfcfd'
 
 
 def enabled(environ=None):
     env = os.environ if environ is None else environ
-    return (env.get('AT_V2_ISOLATED_STAGING') == 'YES'
-            and env.get('AT_V2_STAGING_REGISTRATION_ENABLED') == 'YES'
-            and env.get('RAILWAY_ENVIRONMENT_ID') == STAGING_ENVIRONMENT)
+    if env.get('RAILWAY_ENVIRONMENT_ID') == STAGING_ENVIRONMENT:
+        return (env.get('AT_V2_ISOLATED_STAGING') == 'YES'
+                and env.get('AT_V2_STAGING_REGISTRATION_ENABLED') == 'YES')
+    # Future registration-only release. Owner approval is recorded out of band
+    # before setting the approved SHA on this exact production deployment.
+    # No staging/disposable flag can substitute for these production controls.
+    sha = env.get('RAILWAY_GIT_COMMIT_SHA', '')
+    return (env.get('RAILWAY_ENVIRONMENT_ID') == PRODUCTION_ENVIRONMENT
+            and env.get('RAILWAY_PROJECT_ID') == PROJECT_ID
+            and env.get('RAILWAY_SERVICE_ID') == PRODUCTION_SERVICE
+            and not env.get('AT_V2_ISOLATED_STAGING')
+            and not env.get('AT_V2_STAGING_REGISTRATION_ENABLED')
+            and env.get('AT_V2_REGISTRATION_ENABLED') == 'YES'
+            and bool(re.fullmatch(r'[0-9a-f]{40}', sha))
+            and env.get('AT_V2_REGISTRATION_APPROVED_COMMIT') == sha)
 
 
 def account_status(link, claim, provider=None):
@@ -56,7 +71,7 @@ async def link_supported_account(pool, user_id, provider, account_id, canonical_
     No historical tables, provider ownership flags or mileage are written.
     """
     if not enabled():
-        raise ValueError('V2 registration is not enabled in isolated staging')
+        raise ValueError('V2 registration is not enabled for this deployment')
     if provider not in ('trucksbook', 'trucky') or not isinstance(account_id, str) or not re.fullmatch(r'[0-9]{1,30}', account_id) or int(account_id) <= 0:
         raise ValueError('Use a numeric provider account ID')
     if not isinstance(canonical_name, str) or not canonical_name.strip():
@@ -89,7 +104,7 @@ async def link_supported_account(pool, user_id, provider, account_id, canonical_
 
 async def complete_if_ready(pool, user_id):
     if not enabled():
-        raise ValueError('V2 registration is not enabled in isolated staging')
+        raise ValueError('V2 registration is not enabled for this deployment')
     # Lock session and Steam/provider rows so cancellation and account changes
     # cannot race the onboarding decision. No mileage eligibility is implied.
     async with pool.acquire() as conn:
@@ -115,7 +130,7 @@ async def list_registration_statuses(pool, page=1, page_size=10):
     Provider/Steam evidence is read internally only to derive the same statuses
     used by the applicant embed. Registration and mileage tables are not written.
     """
-    if not enabled():
+    if not enabled() or os.getenv('AT_V2_ISOLATED_STAGING') != 'YES':
         raise ValueError('Verification overview is available only in isolated staging')
     if type(page) is not int or not 1 <= page <= 1000000:
         raise ValueError('Use a positive page number')
@@ -166,3 +181,4 @@ async def list_registration_statuses(pool, page=1, page_size=10):
             **statuses, 'registration': 'Complete' if complete else 'Incomplete',
         })
     return {'page': page, 'pages': pages, 'total': total, 'members': result}
+

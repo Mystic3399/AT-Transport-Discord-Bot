@@ -13,6 +13,33 @@ ENV = {'AT_V2_ISOLATED_STAGING':'YES', 'AT_V2_STAGING_REGISTRATION_ENABLED':'YES
        'RAILWAY_ENVIRONMENT_ID':workflow.STAGING_ENVIRONMENT}
 
 class RegistrationPolicyTests(unittest.TestCase):
+    def test_registration_only_production_gate_requires_exact_approved_deployment(self):
+        sha = 'a' * 40
+        env = {'RAILWAY_ENVIRONMENT_ID': workflow.PRODUCTION_ENVIRONMENT,
+               'RAILWAY_PROJECT_ID': workflow.PROJECT_ID,
+               'RAILWAY_SERVICE_ID': workflow.PRODUCTION_SERVICE,
+               'RAILWAY_GIT_COMMIT_SHA': sha,
+               'AT_V2_REGISTRATION_ENABLED': 'YES',
+               'AT_V2_REGISTRATION_APPROVED_COMMIT': sha}
+        self.assertTrue(workflow.enabled(env))
+        from unified_mileage_engine_control_v2 import mileage_engine_enabled
+        from unified_production_mileage_gate_v2 import production_activation_blockers
+        self.assertFalse(mileage_engine_enabled(env))
+        self.assertIn('production_activation_disabled', production_activation_blockers(env))
+        for key in env:
+            with self.subTest(missing=key):
+                candidate = dict(env); candidate.pop(key)
+                self.assertFalse(workflow.enabled(candidate))
+            with self.subTest(wrong=key):
+                self.assertFalse(workflow.enabled({**env, key: 'wrong'}))
+        for flag in ('AT_V2_ISOLATED_STAGING', 'AT_V2_STAGING_REGISTRATION_ENABLED'):
+            self.assertFalse(workflow.enabled({**env, flag: 'YES'}))
+        self.assertFalse(workflow.enabled({**env, 'RAILWAY_GIT_COMMIT_SHA': 'b' * 40}))
+        # Even a matching short/non-hex SHA must fail closed.
+        for invalid in ('abc', 'z' * 40):
+            self.assertFalse(workflow.enabled({**env, 'RAILWAY_GIT_COMMIT_SHA': invalid,
+                                              'AT_V2_REGISTRATION_APPROVED_COMMIT': invalid}))
+
     def test_activation_is_explicit_and_staging_only(self):
         self.assertTrue(workflow.enabled(ENV))
         for key in ENV:
@@ -102,3 +129,4 @@ class StagingSlashSyncTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     await ns['sync_staging_registration_commands']()
             sync.assert_not_awaited()
+

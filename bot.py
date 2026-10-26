@@ -599,7 +599,8 @@ async def sync_staging_registration_commands():
     """Register application commands in the isolated guild, never globally."""
     global staging_registration_commands_synced
     import unified_registration_workflow_v2 as registration
-    if not registration.enabled() or staging_registration_commands_synced:
+    if (not registration.enabled() or os.getenv('AT_V2_ISOLATED_STAGING') != 'YES'
+            or staging_registration_commands_synced):
         return
     if str(GUILD_ID) != os.getenv("STAGING_GUILD_ID"):
         raise ValueError("Staging slash-command guild mismatch")
@@ -7329,7 +7330,7 @@ async def verification_status_overview(ctx, page: int = 1):
     if not member_is_verification_staff(ctx.author):
         await ctx.reply("Only authorised A&T Management can view verification status.", mention_author=False)
         return
-    if not registration.enabled():
+    if not registration.enabled() or os.getenv('AT_V2_ISOLATED_STAGING') != 'YES':
         await ctx.reply("This overview is available only in isolated staging.", mention_author=False)
         return
     if not is_private_verification_admin_channel(ctx):
