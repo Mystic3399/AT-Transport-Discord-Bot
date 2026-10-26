@@ -658,6 +658,29 @@ async def refresh_unified_registration(discord_user_id):
             await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
 
+async def audit_registration_account(ctx, provider, outcome, account_id=None, display_name=None):
+    """Use the existing private verification log; never log raw input or secrets."""
+    if provider not in ('trucksbook', 'trucky', 'registration'):
+        return
+    allowed = {'attempt', 'linked', 'invalid_id', 'membership_unavailable',
+               'account_conflict', 'link_rejected', 'provider_unavailable', 'confirmed'}
+    if outcome not in allowed or ctx.guild is None or ctx.guild.id != GUILD_ID:
+        return
+    label = {'trucksbook':'TrucksBook', 'trucky':'Trucky', 'registration':'Driver registration'}[provider]
+    details = (f"**Driver:** <@{ctx.author.id}>\n**Channel:** <#{ctx.channel.id}>\n"
+               f"**Outcome:** {outcome}\n")
+    if account_id and str(account_id).isascii() and str(account_id).isdecimal() and len(str(account_id)) <= 30:
+        details += f"**Account ID:** `{int(account_id)}`\n"
+    if display_name:
+        details += '**Provider account:** ' + discord.utils.escape_markdown(str(display_name))[:150] + '\n'
+    details += 'Linking is not independently verified ownership. No mileage or roles awarded.'
+    try:
+        await log_verification(ctx.guild, f'{label} — {outcome}', details)
+    except Exception as error:
+        # Notification failure must not misreport a committed account link as failed.
+        print(f'REGISTRATION AUDIT DELIVERY FAILED: {type(error).__name__}', flush=True)
+
+
 async def link_registration_provider(ctx, provider, account_id):
     """Reuse provider lookups; link existence is distinct from ownership proof."""
     import unified_registration_workflow_v2 as registration
@@ -668,32 +691,40 @@ async def link_registration_provider(ctx, provider, account_id):
         await ctx.reply("Use this command in your own private /register channel.", mention_author=False)
         return
     if not account_id or not account_id.isascii() or not account_id.isdecimal() or len(account_id) > 30 or int(account_id) <= 0:
+        await audit_registration_account(ctx, provider, "invalid_id")
         await ctx.reply("Supply your numeric provider profile ID, not a username.", mention_author=False)
         return
+    await audit_registration_account(ctx, provider, "attempt", account_id)
     try:
         if provider == "trucksbook":
             profile = await fetch_trucksbook_profile(int(account_id))
             if not profile.get("success") or not profile.get("belongs_to_at"):
+                await audit_registration_account(ctx, provider, "membership_unavailable", account_id)
                 await ctx.reply("TrucksBook could not confirm this account's A&T membership. No verified ownership was claimed. Try again later.", mention_author=False)
                 return
             canonical_name = profile["trucksbook_name"]
         else:
             canonical_name = await trucky_membership_adapter.verify_member(account_id)
             if canonical_name is None:
+                await audit_registration_account(ctx, provider, "membership_unavailable", account_id)
                 await ctx.reply("Trucky could not confirm this account's active A&T membership.", mention_author=False)
                 return
         await registration.link_supported_account(db_pool, ctx.author.id, provider, str(int(account_id)), canonical_name)
         await refresh_unified_registration(ctx.author.id)
     except asyncpg.UniqueViolationError:
+        await audit_registration_account(ctx, provider, "account_conflict", account_id)
         await ctx.reply('This provider account is already recorded for another driver. Contact management if the link is incorrect.', mention_author=False)
         return
     except ValueError as error:
+        await audit_registration_account(ctx, provider, "link_rejected", account_id)
         await ctx.reply(str(error), mention_author=False)
         return
     except Exception as error:
+        await audit_registration_account(ctx, provider, "provider_unavailable", account_id)
         print(f"REGISTRATION PROVIDER LINK FAILED: {type(error).__name__}", flush=True)
         await ctx.reply("Account linking is temporarily unavailable. Existing accounts are unchanged; retry /register to refresh status.", mention_author=False)
         return
+    await audit_registration_account(ctx, provider, "linked", account_id, canonical_name)
     label = "TrucksBook" if provider == "trucksbook" else "Trucky"
     confirmation = discord.Embed(
         title=f"✅ {label} account linked",
@@ -4445,7 +4476,7 @@ async def log_verification(
 
     try:
         await channel.send(
-            embed=embed
+            embed=embed, allowed_mentions=discord.AllowedMentions.none()
         )
     except discord.HTTPException as error:
         print(
@@ -8091,6 +8122,7 @@ async def confirm_verification(
             view = await registration.state(db_pool, ctx.author.id)
             await ctx.reply(registration.next_steps(view), mention_author=False)
             return
+        await audit_registration_account(ctx, "registration", "confirmed")
         await ctx.reply("✅ Registration complete. Your linked accounts and existing driver history are retained. This private channel closes in **30 seconds**. No mileage or roles were awarded.", mention_author=False)
         await asyncio.sleep(30)
         # Recheck after the grace period: cancellation/suspension or a different

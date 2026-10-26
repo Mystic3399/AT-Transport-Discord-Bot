@@ -27,7 +27,7 @@ class RegistrationConfirmationTests(unittest.IsolatedAsyncioTestCase):
         ctx=SimpleNamespace(guild=SimpleNamespace(id=1),author=SimpleNamespace(id=11,bot=False),channel=channel,reply=AsyncMock())
         ns=dict(GUILD_ID=1,db_pool=object(),discord=discord,asyncio=SimpleNamespace(sleep=AsyncMock()),
                 get_verification_by_channel=AsyncMock(return_value={'discord_user_id':owner}),
-                refresh_unified_registration=AsyncMock(),print=lambda *a,**k:None)
+                refresh_unified_registration=AsyncMock(),audit_registration_account=AsyncMock(),print=lambda *a,**k:None)
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'),ns)
         return ctx,ns,discord
 
@@ -85,7 +85,7 @@ class ProviderConfirmationTests(unittest.IsolatedAsyncioTestCase):
             get_verification_by_channel=AsyncMock(return_value={'discord_user_id':11}),
             fetch_trucksbook_profile=AsyncMock(return_value={'success':True,'belongs_to_at':True,'trucksbook_name':'Matched Driver'}),
             trucky_membership_adapter=SimpleNamespace(verify_member=AsyncMock(return_value='Matched Driver')),
-            refresh_unified_registration=AsyncMock())
+            refresh_unified_registration=AsyncMock(),audit_registration_account=AsyncMock())
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'),ns)
         for provider in ('trucksbook','trucky'):
             ctx=SimpleNamespace(guild=SimpleNamespace(id=1),author=SimpleNamespace(id=11,bot=False),channel=SimpleNamespace(id=22),reply=AsyncMock())
@@ -96,3 +96,37 @@ class ProviderConfirmationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn({'name':'Account ID','value':'123','inline':True},confirmation.fields)
             self.assertTrue(any(f['value']=='Matched Driver' for f in confirmation.fields))
             self.assertTrue(any('not independently verified' in f['value'] for f in confirmation.fields))
+
+class RegistrationAuditTests(unittest.IsolatedAsyncioTestCase):
+    def audit(self, logger):
+        tree=ast.parse(Path('bot.py').read_text())
+        fn=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='audit_registration_account')
+        ns=dict(GUILD_ID=1,log_verification=logger,discord=SimpleNamespace(utils=SimpleNamespace(escape_markdown=lambda x:x)),print=lambda *a,**k:None)
+        exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'),ns)
+        ctx=SimpleNamespace(guild=SimpleNamespace(id=1),author=SimpleNamespace(id=11),channel=SimpleNamespace(id=22))
+        return ns['audit_registration_account'],ctx
+
+    async def test_link_attempt_and_result_use_existing_staff_log(self):
+        logger=AsyncMock();audit,ctx=self.audit(logger)
+        for event in ('attempt','linked','membership_unavailable','account_conflict','confirmed'):
+            await audit(ctx,'trucksbook',event,'123','Matched Driver')
+        self.assertEqual(logger.await_count,5)
+        self.assertIn('Account ID',logger.call_args.args[2])
+        self.assertIn('not independently verified',logger.call_args.args[2])
+
+    async def test_invalid_input_and_unknown_outcomes_cannot_leak_secrets(self):
+        logger=AsyncMock();audit,ctx=self.audit(logger)
+        await audit(ctx,'trucky','invalid_id','secret-token-url')
+        self.assertNotIn('secret-token-url',logger.call_args.args[2])
+        logger.reset_mock()
+        await audit(ctx,'trucky','secret-token-url','123')
+        logger.assert_not_awaited()
+        ctx.guild.id=2
+        await audit(ctx,'trucky','linked','123')
+        logger.assert_not_awaited()
+
+    async def test_log_delivery_failure_does_not_undo_or_misreport_account_link(self):
+        logger=AsyncMock(side_effect=RuntimeError('Discord unavailable'))
+        audit,ctx=self.audit(logger)
+        await audit(ctx,'trucky','linked','123')
+        logger.assert_awaited_once()
