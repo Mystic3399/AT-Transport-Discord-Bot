@@ -252,6 +252,23 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_decisions WHERE provider_job_id=$1 AND decision='pending_reconciliation'", job["provider_job_id"]), 1)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", job["discord_user_id"]), 0)
 
+    async def test_historical_preview_reads_consistent_database_without_writes(self):
+        from historical_mileage_preview_v2 import read_historical_snapshot, build_historical_preview
+        user = 991234567890124100
+        await self.seed_verified_driver_job(user, "trucky", "991234567890124101", "991234567890124102", "1")
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO driver_progress(discord_user_id,trucksbook_name,real_miles) VALUES($1,'preview-preserved',88942)", user)
+            await conn.execute("INSERT INTO processed_jobs(job_id,discord_user_id,accepted_distance,statistics) VALUES('991234567890124103',$1,365,'Real')", user)
+        before = await read_historical_snapshot(self.pool)
+        report = build_historical_preview(before, [])
+        after = await read_historical_snapshot(self.pool)
+        for key in ("drivers", "processed_jobs", "links"):
+            self.assertEqual(before[key], after[key])
+        driver = next(r for r in report['drivers'] if r['discord_user_id']==user)
+        self.assertEqual(driver['proposed_real_total'], '88942')
+        self.assertEqual(driver['unexplained_balance'], '88577')
+        self.assertFalse(report['award_authorized'])
+
     async def test_existing_review_cannot_be_bypassed_as_no_candidate(self):
         await self.install_ledger()
         for index, status in enumerate(("potential_duplicate", "confirmed_duplicate", "verified_independent")):
