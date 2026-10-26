@@ -69,3 +69,30 @@ class RegistrationConfirmationTests(unittest.IsolatedAsyncioTestCase):
         text=workflow.next_steps(self.view(linked=False))
         self.assertIn('!trucksbook',text);self.assertIn('!registertrucky',text)
         self.assertIn('!confirm',workflow.next_steps(self.view()))
+
+class ProviderConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_both_provider_links_show_matched_details_and_confirm_instruction(self):
+        import asyncpg
+        tree=ast.parse(Path('bot.py').read_text())
+        fn=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='link_registration_provider')
+        class Embed:
+            def __init__(self,**kwargs):self.title=kwargs['title'];self.description=kwargs['description'];self.fields=[]
+            def add_field(self,**kwargs):self.fields.append(kwargs)
+            def set_footer(self,**kwargs):self.footer=kwargs['text']
+        discord=SimpleNamespace(Embed=Embed,Colour=SimpleNamespace(blue=lambda:1),
+            utils=SimpleNamespace(escape_markdown=lambda x:x),AllowedMentions=SimpleNamespace(none=lambda:None))
+        ns=dict(GUILD_ID=1,db_pool=object(),discord=discord,asyncpg=asyncpg,
+            get_verification_by_channel=AsyncMock(return_value={'discord_user_id':11}),
+            fetch_trucksbook_profile=AsyncMock(return_value={'success':True,'belongs_to_at':True,'trucksbook_name':'Matched Driver'}),
+            trucky_membership_adapter=SimpleNamespace(verify_member=AsyncMock(return_value='Matched Driver')),
+            refresh_unified_registration=AsyncMock())
+        exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'),ns)
+        for provider in ('trucksbook','trucky'):
+            ctx=SimpleNamespace(guild=SimpleNamespace(id=1),author=SimpleNamespace(id=11,bot=False),channel=SimpleNamespace(id=22),reply=AsyncMock())
+            with patch.object(workflow,'link_supported_account',AsyncMock()):
+                await ns['link_registration_provider'](ctx,provider,'123')
+            confirmation=ctx.reply.call_args.kwargs['embed']
+            self.assertIn('!confirm',confirmation.description)
+            self.assertIn({'name':'Account ID','value':'123','inline':True},confirmation.fields)
+            self.assertTrue(any(f['value']=='Matched Driver' for f in confirmation.fields))
+            self.assertTrue(any('not independently verified' in f['value'] for f in confirmation.fields))

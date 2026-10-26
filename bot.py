@@ -694,7 +694,19 @@ async def link_registration_provider(ctx, provider, account_id):
         print(f"REGISTRATION PROVIDER LINK FAILED: {type(error).__name__}", flush=True)
         await ctx.reply("Account linking is temporarily unavailable. Existing accounts are unchanged; retry /register to refresh status.", mention_author=False)
         return
-    await ctx.reply("Account linked and registration updated. Account ownership is not independently verified by this lookup; no mileage or roles were awarded. Run `!confirm` to finish and close this channel, or link your other tracking account first.", mention_author=False)
+    label = "TrucksBook" if provider == "trucksbook" else "Trucky"
+    confirmation = discord.Embed(
+        title=f"✅ {label} account linked",
+        description=("Check the account details below. Run **!confirm** to finish registration "
+                     "and close this channel, or link your other tracking account first."),
+        colour=discord.Colour.blue(),
+    )
+    confirmation.add_field(name="Account", value=discord.utils.escape_markdown(canonical_name), inline=False)
+    confirmation.add_field(name="Account ID", value=str(int(account_id)), inline=True)
+    confirmation.add_field(name="A&T membership", value="Found by provider lookup", inline=True)
+    confirmation.add_field(name="Account status", value="Linked — ownership is not independently verified by this lookup", inline=False)
+    confirmation.set_footer(text="Existing driver history retained. No mileage or roles awarded. If this is the wrong account, contact management before confirming.")
+    await ctx.reply(embed=confirmation, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
 
 
 async def start_public_integrations():

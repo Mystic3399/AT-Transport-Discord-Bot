@@ -1094,12 +1094,17 @@ async def record_normalized_provider_job(
         from unified_job_matching_v2 import _normalized_metadata
         _normalized_metadata(job_metadata)
     original, canonical_unit, miles = normalize_distance(distance, unit)
+    from decimal import Decimal
+    from unified_distance_units import KM_TO_MILES
+    # Keep legacy two-decimal columns compatible, but retain ledger precision
+    # in the immutable audit payload instead of rounding before reconciliation.
+    exact_miles = (original * (KM_TO_MILES if canonical_unit == 'km' else Decimal(1))).quantize(Decimal('0.0000000001'))
     real = miles if mileage_type == "real" else 0
     race = miles if mileage_type == "race" else 0
     audit_payload = json.dumps({
         "original_distance": str(original),
         "original_unit": canonical_unit,
-        "canonical_miles": str(miles),
+        "canonical_miles": str(exact_miles),
         "mileage_type": mileage_type,
         "job_metadata": job_metadata,
     })
