@@ -6,6 +6,7 @@ invented. Naive export timestamps are preserved but not assigned a timezone.
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import csv
+from collections import Counter
 import hashlib
 import re
 from world_of_trucks_policy_v2 import classify_job_mileage
@@ -152,3 +153,53 @@ def trucksbook_speed_check(rows):
             'race_excluded':str(sum((Decimal(r['race_excluded']) for r in output),Decimal(0))),
             'pending':str(sum((Decimal(r['pending']) for r in output),Decimal(0))),
             'mileage_awarded':False,'safe_to_add_to_existing_totals':False}
+
+
+def prepare_import_review(trucksbook_rows, trucky_rows, processed_trucksbook_ids):
+    """Build an evidence-only batch; this is not a credit or profile import.
+
+    Existing provider-scoped IDs are protected even if export labels changed.
+    Missing IDs are not proof of missing credit. Metadata/name similarity only
+    generates review leads; no canonical journey ID or account is invented.
+    """
+    from unified_job_matching_v2 import _normalized_metadata
+    from unified_distance_units import KM_TO_MILES
+    records=[];seen=set()
+    for original in trucksbook_rows:
+        record=trucksbook_export_row(original)
+        check=trucksbook_speed_check([original])
+        driver=check['drivers'][0]
+        policy='real' if Decimal(driver['combined_real'])>0 else 'race_excluded' if Decimal(driver['race_excluded'])>0 else 'pending'
+        record['speed_check_classification']=policy
+        record['import_status']=('already_recorded' if record['provider_job_id'] in processed_trucksbook_ids else
+                                 'excluded_by_policy' if policy=='race_excluded' else 'pending_evidence')
+        records.append(record)
+    for original in trucky_rows:
+        record=trucky_export_row(original,max_speed_unit='km/h')
+        record['import_status']='excluded_by_policy' if record['source_statistics']=='invalid' else 'pending_evidence'
+        records.append(record)
+    for record in records:
+        reference=(record['provider'],record['provider_job_id'])
+        if reference in seen:raise ValueError('Duplicate provider reference: reconcile export versions first')
+        seen.add(reference)
+        record['approved_addition']='0'
+    leads=[]
+    for first in records:
+        if first['provider']!='trucksbook':continue
+        for second in records:
+            if second['provider']!='trucky' or first['game']!=second['game']:continue
+            # A display label narrows human review only; it never proves identity.
+            if ' '.join(str(first['candidate_driver_label']).casefold().split())!=' '.join(str(second['candidate_driver_label']).casefold().split()):continue
+            try:
+                if _normalized_metadata(first['metadata'])!=_normalized_metadata(second['metadata']):continue
+                a=Decimal(first['distance'])*(KM_TO_MILES if first['unit']=='km' else Decimal(1))
+                b=Decimal(second['distance'])*(KM_TO_MILES if second['unit']=='km' else Decimal(1))
+                if abs(a-b)>5:continue
+            except (ValueError,TypeError,InvalidOperation):continue
+            leads.append({'trucksbook_job_id':first['provider_job_id'],'trucky_job_id':second['provider_job_id'],
+                          'status':'potential_duplicate','identity_verified':False,'timestamps_verified':False,
+                          'shared_journey_id':None,'mileage_awarded':False})
+    return {'mode':'review_only','records':records,'review_leads':leads,
+            'counts':dict(Counter(r['import_status'] for r in records)),
+            'records_count':len(records),'ready_to_award':0,'mileage_awarded':False,
+            'production_write_authorized':False}

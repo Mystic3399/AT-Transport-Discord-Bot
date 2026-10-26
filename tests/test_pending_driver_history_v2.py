@@ -40,3 +40,27 @@ class TrucksBookSpeedCheckTests(unittest.TestCase):
         self.assertEqual(driver['race_excluded'],'2468')
         self.assertEqual(driver['approved_addition'],'0')
         self.assertFalse(report['safe_to_add_to_existing_totals'])
+
+class ImportPreparationTests(unittest.TestCase):
+    def test_existing_jobs_protected_and_missing_jobs_not_assumed_new_credit(self):
+        from historical_provider_exports_v2 import prepare_import_review
+        from tests.test_historical_provider_exports_v2 import TR
+        batch=prepare_import_review([TB,{**TB,'TrucksBookID':'124'}],[TR],{'123'})
+        self.assertEqual(batch['records'][0]['import_status'],'already_recorded')
+        self.assertEqual(batch['records'][1]['import_status'],'pending_evidence')
+        self.assertEqual(batch['ready_to_award'],0)
+        self.assertFalse(batch['production_write_authorized'])
+        self.assertTrue(all(r['approved_addition']=='0' for r in batch['records']))
+
+    def test_duplicate_references_require_explicit_version_review(self):
+        from historical_provider_exports_v2 import prepare_import_review
+        with self.assertRaises(ValueError):prepare_import_review([TB,TB],[],set())
+
+    def test_similarity_never_confirms_identity_or_shared_journey(self):
+        from historical_provider_exports_v2 import prepare_import_review
+        from tests.test_historical_provider_exports_v2 import TR
+        batch=prepare_import_review([{**TB,'Accepted distance':'364 mi'}],[{**TR,'Driver':TB['Name']}],set())
+        self.assertEqual(len(batch['review_leads']),1)
+        self.assertFalse(batch['review_leads'][0]['identity_verified'])
+        self.assertIsNone(batch['review_leads'][0]['shared_journey_id'])
+        self.assertEqual(batch['ready_to_award'],0)
