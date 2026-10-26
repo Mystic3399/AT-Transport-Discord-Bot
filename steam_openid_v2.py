@@ -22,8 +22,12 @@ def make_login_url(return_to, realm):
         raise ValueError("Steam callbacks require HTTPS")
     if (callback.netloc != root.netloc or callback.username or callback.password
             or root.username or root.password or callback.fragment
+            or root.query or root.fragment or root.path not in ('', '/')
             or callback.path != "/auth/steam/callback"):
         raise ValueError("Steam callback must use the configured site origin")
+    # Parse ports explicitly, rejecting malformed origins before issuing state.
+    callback.port
+    root.port
     return ENDPOINT + "?" + urlencode({
         "openid.ns": NAMESPACE,
         "openid.mode": "checkid_setup",
@@ -77,3 +81,4 @@ def steam_ids_match(verified_steam_id, provider_steam_id, trusted_provider_sourc
         and CLAIMED.fullmatch("https://steamcommunity.com/openid/id/" + verified_steam_id) is not None
         and verified_steam_id == provider_steam_id
     )
+

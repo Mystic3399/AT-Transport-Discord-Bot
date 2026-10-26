@@ -5,11 +5,13 @@ as the staging bot. Set DATABASE_URL, AT_STEAM_CALLBACK_URL, AT_STEAM_REALM.
 Do not expose this service publicly before reviewing reverse-proxy settings.
 """
 import hashlib
+import asyncio
 import re
 import os
 from urllib.parse import urlsplit
 
 import asyncpg
+import aiohttp
 from aiohttp import web
 
 import steam_openid_v2
@@ -26,6 +28,9 @@ async def callback(request):
         raise web.HTTPServiceUnavailable(
             text="Steam registration writes are disabled during staging acceptance"
         )
+    if (os.getenv('RAILWAY_ENVIRONMENT_ID') == registration.PRODUCTION_ENVIRONMENT
+            and not registration.enabled()):
+        raise web.HTTPServiceUnavailable(text='Steam registration is not enabled for this release')
     pool = request.app[POOL_KEY] if POOL_KEY in request.app else request.app["pool"]
     values = request.query
     if len(values) > 30 or any(len(values.getall(k)) != 1 for k in values):
@@ -43,7 +48,9 @@ async def callback(request):
     if record is None or not record["valid"] or record["consumed_at"] is not None:
         raise web.HTTPBadRequest(text="Steam login expired or already used")
     expected = record["expected_return_to"]
-    configured = os.environ["AT_STEAM_CALLBACK_URL"]
+    configured = os.getenv("AT_STEAM_CALLBACK_URL", '')
+    if not configured:
+        raise web.HTTPServiceUnavailable(text='Steam callback is not configured')
     expected_parts, configured_parts = urlsplit(expected), urlsplit(configured)
     if (expected_parts.scheme != "https" or configured_parts.scheme != "https"
             or expected_parts.netloc != configured_parts.netloc
@@ -63,8 +70,17 @@ async def callback(request):
         )
     except (ValueError, asyncpg.UniqueViolationError):
         raise web.HTTPBadRequest(text="Steam verification failed or account already linked")
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        raise web.HTTPServiceUnavailable(text='Steam is temporarily unavailable; retry this sign-in')
+    completion_pending = False
     if registration.enabled():
-        await registration.complete_if_ready(pool, record["discord_user_id"])
+        try:
+            await registration.complete_if_ready(pool, record["discord_user_id"])
+        except Exception as error:
+            # Steam state is already consumed. Preserve that verified identity
+            # and let /register resume completion instead of requesting replay.
+            completion_pending = True
+            print(f"STEAM REGISTRATION COMPLETION PENDING: {type(error).__name__}", flush=True)
     notify = request.app.get(ON_STEAM_VERIFIED_KEY)
     if notify is not None:
         try:
@@ -74,7 +90,8 @@ async def callback(request):
             # not ask the driver to replay a consumed OpenID callback.
             print(f"STEAM REGISTRATION EMBED UPDATE FAILED: {type(error).__name__}", flush=True)
     return web.Response(
-        text="Steam account verified for A&T registration. Return to your private Discord channel.",
+        text=("Steam account verified for A&T registration. Return to your private Discord channel."
+              + (" Run /register to resume onboarding completion." if completion_pending else "")),
         content_type="text/plain",
         headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
     )
@@ -98,3 +115,4 @@ def make_app():
 
 if __name__ == "__main__":
     web.run_app(make_app(), host="127.0.0.1", port=int(os.getenv("PORT", "8081")))
+

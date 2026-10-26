@@ -817,6 +817,22 @@ async def approve_provider_claim(pool, discord_user_id, provider, reviewer_id,
             """,discord_user_id)
             return claim["provider_account_id"]
 
+async def lock_active_registration(conn, discord_user_id):
+    """Serialize identity changes with cancellation; preserve suspended drivers."""
+    session = await conn.fetchrow("""
+        SELECT status FROM unified_registration_sessions
+        WHERE discord_user_id=$1 FOR UPDATE
+    """, discord_user_id)
+    if not session or session['status'] == 'cancelled':
+        raise ValueError('Registration is cancelled or unavailable; run /register')
+    profile = await conn.fetchrow("""
+        SELECT status FROM unified_driver_profiles
+        WHERE discord_user_id=$1 FOR UPDATE
+    """, discord_user_id)
+    if not profile or profile['status'] == 'suspended':
+        raise ValueError('Registration is unavailable; contact management')
+
+
 async def bind_verified_steam(pool, discord_user_id, steam_id64, state_hash, nonce):
     """Consume pre-created, short-lived state and nonce and bind verified Steam ID.
 
@@ -827,6 +843,7 @@ async def bind_verified_steam(pool, discord_user_id, steam_id64, state_hash, non
         raise ValueError("Invalid SteamID64")
     async with pool.acquire() as conn:
         async with conn.transaction():
+            await lock_active_registration(conn, discord_user_id)
             state = await conn.fetchrow("""
                 SELECT discord_user_id,expires_at,consumed_at
                 FROM unified_steam_auth_states WHERE state_hash=$1 FOR UPDATE
@@ -879,8 +896,10 @@ async def create_steam_auth_state(pool, discord_user_id, callback_base, ttl_minu
     import hashlib
     from urllib.parse import urlsplit, urlencode, urlunsplit, parse_qsl
     parsed = urlsplit(callback_base)
-    if parsed.scheme != "https" or not parsed.netloc:
+    if (parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or parsed.path != '/auth/steam/callback'):
         raise ValueError("HTTPS callback required")
+    parsed.port
     if ttl_minutes < 1 or ttl_minutes > 15:
         raise ValueError("Invalid Steam login TTL")
     token = secrets.token_urlsafe(32)
@@ -889,11 +908,13 @@ async def create_steam_auth_state(pool, discord_user_id, callback_base, ttl_minu
     query["state"] = token
     expected_return_to = urlunsplit((parsed.scheme,parsed.netloc,parsed.path,urlencode(query),""))
     async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO unified_steam_auth_states
-                (state_hash,discord_user_id,expected_return_to,expires_at)
-            VALUES($1,$2,$3,NOW()+($4 * INTERVAL '1 minute'))
-        """,token_hash,discord_user_id,expected_return_to,ttl_minutes)
+        async with conn.transaction():
+            await lock_active_registration(conn, discord_user_id)
+            await conn.execute("""
+                INSERT INTO unified_steam_auth_states
+                    (state_hash,discord_user_id,expected_return_to,expires_at)
+                VALUES($1,$2,$3,NOW()+($4 * INTERVAL '1 minute'))
+            """,token_hash,discord_user_id,expected_return_to,ttl_minutes)
     return expected_return_to
 
 async def auto_approve_trucky_if_steam_matches(
@@ -926,23 +947,24 @@ async def auto_approve_trucky_if_steam_matches(
     async with pool.acquire() as conn:
         async with conn.transaction():
             if discord_user_id is None:
-                claim = await conn.fetchrow("""
-                    SELECT discord_user_id,provider_account_id,provider_display_name,
-                           status,submitted_at,expires_at
-                    FROM unified_provider_claims
+                # Discover without locking so every identity writer takes the
+                # session/profile locks before claims and links.
+                discord_user_id = await conn.fetchval("""
+                    SELECT discord_user_id FROM unified_provider_claims
                     WHERE provider='trucky' AND provider_account_id=$1
-                    FOR UPDATE
                 """, account_id)
-                if claim is None:
-                    raise TruckyIdentityVerificationError("claim_missing")
-                discord_user_id = claim["discord_user_id"]
-            else:
-                claim = await conn.fetchrow("""
-                    SELECT discord_user_id,provider_account_id,provider_display_name,
-                           status,submitted_at,expires_at
-                    FROM unified_provider_claims
-                    WHERE discord_user_id=$1 AND provider='trucky' FOR UPDATE
-                """, discord_user_id)
+                if discord_user_id is None:
+                    raise TruckyIdentityVerificationError('claim_missing')
+            try:
+                await lock_active_registration(conn, discord_user_id)
+            except ValueError:
+                raise TruckyIdentityVerificationError('claim_missing_or_inactive')
+            claim = await conn.fetchrow("""
+                SELECT discord_user_id,provider_account_id,provider_display_name,
+                       status,submitted_at,expires_at
+                FROM unified_provider_claims
+                WHERE discord_user_id=$1 AND provider='trucky' FOR UPDATE
+            """, discord_user_id)
             if claim is None or claim["status"] not in ("pending", "approved"):
                 raise TruckyIdentityVerificationError("claim_missing_or_inactive")
             if claim["provider_account_id"] != account_id:
@@ -1009,7 +1031,9 @@ async def auto_approve_trucky_if_steam_matches(
                     (provider,provider_account_id,discord_user_id,
                      provider_display_name,verified_at)
                 VALUES('trucky',$1,$2,$3,NOW())
-                ON CONFLICT(provider,provider_account_id) DO NOTHING
+                ON CONFLICT(provider,provider_account_id) DO UPDATE
+                    SET verified_at=COALESCE(unified_provider_links.verified_at,NOW())
+                    WHERE unified_provider_links.discord_user_id=EXCLUDED.discord_user_id
             """, account_id,discord_user_id,claim["provider_display_name"])
             if result != "INSERT 0 1":
                 raise TruckyIdentityVerificationError("account_owned_by_another_driver")
@@ -1116,4 +1140,5 @@ async def record_normalized_provider_job(
                     raise ValueError("Conflicting duplicate provider job requires review")
                 return False
             return True
+
 

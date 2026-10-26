@@ -687,6 +687,9 @@ async def link_registration_provider(ctx, provider, account_id):
                 return
         await registration.link_supported_account(db_pool, ctx.author.id, provider, str(int(account_id)), canonical_name)
         await refresh_unified_registration(ctx.author.id)
+    except asyncpg.UniqueViolationError:
+        await ctx.reply('This provider account is already recorded for another driver. Contact management if the link is incorrect.', mention_author=False)
+        return
     except ValueError as error:
         await ctx.reply(str(error), mention_author=False)
         return
@@ -708,9 +711,9 @@ async def start_public_integrations():
         if not 1 <= port <= 65535 or db_pool is None:
             raise ValueError("Invalid HTTP port or database not ready")
         async def on_trucky_linked(discord_user_id):
-            guild = bot.get_guild(GUILD_ID)
-            if guild is not None:
-                await sync_unified_driver_roles(guild, discord_user_id)
+            # Identity linking may refresh registration, but automatic V2 roles
+            # require a separate release acceptance and are not activated here.
+            await refresh_unified_registration(discord_user_id)
 
         runner = web.AppRunner(
             trucky_staging_receiver_v2.create_integrations_app(
@@ -6239,6 +6242,7 @@ async def register_driver(ctx):
                 import unified_registration_workflow_v2 as registration
                 if registration.enabled():
                     await unified_driver_profiles.begin_registration(db_pool, member.id, existing_channel.id)
+                    await registration.complete_if_ready(db_pool, member.id)
                     await refresh_unified_registration(member.id)
                 await onboarding_reply(
                     (
@@ -6475,6 +6479,7 @@ async def register_driver(ctx):
 
     import unified_registration_workflow_v2 as registration
     if registration.enabled():
+        await registration.complete_if_ready(db_pool, member.id)
         await refresh_unified_registration(member.id)
     else:
         await verification_channel.send(content=member.mention, embed=embed)
@@ -6539,12 +6544,13 @@ async def link_steam_for_registration(ctx):
                 or cb.netloc != root.netloc or cb.path != "/auth/steam/callback"
                 or cb.fragment or cb.username or cb.password):
             raise ValueError("Steam callback configuration is invalid")
+        steam_openid_v2.make_login_url(callback, realm)
         return_to = await unified_driver_profiles.create_steam_auth_state(
             db_pool, ctx.author.id, callback
         )
         url = steam_openid_v2.make_login_url(return_to, realm)
     except Exception as error:
-        print(f"STEAM LINK ERROR: {type(error).__name__}: {error}")
+        print(f"STEAM LINK ERROR: {type(error).__name__}", flush=True)
         await ctx.reply("Could not create a secure Steam login. Please try later.", mention_author=False)
         return
     await refresh_unified_registration(ctx.author.id)
@@ -8688,9 +8694,16 @@ async def cancel_verification(
         else f"<@{applicant_id}>"
     )
 
-    await cancel_verification_record(
-        applicant_id
-    )
+    import unified_registration_workflow_v2 as registration
+    try:
+        if registration.enabled():
+            await registration.cancel_registration(db_pool, applicant_id, ctx.channel.id)
+        else:
+            await cancel_verification_record(applicant_id)
+    except Exception as error:
+        print(f"REGISTRATION CANCELLATION FAILED: {type(error).__name__}", flush=True)
+        await ctx.reply('Cancellation could not be saved. Your channel was retained; please retry.', mention_author=False)
+        return
 
     await log_verification(
         ctx.guild,

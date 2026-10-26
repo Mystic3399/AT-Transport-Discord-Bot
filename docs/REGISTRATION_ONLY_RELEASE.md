@@ -27,6 +27,16 @@ legacy mileage merely by completing registration.
 `!verifications` and the staging slash synchronization helper remain staging-only.
 Production management visibility for the new overview is not part of this release.
 
+Cancellation now invalidates outstanding Steam sign-in states in the same
+transaction as both registration records, while retaining linked accounts and
+historical driver profiles. Steam binding and signed Trucky identity updates
+serialize against cancellation and cannot reactivate suspended drivers.
+An existing Linked Trucky account can become Verified after valid signed identity
+evidence, without replacing its ownership or generating a mileage credit.
+The bot's Trucky identity callback refreshes only the verification embed; it does
+not call the role writer. `/register` can resume interrupted onboarding after a
+successful Steam binding without replaying its consumed OpenID response.
+
 ## Required acceptance before a production request
 
 - CI with disposable PostgreSQL passes at the exact candidate commit.

@@ -975,6 +975,104 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
 
 
+    async def _legacy_cancel_fixture(self, user, channel):
+        await self.conn.execute('''CREATE TABLE IF NOT EXISTS driver_verifications (
+            discord_user_id BIGINT PRIMARY KEY,verification_channel_id BIGINT,
+            status TEXT,completed_at TIMESTAMPTZ)''')
+        await self.conn.execute('''INSERT INTO driver_verifications
+            (discord_user_id,verification_channel_id,status) VALUES($1,$2,'pending')
+            ON CONFLICT(discord_user_id) DO UPDATE SET
+            verification_channel_id=EXCLUDED.verification_channel_id,status='pending' ''', user, channel)
+
+    async def test_cancel_invalidates_steam_links_without_removing_accounts(self):
+        from urllib.parse import urlsplit, parse_qs
+        from unittest.mock import patch
+        import unified_registration_workflow_v2 as workflow
+        from tests.test_registration_workflow_v2 import ENV
+        user, channel = 991234568881001, 991234568881002
+        steam = '76561198888888001'
+        await profiles.begin_registration(self.pool, user, channel)
+        await self._legacy_cancel_fixture(user, channel)
+        url = await profiles.create_steam_auth_state(self.pool, user, 'https://example.test/auth/steam/callback')
+        token = parse_qs(urlsplit(url).query)['state'][0]
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        with patch.dict(os.environ, ENV, clear=True):
+            await workflow.cancel_registration(self.pool, user, channel)
+            await workflow.cancel_registration(self.pool, user, channel)
+        with self.assertRaises(ValueError):
+            await profiles.bind_verified_steam(self.pool, user, steam, digest, 'cancelled-nonce-881001')
+        with self.assertRaises(ValueError):
+            await profiles.create_steam_auth_state(self.pool, user, 'https://example.test/auth/steam/callback')
+        self.assertIsNone(await self.conn.fetchval('SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1', user))
+        self.assertIsNotNone(await self.conn.fetchval('SELECT consumed_at FROM unified_steam_auth_states WHERE state_hash=$1', digest))
+        await profiles.begin_registration(self.pool, user, channel + 1)
+        new = await profiles.create_steam_auth_state(self.pool, user, 'https://example.test/auth/steam/callback')
+        new_digest = hashlib.sha256(parse_qs(urlsplit(new).query)['state'][0].encode()).hexdigest()
+        await profiles.bind_verified_steam(self.pool, user, steam, new_digest, 'new-nonce-881001')
+        with patch.dict(os.environ, ENV, clear=True):
+            await workflow.link_supported_account(self.pool, user, 'trucksbook', '998881001', 'Test Driver')
+            await workflow.cancel_registration(self.pool, user, channel + 1)
+            self.assertFalse((await workflow.state(self.pool, user))['ready'])
+        self.assertEqual(await self.conn.fetchval('SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1', user), steam)
+        self.assertEqual(await self.conn.fetchval('SELECT COUNT(*) FROM unified_provider_links WHERE discord_user_id=$1', user), 1)
+        self.assertEqual(await self.conn.fetchval('SELECT status FROM unified_driver_profiles WHERE discord_user_id=$1', user), 'active')
+
+    async def test_linked_trucky_account_upgrades_with_signed_evidence_idempotently(self):
+        from unittest.mock import patch
+        import unified_registration_workflow_v2 as workflow
+        from tests.test_registration_workflow_v2 import ENV
+        user, channel = 991234568881010, 991234568881011
+        steam, account, job = '76561198888888010', '998881010', '998881011'
+        await profiles.begin_registration(self.pool, user, channel)
+        await self.conn.execute('INSERT INTO unified_steam_links(discord_user_id,steam_id64) VALUES($1,$2)', user, steam)
+        with patch.dict(os.environ, ENV, clear=True):
+            await workflow.link_supported_account(self.pool, user, 'trucky', account, 'Test Driver')
+            self.assertEqual((await workflow.state(self.pool, user))['accounts']['trucky']['status'], 'Linked')
+        count = await self.conn.fetchval('SELECT COUNT(*) FROM unified_provider_job_events')
+        digest = hashlib.sha256(b'synthetic-signed-upgrade-fixture').hexdigest()
+        await profiles.record_trucky_webhook_receipt(self.pool, digest, 'job_completed', job)
+        for _ in range(2):
+            self.assertEqual(await profiles.auto_approve_trucky_if_steam_matches(
+                self.pool, None, account, steam, trusted_provider_source=True,
+                membership_confirmed=True, provider_job_id=job, payload_sha256=digest,
+                completed_at=datetime.now(timezone.utc)), user)
+        with patch.dict(os.environ, ENV, clear=True):
+            state = await workflow.state(self.pool, user)
+        self.assertEqual(state['accounts']['trucky']['status'], 'Verified')
+        self.assertTrue(state['ready'])
+        self.assertEqual(await self.conn.fetchval('SELECT COUNT(*) FROM unified_provider_links WHERE discord_user_id=$1', user), 1)
+        self.assertEqual(await self.conn.fetchval('SELECT COUNT(*) FROM unified_provider_job_events'), count)
+        await self.conn.execute("UPDATE unified_driver_profiles SET status='suspended' WHERE discord_user_id=$1", user)
+        with self.assertRaises(ValueError):
+            await profiles.auto_approve_trucky_if_steam_matches(self.pool, None, account, steam,
+                trusted_provider_source=True, membership_confirmed=True,
+                provider_job_id=job, payload_sha256=digest, completed_at=datetime.now(timezone.utc))
+        self.assertEqual(await self.conn.fetchval('SELECT status FROM unified_driver_profiles WHERE discord_user_id=$1', user), 'suspended')
+
+    async def test_cancellation_and_steam_callback_serialize_without_deadlock(self):
+        from urllib.parse import urlsplit, parse_qs
+        from unittest.mock import patch
+        import unified_registration_workflow_v2 as workflow
+        from tests.test_registration_workflow_v2 import ENV
+        user, channel = 991234568881020, 991234568881021
+        await profiles.begin_registration(self.pool, user, channel)
+        await self._legacy_cancel_fixture(user, channel)
+        url = await profiles.create_steam_auth_state(self.pool, user, 'https://example.test/auth/steam/callback')
+        digest = hashlib.sha256(parse_qs(urlsplit(url).query)['state'][0].encode()).hexdigest()
+        with patch.dict(os.environ, ENV, clear=True):
+            results = await asyncio.wait_for(asyncio.gather(
+                workflow.cancel_registration(self.pool, user, channel),
+                profiles.bind_verified_steam(self.pool, user, '76561198888888020', digest, 'race-nonce-881020'),
+                return_exceptions=True), timeout=10)
+        self.assertIs(results[0], True)
+        self.assertTrue(results[1] is None or isinstance(results[1], ValueError), results)
+        self.assertEqual(await self.conn.fetchval('SELECT status FROM unified_registration_sessions WHERE discord_user_id=$1', user), 'cancelled')
+        self.assertIsNotNone(await self.conn.fetchval('SELECT consumed_at FROM unified_steam_auth_states WHERE state_hash=$1', digest))
+        with self.assertRaises(ValueError):
+            await profiles.bind_verified_steam(self.pool, user, '76561198888888020', digest, 'race-nonce-retry-881020')
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

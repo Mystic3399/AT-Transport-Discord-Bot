@@ -43,11 +43,13 @@ def account_status(link, claim, provider=None):
 
 async def state(pool, user_id):
     async with pool.acquire() as conn:
-        session = await conn.fetchrow('SELECT * FROM unified_registration_sessions WHERE discord_user_id=$1', user_id)
-        steam = await conn.fetchrow('SELECT steam_id64,verified_at FROM unified_steam_links WHERE discord_user_id=$1', user_id)
-        links = await conn.fetch('SELECT * FROM unified_provider_links WHERE discord_user_id=$1', user_id)
-        claims = await conn.fetch('SELECT * FROM unified_provider_claims WHERE discord_user_id=$1', user_id)
-        steam_pending = await conn.fetchval('SELECT EXISTS(SELECT 1 FROM unified_steam_auth_states WHERE discord_user_id=$1 AND expires_at>NOW() AND consumed_at IS NULL)', user_id)
+        async with conn.transaction(isolation='repeatable_read', readonly=True):
+            profile = await conn.fetchrow('SELECT status FROM unified_driver_profiles WHERE discord_user_id=$1', user_id)
+            session = await conn.fetchrow('SELECT * FROM unified_registration_sessions WHERE discord_user_id=$1', user_id)
+            steam = await conn.fetchrow('SELECT steam_id64,verified_at FROM unified_steam_links WHERE discord_user_id=$1', user_id)
+            links = await conn.fetch('SELECT * FROM unified_provider_links WHERE discord_user_id=$1', user_id)
+            claims = await conn.fetch('SELECT * FROM unified_provider_claims WHERE discord_user_id=$1', user_id)
+            steam_pending = await conn.fetchval('SELECT EXISTS(SELECT 1 FROM unified_steam_auth_states WHERE discord_user_id=$1 AND expires_at>NOW() AND consumed_at IS NULL)', user_id)
     accounts = {}
     for provider in ('trucksbook', 'trucky'):
         link = next((r for r in links if r['provider'] == provider), None)
@@ -57,7 +59,9 @@ async def state(pool, user_id):
             account_id=source['provider_account_id'] if source else None,
             display_name=source['provider_display_name'] if source else None)
     steam_verified = bool(steam and steam['verified_at'] is not None)
-    ready = steam_verified and any(a['status'] in ('Linked', 'Verified') for a in accounts.values())
+    ready = bool(steam_verified and profile and profile['status'] == 'active'
+                 and session and session['status'] == 'approved'
+                 and any(a['status'] in ('Linked', 'Verified') for a in accounts.values()))
     return dict(session=dict(session) if session else None,
                 steam_id64=steam['steam_id64'] if steam_verified else None,
                 steam_status='Verified' if steam_verified else 'Pending' if steam_pending else 'Not Linked',
@@ -78,6 +82,8 @@ async def link_supported_account(pool, user_id, provider, account_id, canonical_
         raise ValueError('Provider account lookup did not return an account name')
     async with pool.acquire() as conn:
         async with conn.transaction():
+            from unified_driver_profiles import lock_active_registration
+            await lock_active_registration(conn, user_id)
             session = await conn.fetchrow('SELECT status FROM unified_registration_sessions WHERE discord_user_id=$1 FOR UPDATE', user_id)
             if not session or session['status'] == 'cancelled':
                 raise ValueError('Start /register first')
@@ -121,6 +127,25 @@ async def complete_if_ready(pool, user_id):
                 return False
             await conn.execute("UPDATE unified_registration_sessions SET status='approved',updated_at=NOW() WHERE discord_user_id=$1 AND status<>'approved'", user_id)
             await conn.execute("UPDATE unified_driver_profiles SET status='active',activated_at=COALESCE(activated_at,NOW()) WHERE discord_user_id=$1 AND status='pending'", user_id)
+    return True
+
+
+async def cancel_registration(pool, user_id, channel_id):
+    """Cancel onboarding and outstanding sign-ins atomically, retaining links/history."""
+    if not enabled():
+        raise ValueError('V2 registration is not enabled for this deployment')
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            session = await conn.fetchrow('''SELECT status,verification_channel_id
+                FROM unified_registration_sessions WHERE discord_user_id=$1 FOR UPDATE''', user_id)
+            if not session or session['verification_channel_id'] != channel_id:
+                raise ValueError('Registration channel does not match')
+            await conn.execute("UPDATE unified_registration_sessions SET status='cancelled',updated_at=NOW() WHERE discord_user_id=$1", user_id)
+            await conn.execute('''UPDATE unified_steam_auth_states SET consumed_at=NOW()
+                WHERE discord_user_id=$1 AND consumed_at IS NULL''', user_id)
+            await conn.execute("""UPDATE driver_verifications SET status='cancelled',completed_at=NOW()
+                WHERE discord_user_id=$1 AND verification_channel_id=$2
+                  AND status IN ('pending','confirmed')""", user_id, channel_id)
     return True
 
 
