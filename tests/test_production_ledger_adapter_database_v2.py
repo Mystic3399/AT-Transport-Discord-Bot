@@ -335,6 +335,37 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1", user), 0)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_decisions WHERE provider_job_id=$1 AND decision='pending_reconciliation'", second["provider_job_id"]), 1)
 
+    async def test_reviewed_trucky_primary_cannot_recredit_historical_trucksbook(self):
+        user = 991234567890123881
+        job = await self.seed_verified_driver_job(user, "trucky", "28021177-test", "991234567890123882", "364.1235186511")
+        historical_id = "68248029-test"
+        async with self.pool.acquire() as conn:
+            await conn.execute("INSERT INTO driver_progress(discord_user_id,trucksbook_name,real_miles) VALUES($1,'legacy-duplicate-test',88942)", user)
+            await conn.execute("INSERT INTO processed_jobs(job_id,discord_user_id,accepted_distance,statistics) VALUES($1,$2,365,'real')", historical_id, user)
+            case_id = await conn.fetchval("""
+                INSERT INTO unified_job_reconciliation_cases
+                  (trucky_job_id,trucksbook_job_id,discord_user_id,status,opened_by,reviewed_at)
+                VALUES($1,$2,$3,'confirmed_duplicate',777,NOW()) RETURNING case_id
+            """, job["provider_job_id"], historical_id, user)
+            await conn.execute("""
+                INSERT INTO unified_job_reconciliation_audit
+                  (case_id,decision,reviewer_discord_id,evidence_kind,evidence_sha256,discord_user_id)
+                VALUES($1,'confirmed_duplicate',777,'provider_shared_journey_evidence',$2,$3)
+            """, case_id, "f" * 64, user)
+        await self.install_ledger()
+        job["reconciliation_primary"] = {"provider":"trucky", "provider_job_id":job["provider_job_id"]}
+        job["reconciliation_companion"] = {"provider":"trucksbook", "provider_job_id":historical_id}
+        async def attempt():
+            return await apply_verified_credit(self.pool, job, config=self.config, runtime=self.runtime,
+                feed_evidence=self.complete_feed(), reconciliation_status="confirmed_duplicate",
+                reconciliation_evidence_sha256="f" * 64, reviewer_id=777)
+        results = await asyncio.gather(attempt(), attempt())
+        self.assertTrue(all(r == {"status":"pending_reconciliation", "reason":"duplicate_already_in_historical_baseline"} for r in results))
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval("SELECT real_miles FROM driver_progress WHERE discord_user_id=$1", user),88942)
+            self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1", user),0)
+            self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_decisions WHERE discord_user_id=$1 AND reason_code='duplicate_already_in_historical_baseline'", user),2)
+
     async def test_partial_failure_rolls_back_ledger_and_total(self):
         await self.install_ledger()
         job = await self.seed_verified_driver_job(991234567890123740, "trucky", "991234567890123741", "991234567890123742", "100")

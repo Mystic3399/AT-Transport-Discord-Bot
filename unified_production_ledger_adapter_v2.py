@@ -304,6 +304,17 @@ async def apply_verified_credit(
                     )
                 """, expected_trucky, expected_trucksbook, user_id,
                      case_status, reviewer_id, reconciliation_evidence_sha256)
+                # A legacy TrucksBook award is already part of the retained
+                # baseline. Selecting Trucky as a reviewed duplicate primary
+                # must never create a second credit on top of that baseline.
+                if reconciliation_status == "confirmed_duplicate" and audited_case:
+                    historical_companion = await conn.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM processed_jobs WHERE job_id=$1)",
+                        expected_trucksbook,
+                    )
+                    if historical_companion:
+                        await log_decision("pending_reconciliation", "duplicate_already_in_historical_baseline")
+                        return {"status": "pending_reconciliation", "reason": "duplicate_already_in_historical_baseline"}
                 other_provider_verified = await conn.fetchval("""
                     SELECT EXISTS(
                       SELECT 1 FROM unified_provider_job_events e
