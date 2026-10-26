@@ -439,7 +439,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         raw_id=receipt['receipt_id'] if isinstance(receipt,dict) else receipt
         self.assertTrue(await attest_trucky_receipt_identity(self.pool,raw_id,job_id,'7'*64,user,account))
         record=dict(id=int(job_id),user_id=int(account),company_id=49041,status='completed',
-                    completed_at='2026-10-19T12:00:00Z',stats_type='real_miles',distance_unit='km',real_driven_distance_km=176)
+                    completed_at='2026-10-19T12:00:00Z',stats_type='real_miles',distance_unit='km',driven_distance_km=176,real_driven_distance_km=200)
         with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':[record]})):
             result=await api.ingest_authenticated_completed_jobs(self.pool)
             replay=await api.ingest_authenticated_completed_jobs(self.pool)

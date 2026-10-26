@@ -40,7 +40,10 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
     if classification is None or classification.mileage_type != "real":
         return None
     try:
-        km = Decimal(str(job.get("real_driven_distance_km")))
+        # The authenticated completed-job driven_distance_km matches Trucky
+        # tracker distance. real_driven_distance_km is a different metric;
+        # selecting it produced 394.57 mi for the verified 364 mi delivery.
+        km = Decimal(str(job.get("driven_distance_km")))
     except (InvalidOperation, ValueError, TypeError):
         return None
     if not km.is_finite() or km <= 0 or km > 100000:
@@ -87,3 +90,4 @@ def review_trucky_job_against_other_provider(
         provider_feed_complete=provider_feed_complete,
     )
     return {"status": decision, "awardable": False}
+

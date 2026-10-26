@@ -5,7 +5,7 @@ from trucky_verified_job_candidate_v2 import (normalize_verified_trucky_job,
 BASE = {"company_id": 49041, "id": 27805272, "user_id": 1234,
         "status": "completed", "completed_at": "2026-10-17T12:00:00Z",
         "stats_type": "real_miles", "distance_unit": "km",
-        "real_driven_distance_km": 120.5}
+        "driven_distance_km": 120.5}
 
 
 class VerifiedJobCandidateTests(unittest.TestCase):
@@ -45,10 +45,10 @@ class VerifiedJobCandidateTests(unittest.TestCase):
         self.assertIsNone(self.candidate({**BASE, "stats_type": "race_miles"}))
 
     def test_zero_distance_rejected(self):
-        self.assertIsNone(self.candidate({**BASE, "real_driven_distance_km": 0}))
+        self.assertIsNone(self.candidate({**BASE, "driven_distance_km": 0}))
 
     def test_missing_distance_rejected(self):
-        self.assertIsNone(self.candidate({**BASE, "real_driven_distance_km": None}))
+        self.assertIsNone(self.candidate({**BASE, "driven_distance_km": None}))
 
     def test_unparseable_timestamp_rejected(self):
         self.assertIsNone(self.candidate({**BASE, "completed_at": "not-a-timestamp"}))
@@ -79,3 +79,4 @@ class VerifiedJobCandidateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

@@ -7,7 +7,7 @@ from trucky_verified_identity_lookup_v2 import (
 JOB = {"company_id": 49041, "id": 123, "user_id": 456,
        "status": "completed", "completed_at": "2026-10-01T12:00:00Z",
        "stats_type": "real_miles", "distance_unit": "km",
-       "real_driven_distance_km": 120.5}
+       "driven_distance_km": 120.5}
 
 
 class Connection:
@@ -64,3 +64,4 @@ class VerifiedIdentityTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

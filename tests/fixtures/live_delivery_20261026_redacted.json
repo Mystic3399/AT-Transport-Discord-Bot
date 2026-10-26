@@ -1,7 +1,25 @@
 {
-  "evidence_source": "Production read-only signed-receipt/event query and legacy processor log, 2026-10-26",
-  "trucksbook": {"provider_job_id": "68248029", "accepted_miles": "365", "mileage_type": "real", "legacy_credit_recorded": true},
-  "trucky": {"provider_job_id": "28021177", "original_distance": "635", "original_unit": "km", "canonical_miles": "394.5707070707", "mileage_type": "real", "receipt_status": "verified", "signed_identity_verified": true, "mileage_awarded": false},
+  "evidence_source": "Production read-only signed-receipt/event query and legacy processor log, 2026-10-26; fresh authenticated company API record lookup confirmed driven_distance_km=586 and real_driven_distance_km=635.",
+  "trucksbook": {
+    "provider_job_id": "68248029",
+    "accepted_miles": "365",
+    "mileage_type": "real",
+    "legacy_credit_recorded": true
+  },
+  "trucky": {
+    "provider_job_id": "28021177",
+    "original_distance": "635",
+    "original_unit": "km",
+    "canonical_miles": "394.5707070707",
+    "mileage_type": "real",
+    "receipt_status": "verified",
+    "signed_identity_verified": true,
+    "mileage_awarded": false,
+    "driven_distance_km": "586",
+    "tracker_display_miles_owner_report": "364",
+    "corrected_canonical_miles": "364.1235186511",
+    "previously_selected_distance_field": "real_driven_distance_km"
+  },
   "same_discord_driver_verified": true,
   "shared_journey_id": null,
   "route_and_cargo_evidence": null,
