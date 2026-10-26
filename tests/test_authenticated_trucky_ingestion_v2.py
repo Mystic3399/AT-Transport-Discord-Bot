@@ -13,6 +13,7 @@ class Pool:
     def __init__(self,owners=None,receipt=True):
         self.fetch=AsyncMock(return_value=owners if owners is not None else [dict(discord_user_id=789,provider_account_id='456')])
         self.fetchval=AsyncMock(return_value=receipt)
+        self.execute=AsyncMock(return_value="UPDATE 1")
     def acquire(self):return Acquire(self)
 
 class AuthenticatedTruckyIngestionTests(unittest.IsolatedAsyncioTestCase):

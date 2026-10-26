@@ -285,8 +285,10 @@ async def ingest_authenticated_completed_jobs(pool, page=1):
             receipt_verified = await conn.fetchval("""
                 SELECT EXISTS(SELECT 1 FROM unified_trucky_webhook_receipts
                  WHERE candidate_job_id=$1 AND event_type='job_completed'
-                   AND review_status='verified')
-            """, str(job['id']))
+                   AND review_status IN ('needs_api_verification','verified')
+                   AND identity_verified_at IS NOT NULL
+                   AND identity_provider_account_id=$2 AND identity_discord_user_id=$3)
+            """, str(job['id']),str(job['user_id']),owners[0]['discord_user_id'] if len(owners)==1 else None)
         if len(owners) != 1:
             counts['ownership_pending'] += 1
             continue
@@ -308,5 +310,13 @@ async def ingest_authenticated_completed_jobs(pool, page=1):
         except ValueError:
             counts['conflicting_event_pending'] += 1
             continue
+        async with pool.acquire() as conn:
+            transitioned = await conn.execute("""
+                UPDATE unified_trucky_webhook_receipts SET review_status='verified'
+                WHERE candidate_job_id=$1 AND event_type='job_completed'
+                  AND review_status='needs_api_verification' AND identity_verified_at IS NOT NULL
+                  AND identity_provider_account_id=$2 AND identity_discord_user_id=$3
+            """, candidate['provider_job_id'],owner['provider_account_id'],owner['discord_user_id'])
+        counts['receipts_verified'] += int(transitioned.split()[-1])
         counts['recorded' if inserted else 'replayed'] += 1
     return {'status':'evidence_processed','counts':dict(counts),'mileage_awarded':False}

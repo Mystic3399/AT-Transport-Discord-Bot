@@ -125,7 +125,8 @@ class IntegratedReceiverTests(unittest.IsolatedAsyncioTestCase):
         callback = AsyncMock()
         with patch("trucky_membership_adapter.verify_member", new=AsyncMock(return_value="A&T Driver")) as roster, \
              patch("unified_driver_profiles.record_trucky_webhook_receipt", new=AsyncMock(return_value=7)), \
-             patch("unified_driver_profiles.auto_approve_trucky_if_steam_matches", new=AsyncMock(return_value=user_id)) as link:
+             patch("unified_driver_profiles.auto_approve_trucky_if_steam_matches", new=AsyncMock(return_value=user_id)) as link, \
+             patch("unified_driver_profiles.attest_trucky_receipt_identity", new=AsyncMock(return_value=True)) as attest:
             app = create_integrations_app(self.pool, on_trucky_linked=callback)
             client = TestClient(TestServer(app))
             await client.start_server()
@@ -208,3 +209,4 @@ class IntegratedReceiverTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

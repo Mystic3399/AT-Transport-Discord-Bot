@@ -201,6 +201,9 @@ async def receive_trucky_webhook(request):
                         payload_sha256=hashlib.sha256(raw).hexdigest(),
                         completed_at=evidence["completed_at"],
                     )
+                    await unified_driver_profiles.attest_trucky_receipt_identity(
+                        pool, receipt_id, evidence['provider_job_id'],hashlib.sha256(raw).hexdigest(),
+                        discord_user_id,evidence['trucky_account_id'])
                     link_status = "identity_linked"
                     callback = request.app.get(ON_TRUCKY_LINKED_KEY)
                     if callback is not None:
@@ -271,3 +274,4 @@ if __name__ == "__main__":
     if not os.getenv("TRUCKY_WEBHOOK_SIGNING_SECRET"):
         raise SystemExit("Trucky signing secret is required")
     web.run_app(create_staging_app(), host="127.0.0.1", port=8097)
+

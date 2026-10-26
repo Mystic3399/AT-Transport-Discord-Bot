@@ -156,6 +156,9 @@ CREATE TABLE IF NOT EXISTS unified_trucky_webhook_receipts (
  review_status TEXT NOT NULL DEFAULT 'needs_api_verification'
  CHECK(review_status IN ('needs_api_verification','verified','rejected'))
 );
+ALTER TABLE unified_trucky_webhook_receipts ADD COLUMN IF NOT EXISTS identity_discord_user_id BIGINT;
+ALTER TABLE unified_trucky_webhook_receipts ADD COLUMN IF NOT EXISTS identity_provider_account_id TEXT;
+ALTER TABLE unified_trucky_webhook_receipts ADD COLUMN IF NOT EXISTS identity_verified_at TIMESTAMPTZ;
 """
 async def install_schema(pool):
     async with pool.acquire() as conn:
@@ -1147,3 +1150,34 @@ async def record_normalized_provider_job(
             return True
 
 
+
+
+async def attest_trucky_receipt_identity(pool, receipt_id, job_id, payload_sha256, user_id, account_id):
+    """Retain a future receipt's signed identity result; never infer old payloads.
+
+    Called only after HMAC validation and auto_approve_trucky_if_steam_matches.
+    Recheck the current account/Steam proof before binding minimal receipt IDs.
+    No mileage, roles, achievements or historical receipt attribution changes.
+    """
+    if type(receipt_id) is not int or type(user_id) is not int:
+        return False
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE unified_trucky_webhook_receipts r
+            SET identity_discord_user_id=$4,identity_provider_account_id=$5,
+                identity_verified_at=COALESCE(identity_verified_at,NOW())
+            WHERE r.receipt_id=$1 AND r.candidate_job_id=$2 AND r.payload_sha256=$3
+              AND r.event_type='job_completed' AND r.review_status<>'rejected'
+              AND (r.identity_discord_user_id IS NULL OR r.identity_discord_user_id=$4)
+              AND (r.identity_provider_account_id IS NULL OR r.identity_provider_account_id=$5)
+              AND EXISTS(SELECT 1 FROM unified_provider_links l
+                JOIN unified_provider_claims c ON c.provider=l.provider
+                  AND c.provider_account_id=l.provider_account_id AND c.discord_user_id=l.discord_user_id
+                JOIN unified_steam_links s ON s.discord_user_id=l.discord_user_id
+                WHERE l.provider='trucky' AND l.discord_user_id=$4 AND l.provider_account_id=$5
+                  AND l.verified_at IS NOT NULL AND s.verified_at IS NOT NULL
+                  AND c.status='approved' AND c.ownership_confirmed=TRUE AND c.membership_confirmed=TRUE
+                  AND c.ownership_evidence_kind='trucky_signed_job_steam_match'
+                  AND (c.expires_at IS NULL OR c.expires_at>NOW()))
+        """,receipt_id,job_id,payload_sha256,user_id,account_id)
+    return result == 'UPDATE 1'

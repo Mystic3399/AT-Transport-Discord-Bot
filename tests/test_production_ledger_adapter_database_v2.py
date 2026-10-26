@@ -426,6 +426,39 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',user),1)
 
 
+    async def test_signed_identity_receipt_advances_only_after_exact_api_job(self):
+        from unittest.mock import AsyncMock
+        from unified_driver_profiles import record_trucky_webhook_receipt,attest_trucky_receipt_identity
+        import trucky_jobs_api_v2 as api
+        await self.install_ledger()
+        user, account, job_id = 991234567890127101,'8827101','8827102'
+        await self.seed_verified_driver_job(user,'trucky','8827100',account,'1')
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE unified_driver_profiles SET status='active' WHERE discord_user_id=$1",user)
+        receipt=await record_trucky_webhook_receipt(self.pool,'7'*64,'job_completed',job_id)
+        raw_id=receipt['receipt_id'] if isinstance(receipt,dict) else receipt
+        self.assertTrue(await attest_trucky_receipt_identity(self.pool,raw_id,job_id,'7'*64,user,account))
+        record=dict(id=int(job_id),user_id=int(account),company_id=49041,status='completed',
+                    completed_at='2026-10-19T12:00:00Z',stats_type='real_miles',distance_unit='km',real_driven_distance_km=176)
+        with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':[record]})):
+            result=await api.ingest_authenticated_completed_jobs(self.pool)
+            replay=await api.ingest_authenticated_completed_jobs(self.pool)
+        self.assertEqual(result['counts']['recorded'],1)
+        self.assertEqual(result['counts']['receipts_verified'],1)
+        self.assertEqual(replay['counts']['replayed'],1)
+        self.assertEqual(replay['counts']['receipts_verified'],0)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval('SELECT review_status FROM unified_trucky_webhook_receipts WHERE receipt_id=$1',raw_id),'verified')
+            self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',user),0)
+        # No retrospective identity inference for an old receipt, even though
+        # the API finds a job and its account has a verified link.
+        old_job={**record,'id':8827103}
+        await record_trucky_webhook_receipt(self.pool,'8'*64,'job_completed','8827103')
+        with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':[old_job]})):
+            pending=await api.ingest_authenticated_completed_jobs(self.pool)
+        self.assertEqual(pending['counts']['signed_receipt_pending'],1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
