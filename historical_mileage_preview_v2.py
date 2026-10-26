@@ -16,7 +16,7 @@ from pathlib import Path
 
 from unified_distance_units import KM_TO_MILES, UNIT_ALIASES
 from unified_job_matching_v2 import is_candidate_duplicate
-from world_of_trucks_policy_v2 import classify_event_mileage
+from world_of_trucks_policy_v2 import classify_event_mileage, classify_job_mileage
 
 
 async def read_historical_snapshot(pool):
@@ -52,7 +52,9 @@ def _normalize(row, links):
         raise ValueError('invalid_account_link')
     if row.get('discord_user_id', user)!=user:
         raise ValueError('conflicting_driver_identity')
-    classification = classify_event_mileage(provider,row.get('statistics'))
+    classification = (classify_job_mileage(provider,row.get('statistics'),game=row['game'],
+        max_speed=row.get('max_speed'),speed_unit=row.get('speed_unit'))
+        if 'game' in row else classify_event_mileage(provider,row.get('statistics')))
     if classification is None:
         raise ValueError('excluded_or_ambiguous_classification')
     unit = row.get('unit')
