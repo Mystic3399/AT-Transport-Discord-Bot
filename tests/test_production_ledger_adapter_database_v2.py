@@ -388,7 +388,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         user = 991234567890125501
         job = await self.seed_verified_driver_job(user, 'trucky', '998825501', '8825501', '40000.125')
         self.assertEqual((await self.award(job))['status'], 'credited')
-        config = {**self.config, 'AT_V2_PROGRESSION_ENABLED':'YES'}
+        config = {**self.config, 'AT_V2_PROGRESSION_ENABLED':'YES', 'AT_V2_COMPANY_MODS_ENABLED':'YES'}
         callback = AsyncMock(side_effect=RuntimeError('Discord temporarily unavailable'))
         with self.assertRaises(RuntimeError):
             await deliver_pending_progression(self.pool,callback,config=config,runtime=self.runtime)
@@ -398,12 +398,32 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         callback = AsyncMock(return_value={'status':'correct'})
         results = await asyncio.gather(*[deliver_pending_progression(self.pool,callback,config=config,runtime=self.runtime) for _ in range(2)])
         self.assertEqual(sum(r['delivered'] for r in results),1)
-        callback.assert_awaited_once_with(user,Decimal('40000.125'),False)
+        callback.assert_awaited_once_with(user,Decimal('40000.125'),True)
         async with self.pool.acquire() as conn:
             self.assertEqual(before,dict(await conn.fetchrow('SELECT * FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1',user)))
         callback.reset_mock()
         self.assertEqual((await deliver_pending_progression(self.pool,callback,config=config,runtime=self.runtime))['delivered'],0)
         callback.assert_not_awaited()
+
+
+    async def test_canonical_constraint_prevents_double_real_credit_in_either_order(self):
+        # Constraint-level disposable fixture: this does not invent provider
+        # ownership or bypass the separately tested application evidence gates.
+        await self.install_ledger()
+        for offset, order in enumerate((('trucky','trucksbook'),('trucksbook','trucky'))):
+            user=991234567890126101+offset
+            key='v2:'+str(offset+1)*64
+            async with self.pool.acquire() as conn:
+                await conn.execute('INSERT INTO unified_driver_profiles(discord_user_id) VALUES($1)',user)
+                async with conn.transaction():
+                    for provider in order:
+                        await conn.execute("""INSERT INTO unified_v2_production_credit_ledger
+                            (provider,provider_job_id,discord_user_id,provider_account_id,mileage_type,miles,
+                             canonical_credit_key,source_evidence_sha256,ownership_evidence_sha256)
+                            VALUES($1,$2,$3,'123','real',176,$4,$5,$5) ON CONFLICT DO NOTHING""",
+                            provider,str(user),user,key,'a'*64)
+                self.assertEqual(await conn.fetchval('SELECT SUM(miles) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',user),Decimal('176'))
+                self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',user),1)
 
 
 if __name__ == "__main__":

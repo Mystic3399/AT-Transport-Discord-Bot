@@ -52,7 +52,8 @@ class LegacyAccountDisplayTests(unittest.IsolatedAsyncioTestCase):
     async def test_profile_reads_id_and_preserves_legacy_totals_without_writes(self):
         tree = ast.parse(Path('bot.py').read_text())
         fn = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'fetch_driver_profile_stats')
-        namespace = {}
+        import os
+        namespace = {'os':os}
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'), namespace)
         row = dict(trucksbook_name='Legacy Driver',trucksbook_user_id='456',real_miles=40001,jobs_completed=9,
                    average_job_distance=12,longest_job_distance=22,permanent_achievements=[40000],

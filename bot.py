@@ -4916,6 +4916,8 @@ def build_driver_profile_embed(target_member, profile):
     embed.add_field(name="TrucksBook Driver", value=tb_label, inline=True)
     embed.add_field(name="Current Progression Rank", value=f"🏅 **{current_rank_name}**", inline=False)
     embed.add_field(name="Real Miles", value=f"🚛 **{real_miles:,}**", inline=True)
+    if profile.get("trucky_race_miles") is not None:
+        embed.add_field(name="Trucky Race Miles", value=profile["trucky_race_miles"], inline=True)
     embed.add_field(
         name="Verified Real Jobs",
         value=f"**{profile['jobs_completed']:,}**",
@@ -5998,10 +6000,17 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     )
     if row is None:
         return None
+    credited = None
+    if os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
+        from unified_production_ledger_adapter_v2 import read_credited_progression_totals
+        credited = await read_credited_progression_totals(connection, discord_user_id)
+        if credited is None:
+            raise RuntimeError('Verified mileage baseline unavailable; profile totals preserved')
     return {
         "trucksbook_name": str(row["trucksbook_name"]),
         "trucksbook_user_id": row["trucksbook_user_id"],
-        "real_miles": max(int(row["real_miles"] or 0), 0),
+        "real_miles": max(int(credited["real_miles"] if credited else row["real_miles"] or 0), 0),
+        "trucky_race_miles": str(credited["trucky_race_miles"]) if credited else None,
         "jobs_completed": max(int(row["jobs_completed"] or 0), 0),
         "average_job_distance": max(
             int(row["average_job_distance"] or 0), 0
@@ -6936,7 +6945,13 @@ async def sync_unified_driver_roles(guild, discord_user_id):
         real_miles = await connection.fetchval("""
             SELECT real_miles FROM driver_progress WHERE discord_user_id=$1
         """, discord_user_id)
-    miles = max(0, float(real_miles or 0))
+        if os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
+            from unified_production_ledger_adapter_v2 import read_credited_progression_totals
+            credited = await read_credited_progression_totals(connection, discord_user_id)
+            if credited is None:
+                return {'status':'baseline_unavailable','role_name':None}
+            real_miles = credited['real_miles']
+    miles = max(0, real_miles or 0)
     return await sync_member_progression_role(guild, discord_user_id, miles)
 
 

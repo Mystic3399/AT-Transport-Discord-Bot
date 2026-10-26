@@ -27,7 +27,7 @@ class ProgressionDeliveryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(ValueError,'checksum'):
                 read_approved_progression_preflight(config)
 
-    async def test_trucky_real_does_not_unlock_company_mods_or_remove_existing_awards(self):
+    async def test_disabled_company_mods_gate_preserves_existing_awards(self):
         source=ast.parse(Path('bot.py').read_text())
         fn=next(n for n in source.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='sync_member_permanent_roles')
         roles={40:object(),100:object()}

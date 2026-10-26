@@ -26,13 +26,13 @@ def test_invalid_totals_rejected(tb, tr):
         check(trucksbook_real_miles=tb, trucky_race_miles=tr)
 
 
-def test_only_trucksbook_real_counts():
+def test_legacy_trucksbook_real_input_remains_supported():
     # TrucksBook Race Miles are intentionally not accepted as input.
     assert check(trucksbook_real_miles=0, trucky_race_miles=0).eligible is False
 
 
-def test_only_trucky_race_counts():
-    # Trucky Real Miles must not be substituted for Trucky Race Miles.
+def test_real_and_race_thresholds_remain_separate():
+    # Sub-threshold Real Miles and Race Miles must not be added together.
     assert check(trucksbook_real_miles=39_999, trucky_race_miles=59_999).eligible is False
 
 
@@ -81,3 +81,36 @@ def test_fractional_thresholds_are_exact(tb, tr, eligible, provider):
     assert result.qualifying_provider == provider
     assert isinstance(result.trucksbook_real_miles, Decimal)
     assert isinstance(result.trucky_race_miles, Decimal)
+
+
+
+@pytest.mark.parametrize('combined,race,eligible',[
+    (Decimal('39999.9999999999'),0,False),
+    (Decimal('40000'),0,True),
+    (Decimal('40000.0000000001'),0,True),
+    (0,Decimal('59999.9999999999'),False),
+    (0,Decimal('60000'),True),
+])
+def test_canonical_combined_real_or_trucky_race(combined,race,eligible):
+    result=check(combined_real_miles=combined,trucky_race_miles=race)
+    assert result.eligible is eligible
+    assert result.combined_real_miles == combined
+
+
+def test_combined_real_total_already_includes_both_providers():
+    result=check(trucksbook_real_miles=25000,combined_real_miles=40000,trucky_race_miles=0)
+    assert result.eligible
+    assert result.combined_real_miles == 40000  # never add the legacy subtotal twice
+    assert result.qualifying_provider == 'combined_real'
+    with pytest.raises(ValueError):
+        check(trucksbook_real_miles=40000,combined_real_miles=39999)
+
+
+def test_real_mileage_bucket_accepts_both_providers_but_excludes_tb_race():
+    from unified_mileage_engine_control_v2 import policy_mileage_buckets
+    for provider in ('trucksbook','trucky'):
+        buckets=policy_mileage_buckets(provider,'real',Decimal('176'))
+        assert buckets['company_mods_combined_real_miles'] == Decimal('176')
+    assert policy_mileage_buckets('trucky','race',Decimal('176'))['company_mods_combined_real_miles'] == 0
+    with pytest.raises(ValueError):
+        policy_mileage_buckets('trucksbook','race',Decimal('176'))

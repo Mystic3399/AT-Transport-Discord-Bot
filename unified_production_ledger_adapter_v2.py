@@ -450,18 +450,13 @@ async def deliver_pending_progression(pool, apply_roles, *, config=None, runtime
                 """)
                 if row is None:
                     break
-                totals = await conn.fetchrow("""
-                    SELECT b.trucksbook_real_miles + COALESCE(t.combined_real_miles,0) AS real_miles,
-                           b.trucksbook_real_miles + COALESCE(t.trucksbook_real_miles,0) AS trucksbook_real_miles,
-                           COALESCE(t.trucky_race_miles,0) AS trucky_race_miles
-                    FROM unified_v2_production_mileage_baselines b
-                    LEFT JOIN unified_v2_production_mileage_totals t USING(discord_user_id)
-                    WHERE b.discord_user_id=$1
-                """, row['discord_user_id'])
+                totals = await read_credited_progression_totals(conn, row['discord_user_id'])
                 if totals is None:
                     raise RuntimeError('Historical progression baseline missing')
-                eligible = (totals['trucksbook_real_miles'] >= Decimal('40000')
-                            or totals['trucky_race_miles'] >= Decimal('60000'))
+                from company_mods_eligibility_v2 import evaluate_company_mods_eligibility
+                eligible = evaluate_company_mods_eligibility(
+                    combined_real_miles=totals['real_miles'],
+                    trucky_race_miles=totals['trucky_race_miles']).eligible
                 result = await apply_roles(row['discord_user_id'], totals['real_miles'],
                     eligible and env.get('AT_V2_COMPANY_MODS_ENABLED') == 'YES')
                 if not result or result.get('status') not in ('updated', 'correct'):
@@ -494,3 +489,19 @@ def read_approved_progression_preflight(environ=None):
         raise ValueError('Invalid preflight manifest')
     facts['preflight_sha256'] = expected
     return facts
+
+
+async def read_credited_progression_totals(conn, discord_user_id):
+    """Read the retained baseline plus once-credited canonical ledger totals.
+
+    Pending provider events and duplicate receipts are deliberately excluded.
+    Missing baseline is not zero: callers must refuse activation until migrated.
+    """
+    return await conn.fetchrow("""
+        SELECT b.trucksbook_real_miles + COALESCE(t.combined_real_miles,0) AS real_miles,
+               b.trucksbook_real_miles + COALESCE(t.trucksbook_real_miles,0) AS trucksbook_real_miles,
+               COALESCE(t.trucky_race_miles,0) AS trucky_race_miles
+        FROM unified_v2_production_mileage_baselines b
+        LEFT JOIN unified_v2_production_mileage_totals t USING(discord_user_id)
+        WHERE b.discord_user_id=$1
+    """, discord_user_id)

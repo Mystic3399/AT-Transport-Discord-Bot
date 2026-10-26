@@ -103,6 +103,7 @@ def policy_mileage_buckets(provider, mileage_type, miles):
     return {
         "combined_real_miles": amount if mileage_type == "real" else Decimal(0),
         "trucky_race_miles": amount if provider == "trucky" and mileage_type == "race" else Decimal(0),
+        "company_mods_combined_real_miles": amount if mileage_type == "real" else Decimal(0),
         "company_mods_trucksbook_real_miles": amount if provider == "trucksbook" and mileage_type == "real" else Decimal(0),
         "company_mods_trucky_race_miles": amount if provider == "trucky" and mileage_type == "race" else Decimal(0),
     }
@@ -126,4 +127,5 @@ def canonical_credit_key(provider, provider_job_id, *, shared_journey_id=None,
             raise ValueError("Verified shared-journey evidence digest required")
         canonical = "shared:" + shared_journey_id
     return "v2:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
