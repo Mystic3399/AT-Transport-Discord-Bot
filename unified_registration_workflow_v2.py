@@ -50,6 +50,12 @@ async def state(pool, user_id):
             links = await conn.fetch('SELECT * FROM unified_provider_links WHERE discord_user_id=$1', user_id)
             claims = await conn.fetch('SELECT * FROM unified_provider_claims WHERE discord_user_id=$1', user_id)
             steam_pending = await conn.fetchval('SELECT EXISTS(SELECT 1 FROM unified_steam_auth_states WHERE discord_user_id=$1 AND expires_at>NOW() AND consumed_at IS NULL)', user_id)
+            legacy = None
+            if not any(r['provider'] == 'trucksbook' for r in links):
+                if await conn.fetchval("SELECT to_regclass('public.driver_links')"):
+                    legacy = await conn.fetchrow(
+                        'SELECT trucksbook_user_id,trucksbook_name FROM driver_links WHERE discord_user_id=$1', user_id)
+
     accounts = {}
     for provider in ('trucksbook', 'trucky'):
         link = next((r for r in links if r['provider'] == provider), None)
@@ -58,6 +64,12 @@ async def state(pool, user_id):
         accounts[provider] = dict(status=account_status(link, claim, provider),
             account_id=source['provider_account_id'] if source else None,
             display_name=source['provider_display_name'] if source else None)
+    # Retain previously linked accounts even when older rows have no numeric ID.
+    # This is a read-only display fallback, never independent ownership evidence.
+    if legacy and not any(r['provider'] == 'trucksbook' for r in links):
+        accounts['trucksbook'] = dict(status='Linked',
+            account_id=str(legacy['trucksbook_user_id']) if legacy['trucksbook_user_id'] is not None else None,
+            display_name=legacy['trucksbook_name'])
     steam_verified = bool(steam and steam['verified_at'] is not None)
     ready = bool(steam_verified and profile and profile['status'] == 'active'
                  and session and session['status'] == 'approved'

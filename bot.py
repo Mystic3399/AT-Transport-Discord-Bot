@@ -4806,7 +4806,9 @@ def build_driver_profile_embed(target_member, profile):
     )
     embed.set_thumbnail(url=target_member.display_avatar.url)
     embed.add_field(name="Discord Driver", value=target_member.mention, inline=True)
-    embed.add_field(name="TrucksBook Driver", value=f"`{trucksbook_name}`", inline=True)
+    tb_id = profile.get("trucksbook_user_id")
+    tb_label = f"`{trucksbook_name}`" + (f"\nAccount ID: `{tb_id}`" if tb_id else "\nAccount ID not recorded")
+    embed.add_field(name="TrucksBook Driver", value=tb_label, inline=True)
     embed.add_field(name="Current Progression Rank", value=f"🏅 **{current_rank_name}**", inline=False)
     embed.add_field(name="Real Miles", value=f"🚛 **{real_miles:,}**", inline=True)
     embed.add_field(
@@ -5498,7 +5500,9 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
     draw.line((78, 455, 323, 455), fill=(91, 197, 214, 130), width=1)
     profile_text(draw, (200, 480), "TRUCKSBOOK DRIVER", load_profile_font(12, True), ice, anchor="ma", shadow=0)
     profile_text(draw, (200, 515), safe_trucksbook_name, trucksbook_font, muted, anchor="ma")
-    draw.line((78, 542, 323, 542), fill=(91, 197, 214, 90), width=1)
+    if profile.get("trucksbook_user_id"):
+        profile_text(draw, (200, 535), f"ID {profile['trucksbook_user_id']}", load_profile_font(11), muted, anchor="ma", shadow=0)
+    draw.line((78, 552, 323, 552), fill=(91, 197, 214, 90), width=1)
     identity_verified = load_profile_icon("verified", (45, 45))
     profile_composite(card, identity_verified, (92, 554))
     profile_text(draw, (222, 578), "VERIFIED A&T DRIVER", load_profile_font(14, True), gold, anchor="ma", shadow=0)
@@ -5836,6 +5840,10 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         """
         SELECT
             links.trucksbook_name,
+            COALESCE(links.trucksbook_user_id::text,
+                (SELECT provider_account_id FROM unified_provider_links
+                 WHERE discord_user_id=links.discord_user_id AND provider='trucksbook'))
+                AS trucksbook_user_id,
             COALESCE(progress.real_miles, 0)::BIGINT AS real_miles,
             COALESCE(jobs.jobs_completed, 0)::BIGINT AS jobs_completed,
             COALESCE(jobs.average_job_distance, 0)::BIGINT
@@ -5887,6 +5895,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         return None
     return {
         "trucksbook_name": str(row["trucksbook_name"]),
+        "trucksbook_user_id": row["trucksbook_user_id"],
         "real_miles": max(int(row["real_miles"] or 0), 0),
         "jobs_completed": max(int(row["jobs_completed"] or 0), 0),
         "average_job_distance": max(
@@ -7398,7 +7407,11 @@ async def myregistration(ctx):
     if registration.enabled():
         view = await registration.state(db_pool, ctx.author.id)
         lines = ["A&T Driver Registration", "Steam: " + view["steam_status"]]
-        lines += [f"{name.title()}: {account['status']}" for name, account in view["accounts"].items()]
+        for name, account in view["accounts"].items():
+            label = name.title() + ": " + account["status"]
+            if account.get("account_id"):
+                label += " (ID " + str(account["account_id"]) + ")"
+            lines.append(label)
         lines.append("Registration complete" if view["ready"] else "Use /register to continue")
         await respond("\n".join(lines))
         return
