@@ -87,3 +87,24 @@ class ProviderCoverageReviewTests(unittest.TestCase):
         self.assertTrue(all(r['category']=='ambiguous_overlap' for r in report['records']))
         self.assertEqual(report['confirmed_duplicates'],0)
         with self.assertRaises(ValueError):provider_coverage_review(records,[{'trucksbook_job_id':'999','trucky_job_id':'456'}])
+
+class PendingTrucksBookSourceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verified_source_retained_without_driver_or_unit_inference(self):
+        from pending_driver_history_v2 import retain_trucksbook_source_observation
+        from unittest.mock import patch
+        with patch('pending_driver_history_v2.record_pending_history',AsyncMock(return_value={'mileage_awarded':False})) as store:
+            await retain_trucksbook_source_observation(None,webhook_id=123,guild_id=9,expected_guild_id=9,
+                configured_webhook_id='123',parsed_job={'job_id':'456','statistics':'Real','accepted_distance':365},driver_label='redacted')
+        self.assertIsNone(store.call_args.args[3])
+        self.assertIsNone(store.call_args.args[4]['unit'])
+        self.assertEqual(store.call_args.kwargs['source_kind'],'verified_webhook_source')
+
+    async def test_wrong_source_or_guild_never_persisted(self):
+        from pending_driver_history_v2 import retain_trucksbook_source_observation
+        from unittest.mock import patch
+        with patch('pending_driver_history_v2.record_pending_history',AsyncMock()) as store:
+            for webhook,guild in [(124,9),(123,10)]:
+                result=await retain_trucksbook_source_observation(None,webhook_id=webhook,guild_id=guild,expected_guild_id=9,
+                    configured_webhook_id='123',parsed_job={'job_id':'456'},driver_label='redacted')
+                self.assertEqual(result['status'],'source_rejected')
+        store.assert_not_awaited()

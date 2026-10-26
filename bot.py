@@ -3211,6 +3211,21 @@ async def on_message(message):
                 "mileage_awarded=no registration_changed=no roles_changed=no"
             )
             return
+    if (not staging and message.webhook_id is not None
+            and os.getenv("AT_V2_PENDING_HISTORY_ENABLED") == "YES" and db_pool is not None):
+        from pending_driver_history_v2 import retain_trucksbook_source_observation
+        for history_embed in message.embeds:
+            try:
+                history_data = history_embed.to_dict()
+                await retain_trucksbook_source_observation(
+                    db_pool, webhook_id=message.webhook_id,
+                    guild_id=getattr(message_guild, "id", None), expected_guild_id=GUILD_ID,
+                    configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
+                    parsed_job=extract_trucksbook_job_from_embed(history_embed),
+                    driver_label=(history_data.get("author") or {}).get("name"))
+            except Exception:
+                # Evidence capture must not interrupt the established processor.
+                print("PENDING TRUCKSBOOK HISTORY retention_failed", flush=True)
     if message.webhook_id is None:
         await bot.process_commands(
             message

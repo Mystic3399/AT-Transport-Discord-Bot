@@ -13,13 +13,17 @@ CREATE TABLE IF NOT EXISTS pending_provider_job_history_v2 (
  provider_job_id TEXT NOT NULL CHECK(provider_job_id ~ '^[0-9]+$'),
  payload_sha256 TEXT NOT NULL CHECK(payload_sha256 ~ '^[0-9a-f]{64}$'),
  provider_account_id TEXT,
- source_kind TEXT NOT NULL CHECK(source_kind IN ('authenticated_api','owner_export')),
+ source_kind TEXT NOT NULL CHECK(source_kind IN ('authenticated_api','owner_export','verified_webhook_source')),
  evidence JSONB NOT NULL,
  first_received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  last_received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
  replay_count BIGINT NOT NULL DEFAULT 0,
  PRIMARY KEY(provider,provider_job_id,payload_sha256)
 );
+ALTER TABLE pending_provider_job_history_v2
+ DROP CONSTRAINT IF EXISTS pending_provider_job_history_v2_source_kind_check;
+ALTER TABLE pending_provider_job_history_v2 ADD CONSTRAINT pending_provider_job_history_v2_source_kind_check
+ CHECK(source_kind IN ('authenticated_api','owner_export','verified_webhook_source'));
 CREATE INDEX IF NOT EXISTS pending_history_account_idx
  ON pending_provider_job_history_v2(provider,provider_account_id);
 '''
@@ -32,7 +36,7 @@ async def install_schema(pool):
     async with pool.acquire() as conn:await conn.execute(SCHEMA)
 
 async def record_pending_history(pool,provider,job_id,account_id,evidence,*,source_kind):
-    if provider not in ('trucky','trucksbook') or source_kind not in ('authenticated_api','owner_export'):
+    if provider not in ('trucky','trucksbook') or source_kind not in ('authenticated_api','owner_export','verified_webhook_source'):
         raise ValueError('Unsupported history source')
     if not isinstance(job_id,str) or not job_id.isascii() or not job_id.isdecimal() or int(job_id)<=0:
         raise ValueError('Invalid job reference')
@@ -79,3 +83,27 @@ async def linked_history_summary(pool,discord_user_id):
             ''',discord_user_id)
     return {'jobs':int(row['jobs']),'replays':int(row['replays']),
             'status':'pending_mileage_checks','mileage_awarded':False}
+
+
+async def retain_trucksbook_source_observation(pool, *, webhook_id, guild_id,
+                                              expected_guild_id, configured_webhook_id,
+                                              parsed_job, driver_label):
+    """Keep genuine-source unlinked deliveries, without authenticating their owner.
+
+    The legacy embed parser does not establish units or account ownership. Keep
+    the observed number but leave its unit unknown; never turn it into a credit.
+    """
+    from trucksbook_webhook_auth_v2 import is_authorized_trucksbook_webhook
+    # Use the helper's strict configured-ID comparison in every environment.
+    # Its legacy production mode accepts arbitrary webhook sources and is not
+    # sufficient evidence for this new history store.
+    if guild_id!=expected_guild_id or not is_authorized_trucksbook_webhook(
+        webhook_id,isolated_staging=True,configured_id=configured_webhook_id):
+        return {'status':'source_rejected','mileage_awarded':False}
+    if not isinstance(parsed_job,dict) or not parsed_job.get('job_id'):
+        return {'status':'malformed','mileage_awarded':False}
+    evidence={'candidate_driver_label':driver_label if isinstance(driver_label,str) else None,
+              'stats_type':parsed_job.get('statistics'),
+              'distance':parsed_job.get('accepted_distance'),'unit':None}
+    return await record_pending_history(pool,'trucksbook',parsed_job['job_id'],None,evidence,
+                                        source_kind='verified_webhook_source')
