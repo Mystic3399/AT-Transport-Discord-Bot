@@ -2797,6 +2797,21 @@ async def apply_verified_v2_progression(discord_user_id, real_miles, company_mod
         company_mods_eligible=company_mods_eligible)
 
 
+@tasks.loop(seconds=60)
+async def ingest_trucky_company_jobs():
+    """Poll the existing authenticated API; never awards from tracker messages."""
+    if (db_pool is None or os.getenv('AT_V2_ISOLATED_STAGING') == 'YES'
+            or os.getenv('AT_V2_TRUCKY_API_INGEST_ENABLED') != 'YES'):
+        return
+    import trucky_jobs_api_v2
+    try:
+        result = await trucky_jobs_api_v2.ingest_authenticated_completed_jobs(db_pool)
+        import json
+        print('TRUCKY_API_INGEST ' + json.dumps(result,sort_keys=True),flush=True)
+    except Exception as error:
+        print(f'TRUCKY_API_INGEST RETRY PENDING: {type(error).__name__}',flush=True)
+
+
 @tasks.loop(seconds=30)
 async def deliver_v2_progression():
     """Recover pending V2 role deliveries only behind the full activation gate."""
@@ -2850,6 +2865,9 @@ async def on_ready():
 
     if db_pool is not None and unified_schema_ready:
         await start_public_integrations()
+        if (not isolated_staging and os.getenv('AT_V2_TRUCKY_API_INGEST_ENABLED') == 'YES'
+                and not ingest_trucky_company_jobs.is_running()):
+            ingest_trucky_company_jobs.start()
         if (not isolated_staging and os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES'
                 and not deliver_v2_progression.is_running()):
             deliver_v2_progression.start()

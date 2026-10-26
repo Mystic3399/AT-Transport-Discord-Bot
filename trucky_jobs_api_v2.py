@@ -242,3 +242,71 @@ def inspect_job_identity_fields(record):
             "steam_identity_unambiguous": len(steam_ids) == 1,
         },
     }
+
+
+
+async def ingest_authenticated_completed_jobs(pool, page=1):
+    """Connect the authenticated company API to normalized V2 event storage.
+
+    API account IDs must match an active Steam-backed, signed ownership claim
+    and an already verified signed receipt for that exact job. This entry point
+    persists evidence only; reconciliation/credit activation stays separate.
+    No display names, raw payloads or account identifiers are returned/logged.
+    """
+    from collections import Counter
+    import unified_driver_profiles as profiles
+    from trucky_verified_job_candidate_v2 import normalize_verified_trucky_job
+    payload = await fetch_trucky_jobs_page(page)
+    records = payload if isinstance(payload, list) else payload.get('data')
+    if not isinstance(records, list):
+        raise TruckyJobLookupUnavailable('Unsupported company jobs response')
+    counts = Counter()
+    for job in records:
+        counts['observed'] += 1
+        if not isinstance(job, dict) or type(job.get('user_id')) is not int or type(job.get('id')) is not int:
+            counts['invalid_record'] += 1
+            continue
+        async with pool.acquire() as conn:
+            owners = await conn.fetch("""
+                SELECT l.discord_user_id,l.provider_account_id
+                FROM unified_provider_links l
+                JOIN unified_provider_claims c
+                  ON c.provider=l.provider AND c.provider_account_id=l.provider_account_id
+                 AND c.discord_user_id=l.discord_user_id
+                JOIN unified_steam_links s ON s.discord_user_id=l.discord_user_id
+                JOIN unified_driver_profiles p ON p.discord_user_id=l.discord_user_id
+                WHERE l.provider='trucky' AND l.provider_account_id=$1
+                  AND l.verified_at IS NOT NULL AND s.verified_at IS NOT NULL
+                  AND p.status='active' AND c.status='approved'
+                  AND c.ownership_confirmed=TRUE AND c.membership_confirmed=TRUE
+                  AND c.ownership_evidence_kind='trucky_signed_job_steam_match'
+                  AND (c.expires_at IS NULL OR c.expires_at>NOW())
+            """, str(job['user_id']))
+            receipt_verified = await conn.fetchval("""
+                SELECT EXISTS(SELECT 1 FROM unified_trucky_webhook_receipts
+                 WHERE candidate_job_id=$1 AND event_type='job_completed'
+                   AND review_status='verified')
+            """, str(job['id']))
+        if len(owners) != 1:
+            counts['ownership_pending'] += 1
+            continue
+        if receipt_verified is not True:
+            counts['signed_receipt_pending'] += 1
+            continue
+        owner = owners[0]
+        candidate = normalize_verified_trucky_job(job,
+            verified_provider_account_id=owner['provider_account_id'],
+            discord_user_id=owner['discord_user_id'])
+        if candidate is None:
+            counts['classification_or_completion_pending'] += 1
+            continue
+        try:
+            inserted = await profiles.record_normalized_provider_job(pool,'trucky',candidate['provider_job_id'],
+                owner['discord_user_id'],candidate['kilometers'],'km',
+                provider_account_id=owner['provider_account_id'],mileage_type='real',
+                delivered_at=candidate['delivered_at'])
+        except ValueError:
+            counts['conflicting_event_pending'] += 1
+            continue
+        counts['recorded' if inserted else 'replayed'] += 1
+    return {'status':'evidence_processed','counts':dict(counts),'mileage_awarded':False}
