@@ -337,8 +337,8 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_reviewed_trucky_primary_cannot_recredit_historical_trucksbook(self):
         user = 991234567890123881
-        job = await self.seed_verified_driver_job(user, "trucky", "28021177-test", "991234567890123882", "364.1235186511")
-        historical_id = "68248029-test"
+        job = await self.seed_verified_driver_job(user, "trucky", "991234567890123883", "991234567890123882", "364.1235186511")
+        historical_id = "991234567890123884"
         async with self.pool.acquire() as conn:
             await conn.execute("INSERT INTO driver_progress(discord_user_id,trucksbook_name,real_miles) VALUES($1,'legacy-duplicate-test',88942)", user)
             await conn.execute("INSERT INTO processed_jobs(job_id,discord_user_id,accepted_distance,statistics) VALUES($1,$2,365,'real')", historical_id, user)
