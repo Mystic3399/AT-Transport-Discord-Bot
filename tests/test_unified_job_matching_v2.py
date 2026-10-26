@@ -59,5 +59,18 @@ class MatchingTests(unittest.TestCase):
                                                {**other,'metadata':{**other['metadata'],'game':'ats'}}))
 
 
+    def test_observed_place_labels_preserved_as_candidates_not_identity(self):
+        from unified_job_matching_v2 import _normalized_metadata
+        for game,first,last in [('ets2','Newcastle upon Tyne','Newcastle'),('ets2','Зеница (Zenica)','Зеница'),
+                                ('ets2','Αθήνα (Athens)','Αθήνα'),('ats','Newyork','New York'),('ats','Toledooh','Toledo')]:
+            with self.subTest(game=game,place=first):
+                a={**BASE['metadata'],'game':game,'destination':first}
+                b={**a,'destination':last}
+                self.assertEqual(_normalized_metadata(a),_normalized_metadata(b))
+        for first,last in [('Tripoli','Tarabulus'),('Kedmonton','Edmonton')]:
+            a={**BASE['metadata'],'destination':first};b={**a,'destination':last}
+            self.assertNotEqual(_normalized_metadata(a),_normalized_metadata(b))
+
+
 if __name__ == "__main__":
     unittest.main()

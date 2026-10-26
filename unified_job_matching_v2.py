@@ -19,12 +19,27 @@ def _normalized_metadata(metadata):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("Missing trusted job metadata: " + key)
         normalized[key] = " ".join(value.casefold().split())
-    # Observed ETS2 provider localisation: Trucky labels city id 'prague'
-    # as Praha while TrucksBook exports Prague. This only broadens review
-    # candidates; it does not create shared journey or ownership evidence.
-    if normalized['game']=='ets2':
-        for key in ('origin','destination'):
-            if normalized[key]=='praha':normalized[key]='prague'
+    # Observed provider labels only, scoped by game. This broadens review
+    # candidates without creating account ownership or shared journey proof.
+    # Ambiguous/mod-specific aliases (e.g. Tripoli/Tarabulus, Kedmonton) are
+    # deliberately left for review with region/provider city-ID evidence.
+    aliases = {
+        'ets2': {
+            'praha':'prague',
+            'newcastle upon tyne':'newcastle',
+            'newcastle-upon-tyne':'newcastle',
+            'зеница (zenica)':'зеница', 'бар (bar)':'бар',
+            'ფოთი (poti)':'ფოთი', 'λεμεσός (lemesos)':'λεμεσός',
+            'χανιά (chania)':'χανιά', 'λάρνακα (larnaca)':'λάρνακα',
+            'тузла (tuzla)':'тузла', 'нови сад (novi sad)':'нови сад',
+            'ниш (niš)':'ниш', 'αθήνα (athens)':'αθήνα',
+            'ηράκλειο (heraklion)':'ηράκλειο', 'со́фия (sofia)':'со́фия',
+            'плевен (pleven)':'плевен', 'луга (luga)':'луга',
+        },
+        'ats': {'newyork':'new york', 'toledooh':'toledo'},
+    }.get(normalized['game'], {})
+    for key in ('origin','destination'):
+        normalized[key] = aliases.get(normalized[key], normalized[key])
     return normalized
 
 
