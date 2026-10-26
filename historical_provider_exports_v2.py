@@ -203,3 +203,36 @@ def prepare_import_review(trucksbook_rows, trucky_rows, processed_trucksbook_ids
             'counts':dict(Counter(r['import_status'] for r in records)),
             'records_count':len(records),'ready_to_award':0,'mileage_awarded':False,
             'production_write_authorized':False}
+
+
+def provider_coverage_review(records, candidate_pairs):
+    """Separate unmatched jobs from possible overlaps; never discard singles.
+
+    Review leads do not establish driver identity, feed completeness or a
+    canonical duplicate. Single-provider jobs remain valid import candidates,
+    subject to ownership, historical coverage and normal award gates.
+    """
+    from collections import defaultdict
+    from unified_distance_units import KM_TO_MILES
+    refs={(r['provider'],r['provider_job_id']):r for r in records}
+    if len(refs)!=len(records):raise ValueError('Conflicting or repeated provider reference')
+    neighbours=defaultdict(set)
+    for pair in candidate_pairs:
+        first=('trucksbook',pair['trucksbook_job_id']);second=('trucky',pair['trucky_job_id'])
+        if first not in refs or second not in refs:raise ValueError('Review references an absent job')
+        neighbours[first].add(second);neighbours[second].add(first)
+    rows=[];counts=defaultdict(Counter)
+    for ref,record in refs.items():
+        adjacent=neighbours[ref]
+        ambiguous=len(adjacent)>1 or any(len(neighbours[other])>1 for other in adjacent)
+        category='ambiguous_overlap' if ambiguous else 'possible_overlap' if adjacent else 'single_provider_candidate'
+        kind=record.get('speed_check_classification') if ref[0]=='trucksbook' else record.get('company_policy_classification')
+        amount=Decimal(record['distance'])*(KM_TO_MILES if record['unit']=='km' else Decimal(1))
+        rows.append({'provider':ref[0],'provider_job_id':ref[1],'driver_label':record['candidate_driver_label'],
+                     'category':category,'counterpart_candidates':len(adjacent),
+                     'policy_classification':kind or 'pending','miles':str(amount),
+                     'existing_import_status':record['import_status'],'approved_addition':'0'})
+        counts[ref[0]][category]+=1
+    return {'records':rows,'counts':{provider:dict(count) for provider,count in counts.items()},
+            'counterpart_required_for_eligibility':False,'absence_proves_new_credit':False,
+            'confirmed_duplicates':0,'mileage_awarded':False}

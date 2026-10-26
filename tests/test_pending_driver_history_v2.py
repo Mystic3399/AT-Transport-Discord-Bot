@@ -64,3 +64,26 @@ class ImportPreparationTests(unittest.TestCase):
         self.assertFalse(batch['review_leads'][0]['identity_verified'])
         self.assertIsNone(batch['review_leads'][0]['shared_journey_id'])
         self.assertEqual(batch['ready_to_award'],0)
+
+class ProviderCoverageReviewTests(unittest.TestCase):
+    def records(self):
+        from historical_provider_exports_v2 import prepare_import_review
+        from tests.test_historical_provider_exports_v2 import TR
+        return prepare_import_review([TB],[TR],set())['records']
+
+    def test_independent_provider_jobs_retained_instead_of_rejected_for_missing_match(self):
+        from historical_provider_exports_v2 import provider_coverage_review
+        report=provider_coverage_review(self.records(),[])
+        self.assertEqual(report['counts'],{'trucksbook':{'single_provider_candidate':1},'trucky':{'single_provider_candidate':1}})
+        self.assertFalse(report['counterpart_required_for_eligibility'])
+        self.assertFalse(report['absence_proves_new_credit'])
+        self.assertTrue(all(r['approved_addition']=='0' for r in report['records']))
+
+    def test_shared_leads_are_review_only_and_many_to_one_is_ambiguous(self):
+        from historical_provider_exports_v2 import provider_coverage_review
+        records=self.records();records.append({**records[0],'provider_job_id':'124'})
+        pairs=[{'trucksbook_job_id':id,'trucky_job_id':'456'} for id in ('123','124')]
+        report=provider_coverage_review(records,pairs)
+        self.assertTrue(all(r['category']=='ambiguous_overlap' for r in report['records']))
+        self.assertEqual(report['confirmed_duplicates'],0)
+        with self.assertRaises(ValueError):provider_coverage_review(records,[{'trucksbook_job_id':'999','trucky_job_id':'456'}])
