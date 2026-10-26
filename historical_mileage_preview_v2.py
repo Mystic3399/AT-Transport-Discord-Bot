@@ -102,9 +102,10 @@ def build_historical_preview(snapshot, records):
     rows=[]; normalized=[]
     for group in groups.values():
         row=group[0]
-        result={'row_sha256':_digest(row),'replays':len(group)-1,'decision':'pending','mileage_awarded':False}
+        digests={_digest(r) for r in group}
+        result={'row_sha256':_digest(row),'replays':len(group)-len(digests),'decision':'pending','mileage_awarded':False}
         rows.append(result)
-        if len({_digest(r) for r in group})!=1:
+        if len(digests)!=1:
             result['reason']='conflicting_provider_records';continue
         try:
             job=_normalize(row,links) if isinstance(row,dict) else None
@@ -119,6 +120,7 @@ def build_historical_preview(snapshot, records):
             if prior['discord_user_id']==job['discord_user_id']:
                 result['decision']='already_recorded'
                 result['stored_accepted_miles']=str(prior['accepted_distance'])
+                result['distance_differs_from_stored']=job['miles']!=Decimal(str(prior['accepted_distance']))
             # Historical values win; changed export distance never rewrites them.
         elif not job['link_verified']:
             result['reason']='account_ownership_pending'

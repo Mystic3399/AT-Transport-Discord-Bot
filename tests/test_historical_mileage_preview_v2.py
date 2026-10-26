@@ -46,6 +46,7 @@ class HistoricalPreviewTests(unittest.TestCase):
         self.assertEqual((repeated['unique_records'],repeated['replays']),(1,1))
         conflicting=build_historical_preview(snapshot(),[row(),row(distance='635')])
         self.assertEqual(conflicting['records'][0]['reason'],'conflicting_provider_records')
+        self.assertEqual(conflicting['replays'],0)
 
     def test_claims_and_names_are_not_verified_ownership(self):
         data=snapshot();data['links'][1]['verified']=False
@@ -73,6 +74,12 @@ class HistoricalPreviewTests(unittest.TestCase):
         data=snapshot();data['links'][1]['discord_user_id']=456
         report=build_historical_preview(data,[row('trucksbook','68248029'),row()])
         self.assertEqual(report['candidate_pairs'],[])
+
+    def test_changed_export_distance_cannot_replace_historical_credit(self):
+        report=build_historical_preview(snapshot(),[row('trucksbook','68248029',distance='364')])
+        self.assertEqual(report['records'][0]['stored_accepted_miles'],'365')
+        self.assertTrue(report['records'][0]['distance_differs_from_stored'])
+        self.assertEqual(report['drivers'][0]['proposed_real_total'],'88942')
 
     def test_historical_driver_conflict_preserves_totals(self):
         data=snapshot();data['processed_jobs'][0]['discord_user_id']=456
