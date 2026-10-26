@@ -112,3 +112,43 @@ def export_manifest(path, records):
             'company_policy_classifications':dict(Counter(r['company_policy_classification'] or 'pending' for r in records)),
             'evidence_issues':dict(Counter(i for r in records for i in r['evidence_issues'])),
             'mileage_awarded':False}
+
+
+def trucksbook_speed_check(rows):
+    """Truck-mode export arithmetic only; never authorize an import delta.
+
+    Existing ETS2 limit: 100 km/h / displayed 62 mph. ATS uses the owner's
+    0–81 mph Real, 82–112 mph Race policy. Values in display gaps stay pending.
+    Names group this report only; registration ownership is checked separately.
+    """
+    from collections import defaultdict
+    totals=defaultdict(lambda:{'jobs':0,'ets2_real':Decimal(0),'ats_real':Decimal(0),
+                              'race_excluded':Decimal(0),'pending':Decimal(0)})
+    for row in rows:
+        normalized=trucksbook_export_row(row)
+        distance,unit=_quantity(row['Accepted distance'],('mi','km'))
+        from unified_distance_units import KM_TO_MILES
+        miles=distance*(KM_TO_MILES if unit=='km' else Decimal(1))
+        speed,speed_unit=_quantity(row['Maximal reached speed'],('mph','km/h'))
+        driver=totals[row['Name']];driver['jobs']+=1
+        if row['Game']=='ATS':
+            mph=speed if speed_unit=='mph' else speed/Decimal('1.609344')
+            bucket='ats_real' if mph<=81 else 'race_excluded' if 82<=mph<=112 else 'pending'
+        else:
+            limit=Decimal(62) if speed_unit=='mph' else Decimal(100)
+            race_min=Decimal(63) if speed_unit=='mph' else Decimal(101)
+            race_max=Decimal(112) if speed_unit=='mph' else Decimal(180)
+            bucket='ets2_real' if speed<=limit else 'race_excluded' if race_min<=speed<=race_max else 'pending'
+        driver[bucket]+=miles
+    output=[]
+    for name,values in sorted(totals.items(),key=lambda item:item[0].casefold()):
+        output.append({'candidate_driver_label':name,'jobs':values['jobs'],
+                       **{key:str(value) for key,value in values.items() if key!='jobs'},
+                       'combined_real':str(values['ets2_real']+values['ats_real']),
+                       'approved_addition':'0'})
+    return {'basis':'export_speed_check_not_provider_authentication','drivers':output,
+            'combined_real':str(sum((Decimal(r['combined_real']) for r in output),Decimal(0))),
+            'ats_real':str(sum((Decimal(r['ats_real']) for r in output),Decimal(0))),
+            'race_excluded':str(sum((Decimal(r['race_excluded']) for r in output),Decimal(0))),
+            'pending':str(sum((Decimal(r['pending']) for r in output),Decimal(0))),
+            'mileage_awarded':False,'safe_to_add_to_existing_totals':False}

@@ -55,3 +55,13 @@ class AuthenticatedTruckyIngestionTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':[JOB]})),patch('unified_driver_profiles.record_normalized_provider_job',AsyncMock(side_effect=ValueError('Conflicting replay'))):
             result=await api.ingest_authenticated_completed_jobs(Pool())
         self.assertEqual(result['counts']['conflicting_event_pending'],1)
+
+    async def test_unregistered_completed_job_is_retained_only_with_history_flag(self):
+        import os
+        with patch.dict(os.environ,{'AT_V2_PENDING_HISTORY_ENABLED':'YES'}),patch('pending_driver_history_v2.record_pending_history',AsyncMock()) as retain:
+            result,record=await self.run_ingest(Pool(owners=[]))
+        retain.assert_awaited_once()
+        self.assertEqual(retain.call_args.args[1:4],('trucky','123','456'))
+        self.assertEqual(retain.call_args.kwargs,{'source_kind':'authenticated_api'})
+        self.assertEqual(result['counts']['ownership_pending'],1)
+        record.assert_not_awaited()

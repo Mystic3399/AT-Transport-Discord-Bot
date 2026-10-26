@@ -252,6 +252,26 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_decisions WHERE provider_job_id=$1 AND decision='pending_reconciliation'", job["provider_job_id"]), 1)
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1", job["discord_user_id"]), 0)
 
+    async def test_pre_registration_history_survives_linking_replays_and_conflicts(self):
+        from pending_driver_history_v2 import install_schema, record_pending_history, linked_history_summary
+        await install_schema(self.pool)
+        user=991234567890124200
+        evidence={'status':'completed','driven_distance_km':586}
+        async def retain():
+            return await record_pending_history(self.pool,'trucky','991234567890124201','991234567890124202',evidence,source_kind='authenticated_api')
+        await asyncio.gather(retain(),retain())
+        self.assertEqual((await linked_history_summary(self.pool,user))['jobs'],0)
+        await self.seed_verified_driver_job(user,'trucky','991234567890124203','991234567890124202','1')
+        summary=await linked_history_summary(self.pool,user)
+        self.assertEqual(summary['jobs'],1)
+        self.assertEqual(summary['replays'],1)
+        await record_pending_history(self.pool,'trucky','991234567890124201','991234567890124202',{'status':'completed','driven_distance_km':635},source_kind='authenticated_api')
+        self.assertEqual((await linked_history_summary(self.pool,user))['jobs'],1)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval("SELECT count(*) FROM pending_provider_job_history_v2 WHERE provider_job_id='991234567890124201'"),2)
+            self.assertIsNone(await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1',user))
+        self.assertFalse(summary['mileage_awarded'])
+
     async def test_historical_preview_reads_consistent_database_without_writes(self):
         from historical_mileage_preview_v2 import read_historical_snapshot, build_historical_preview
         user = 991234567890124100

@@ -2856,6 +2856,9 @@ async def on_ready():
             await setup_database()
             await trucky_linking.install_schema(db_pool)
             await unified_driver_profiles.install_schema(db_pool)
+            if os.getenv("AT_V2_PENDING_HISTORY_ENABLED") == "YES":
+                import pending_driver_history_v2
+                await pending_driver_history_v2.install_schema(db_pool)
             if isolated_staging:
                 import unified_staging_shadow_receipts_v2
                 await unified_staging_shadow_receipts_v2.install_schema(db_pool)
@@ -6114,10 +6117,23 @@ async def driver_profile(
         )
         return
 
+    history_caption = None
+    if os.getenv("AT_V2_PENDING_HISTORY_ENABLED") == "YES":
+        try:
+            from pending_driver_history_v2 import linked_history_summary
+            history = await linked_history_summary(db_pool, target_member.id)
+            if history['jobs']:
+                history_caption = f"Saved provider history: {history['jobs']} job(s) awaiting mileage checks; not added to totals."
+        except Exception:
+            print("PENDING HISTORY PROFILE READ unavailable", flush=True)
+
     fallback_embed = build_driver_profile_embed(
         target_member,
         profile,
     )
+
+    if history_caption:
+        fallback_embed.add_field(name="Saved history", value=history_caption, inline=False)
 
     try:
         avatar_bytes = await target_member.display_avatar.with_size(256).read()
@@ -6131,7 +6147,8 @@ async def driver_profile(
             file=discord.File(
                 profile_png,
                 filename="at-driver-profile.png",
-            )
+            ),
+            content=history_caption,
         )
     except Exception as error:
         print(f"GRAPHICAL PROFILE FALLBACK: {error}")

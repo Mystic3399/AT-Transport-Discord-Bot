@@ -267,6 +267,17 @@ async def ingest_authenticated_completed_jobs(pool, page=1):
         if not isinstance(job, dict) or type(job.get('user_id')) is not int or type(job.get('id')) is not int:
             counts['invalid_record'] += 1
             continue
+        if os.getenv('AT_V2_PENDING_HISTORY_ENABLED') == 'YES':
+            # Retain authenticated completed jobs even if their driver has not
+            # registered. No Discord identity or mileage award is inferred.
+            if job.get('company_id') == COMPANY_ID and job.get('status') == 'completed':
+                from pending_driver_history_v2 import record_pending_history
+                retained = {key:job[key] for key in (
+                    'game_id','status','stats_type','driven_distance_km',
+                    'distance_unit','max_speed','completed_at') if key in job}
+                await record_pending_history(pool,'trucky',str(job['id']),str(job['user_id']),
+                                             retained,source_kind='authenticated_api')
+                counts['history_retained'] += 1
         async with pool.acquire() as conn:
             owners = await conn.fetch("""
                 SELECT l.discord_user_id,l.provider_account_id
