@@ -79,3 +79,16 @@ class ExactJobLookupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class GameProfileRedactionTests(unittest.TestCase):
+    def test_top_level_game_profile_fields_never_enter_diagnostic_values(self):
+        report=safe_job_record_report(dict(status='completed',driven_distance_km=586,
+            in_game_profile_id='private-profile-reference',in_game_profile_name='private-player-name',
+            user_id=12345,driver={'id':12345}))
+        rendered=str(report['safe_delivery_fields'])
+        self.assertNotIn('private-profile-reference',rendered)
+        self.assertNotIn('private-player-name',rendered)
+        self.assertNotIn('12345',rendered)
+        self.assertEqual(report['safe_delivery_fields']['driven_distance_km'],586)

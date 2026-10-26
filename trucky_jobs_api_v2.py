@@ -179,7 +179,8 @@ def safe_job_record_report(record):
                     normalized in {"real", "race", "type", "mileagetype", "jobtype", "isreal", "israce"}
                     or normalized.startswith(("realmiles", "racemiles"))
                 )
-                if (not identity_context
+                identity_field = any(token in normalized for token in ("driver", "user", "account", "steam", "profile"))
+                if (not identity_context and not identity_field
                         and (any(term in normalized for term in safe_terms) or classification_field)
                         and type(item) in (str, int, float, bool)):
                     facts[dotted] = item
