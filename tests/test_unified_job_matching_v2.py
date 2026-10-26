@@ -49,5 +49,15 @@ class MatchingTests(unittest.TestCase):
                 "metadata": {"game": "ets2"}})
 
 
+    def test_observed_ets2_prague_localisation_is_candidate_only(self):
+        first={**BASE,'metadata':{**BASE['metadata'],'origin':'Mannheim','destination':'Praha','cargo':'Medical Equipment'}}
+        other={**first,'provider':'trucksbook','metadata':{**first['metadata'],'destination':'Prague'}}
+        self.assertTrue(is_candidate_duplicate(first,other))
+        from unified_reconciliation_policy_v2 import classify_delivery
+        self.assertEqual(classify_delivery(first,[other],provider_feed_complete=False),'pending')
+        self.assertFalse(is_candidate_duplicate({**first,'metadata':{**first['metadata'],'game':'ats'}},
+                                               {**other,'metadata':{**other['metadata'],'game':'ats'}}))
+
+
 if __name__ == "__main__":
     unittest.main()

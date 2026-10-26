@@ -19,6 +19,12 @@ def _normalized_metadata(metadata):
         if not isinstance(value, str) or not value.strip():
             raise ValueError("Missing trusted job metadata: " + key)
         normalized[key] = " ".join(value.casefold().split())
+    # Observed ETS2 provider localisation: Trucky labels city id 'prague'
+    # as Praha while TrucksBook exports Prague. This only broadens review
+    # candidates; it does not create shared journey or ownership evidence.
+    if normalized['game']=='ets2':
+        for key in ('origin','destination'):
+            if normalized[key]=='praha':normalized[key]='prague'
     return normalized
 
 
@@ -51,3 +57,4 @@ def is_candidate_duplicate(first, second, *, max_minutes=30, max_miles_delta="5.
     if not a.is_finite() or not b.is_finite() or a < 0 or b < 0:
         raise ValueError("Invalid mileage")
     return abs(a - b) <= Decimal(str(max_miles_delta))
+
