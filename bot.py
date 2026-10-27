@@ -21,6 +21,11 @@ import trucky_membership_adapter
 import unified_driver_profiles
 import steam_openid_v2
 import trucky_staging_receiver_v2
+from mileage_audit_confirmation_v2 import (
+    SCHEMA as MILEAGE_AUDIT_PREVIEW_SCHEMA, AuditPreviewError,
+    create_mileage_audit_preview, validate_mileage_audit_preview,
+    consume_mileage_audit_preview, audit_source_allowed, explicit_audit_miles,
+)
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
@@ -848,12 +853,16 @@ async def setup_database():
         )
 
         # Additive migration: keep existing repair candidates and driver totals.
+        await connection.execute(MILEAGE_AUDIT_PREVIEW_SCHEMA)
         await connection.execute(
             """
             ALTER TABLE mileage_repair_candidates
                 ADD COLUMN IF NOT EXISTS repair_kind TEXT NOT NULL
                     DEFAULT 'distance_correction',
                 ADD COLUMN IF NOT EXISTS source_delivered_at TIMESTAMPTZ;
+            ALTER TABLE mileage_repair_candidates
+                ADD COLUMN IF NOT EXISTS source_webhook_id BIGINT,
+                ADD COLUMN IF NOT EXISTS source_provider_account_id TEXT;
             """
         )
 
@@ -3862,10 +3871,22 @@ async def send_mileage_reconciliation(ctx, source_jobs, metadata):
 @bot.command(name="mileageaudit")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
-async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
+@commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
+async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"):
     """Dry-run audit of TrucksBook embeds across readable guild channels."""
     if ctx.guild.id != GUILD_ID:
         return False
+    if str(message_limit).upper()=='CONFIRM':
+        await ctx.invoke(mileage_apply,confirmation='CONFIRM')
+        return
+    target_driver_id=None
+    driver_match=re.fullmatch(r'<@!?([0-9]{1,20})>',str(message_limit))
+    if driver_match and int(driver_match[1])>0:
+        target_driver_id=int(driver_match[1]);message_limit=0
+    try:message_limit=int(message_limit)
+    except (ValueError,TypeError):
+        await ctx.reply('Use `!mileageaudit` or `!mileageaudit @Driver` to preview, then `!mileageaudit CONFIRM` to approve the reviewed additions.',mention_author=False)
+        return
     if db_pool is None:
         await ctx.reply("❌ The database is unavailable.", mention_author=False)
         return
@@ -3901,6 +3922,7 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
     unresolved_links = []
     seen_jobs = set()
     source_jobs = []
+    reviewed_job_ids = set()
     channels_scanned = 0
     channels_skipped = 0
     history_limit = message_limit or None
@@ -3924,11 +3946,13 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
                 limit=history_limit,
                 oldest_first=True,
             ):
-                if historical_message.webhook_id is None:
+                if not audit_source_allowed(historical_message.webhook_id):
                     continue
                 for embed in historical_message.embeds:
                     parsed = extract_trucksbook_job_from_embed(embed)
                     if parsed is None:
+                        continue
+                    if explicit_audit_miles(embed)!=parsed['accepted_distance']:
                         continue
                     scanned += 1
                     if (
@@ -4005,6 +4029,8 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
                         credited = int(recorded["accepted_distance"])
                     if actual <= credited:
                         continue
+                    if target_driver_id is not None and int(user_id)!=target_driver_id:
+                        continue
 
                     async with db_pool.acquire() as connection:
                         await connection.execute(
@@ -4020,9 +4046,11 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
                                 source_message_id,
                                 audited_at,
                                 repair_kind,
-                                source_delivered_at
+                                source_delivered_at,
+                                source_webhook_id,
+                                source_provider_account_id
                             )
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10, $11, $12)
                             ON CONFLICT (job_id) DO UPDATE SET
                                 discord_user_id = EXCLUDED.discord_user_id,
                                 trucksbook_name = EXCLUDED.trucksbook_name,
@@ -4033,7 +4061,9 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
                                 source_message_id = EXCLUDED.source_message_id,
                                 audited_at = NOW(),
                                 repair_kind = EXCLUDED.repair_kind,
-                                source_delivered_at = EXCLUDED.source_delivered_at
+                                source_delivered_at = EXCLUDED.source_delivered_at,
+                                source_webhook_id = EXCLUDED.source_webhook_id,
+                                source_provider_account_id = EXCLUDED.source_provider_account_id
                             WHERE mileage_repair_candidates.applied_at IS NULL;
                             """,
                             parsed["job_id"],
@@ -4046,8 +4076,11 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
                             historical_message.id,
                             repair_kind,
                             historical_message.created_at,
+                            historical_message.webhook_id,
+                            str(trucksbook_author_user_id(embed.to_dict())) if trucksbook_author_user_id(embed.to_dict()) is not None else None,
                         )
                         staged += 1
+                        reviewed_job_ids.add(parsed['job_id'])
                         if repair_kind == "missing_wotr":
                             missing_event_jobs_staged += 1
                         elif repair_kind == "missing_real":
@@ -4075,6 +4108,7 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
             """
         )
 
+    preview=await create_mileage_audit_preview(db_pool,ctx.guild.id,ctx.channel.id,ctx.author.id,reviewed_job_ids)
     await ctx.send(
         "✅ **Dry-run audit complete — no mileage changed.**\n"
         f"Mileage channels scanned: `{channels_scanned:,}`\n"
@@ -4090,9 +4124,15 @@ async def mileage_audit(ctx, message_limit: int = 0, scope: str = "configured"):
         f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
         f"`{int(totals['drivers']):,}` drivers\n"
         f"Missing mileage pending: `{int(totals['missing_miles']):,}`\n\n"
-        "Review the Railway log/database backup, then explicitly run "
-        "`!mileageapply CONFIRM` to apply these deltas."
+        f"This preview approves only `{preview['jobs']:,}` reviewed jobs / `{preview['addition']:,}` miles.\n"
+        f"Held for source/account evidence: `{preview['held_jobs']:,}` jobs.\n"
+        "Unexplained balances are already in existing totals and are not added again.\n"
+        "Review the driver breakdown below, then run `!mileageaudit CONFIRM` within 20 minutes in this channel."
     )
+    for offset in range(0,len(preview['drivers']),15):
+        lines=[f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + **{d['addition']:,}** = {d['proposed_real_miles']:,} Real miles ({d['jobs']} jobs)"
+               for d in preview['drivers'][offset:offset+15]]
+        await ctx.send('**Reviewed additions by driver**\n'+'\n'.join(lines),allowed_mentions=discord.AllowedMentions.none())
 
     await send_mileage_reconciliation(ctx, source_jobs, {
         "scope": scope, "message_limit_per_channel": message_limit,
@@ -4220,6 +4260,7 @@ async def repair_achievements(ctx):
 @bot.command(name="mileageapply")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
+@commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
 async def mileage_apply(ctx, confirmation: str = ""):
     """Apply staged positive deltas once and announce earned milestones."""
     if ctx.guild.id != GUILD_ID:
@@ -4250,6 +4291,16 @@ async def mileage_apply(ctx, confirmation: str = ""):
                 FOR UPDATE;
                 """
             )
+            try:
+                approval=await validate_mileage_audit_preview(connection,ctx.guild.id,ctx.channel.id,ctx.author.id,candidates)
+            except AuditPreviewError as error:
+                await ctx.reply(str(error),mention_author=False)
+                return
+            candidates=[c for c in candidates if c['job_id'] in approval['job_ids']]
+            if not candidates:
+                await consume_mileage_audit_preview(connection,approval['preview_id'])
+                await ctx.reply('No verified additions were approved in that preview. No mileage changed.',mention_author=False)
+                return
 
             for candidate in candidates:
                 job = await connection.fetchrow(
@@ -4387,6 +4438,7 @@ async def mileage_apply(ctx, confirmation: str = ""):
                 affected_users.add(user_id)
                 applied_jobs += 1
                 applied_miles += delta
+            await consume_mileage_audit_preview(connection,approval['preview_id'])
 
     role_failures = 0
     for user_id in affected_users:
@@ -4441,7 +4493,7 @@ async def mileage_repair_command_error(ctx, error):
     if isinstance(error, commands.MissingRequiredArgument):
         await ctx.reply(
             "Use `!mileageaudit` to preview missed event mileage, then "
-            "`!mileageapply CONFIRM` to restore it. No webhook ID is needed.",
+            "`!mileageaudit CONFIRM` to approve the reviewed additions. No webhook ID is needed.",
             mention_author=False,
         )
         return

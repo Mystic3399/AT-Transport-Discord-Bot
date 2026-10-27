@@ -178,12 +178,21 @@ class AuditApplyTests(unittest.TestCase):
                     return gen()
             channel = Channel()
             guild = SimpleNamespace(id=1, me=object(), text_channels=[channel, SimpleNamespace(id=999, name='unrelated', permissions_for=lambda _: SimpleNamespace(view_channel=False, read_message_history=False))])
-            ctx = SimpleNamespace(guild=guild, reply=reply, send=reply, author=SimpleNamespace(id=99))
+            ctx = SimpleNamespace(guild=guild,channel=channel,reply=reply,send=reply,author=SimpleNamespace(id=99))
             discord = SimpleNamespace(Forbidden=type('Forbidden', (Exception,), {}), HTTPException=type('HTTPException', (Exception,), {}))
             ns = dict(NS, MILEAGE_AUDIT_CHANNEL_IDS={22: 'fixture'}, json=__import__('json'), db_pool=SimpleNamespace(acquire=Lease), GUILD_ID=1, discord=discord,
                       find_driver_link=find, PROGRESSION_ROLES=[], sync_member_progression_role=sync,
                       sync_permanent_system_for_driver=sync, announce_pending_repair_achievements=announce,
                       refresh_driver_leaderboard=sync, send_mileage_reconciliation=reconcile)
+            from mileage_audit_confirmation_v2 import AuditPreviewError,explicit_audit_miles
+            async def preview(*args):
+                selected=[c for c in candidates.values() if not c.get('applied') and c['job_id'] in args[-1]]
+                return dict(preview_id=1,jobs=len(selected),addition=sum(c['missing_distance'] for c in selected),drivers=[],held_jobs=0)
+            async def validate(*args):return dict(preview_id=1,job_ids=set(c['job_id'] for c in args[-1]))
+            async def consume(*args):pass
+            ns.update(AuditPreviewError=AuditPreviewError,audit_source_allowed=lambda id:id==9,
+                explicit_audit_miles=explicit_audit_miles,create_mileage_audit_preview=preview,
+                validate_mileage_audit_preview=validate,consume_mileage_audit_preview=consume)
             audit = load_function('mileage_audit', ns)
             apply = load_function('mileage_apply', ns)
             await audit(ctx)
