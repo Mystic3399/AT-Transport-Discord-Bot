@@ -170,3 +170,19 @@ class LinkedAllocationDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await c.fetchval('SELECT COUNT(*) FROM unified_v2_production_credit_ledger'),0)
             self.assertEqual(await c.fetchval('SELECT COUNT(*) FROM driver_progress'),0)
             self.assertEqual(await c.fetchval('SELECT COUNT(*) FROM unified_v2_production_mileage_totals'),0)
+
+    async def test_legacy_writer_cannot_add_second_real_credit_even_after_disable(self):
+        import ast
+        from pathlib import Path
+        self.assertEqual(await self.settle(), 'credited_real')
+        node=next(n for n in ast.parse(Path('bot.py').read_text()).body
+                  if isinstance(n,ast.AsyncFunctionDef) and n.name=='record_real_job')
+        node.decorator_list=[]
+        ns={'os':os,'db_pool':self.pool}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'bot.py','exec'),ns)
+        with patch.dict(os.environ,{},clear=True):
+            result=await ns['record_real_job']('tb-job','Existing Driver',789,176)
+        self.assertEqual(result['status'],'pending_cross_provider_reconciliation')
+        async with self.pool.acquire() as c:
+            self.assertEqual(await c.fetchval('SELECT COUNT(*) FROM processed_jobs'),0)
+            self.assertEqual(await c.fetchval('SELECT real_miles FROM driver_progress'),0)

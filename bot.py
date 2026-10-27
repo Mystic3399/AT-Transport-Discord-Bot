@@ -1261,7 +1261,7 @@ async def record_real_job(
             # protects retries after disabling that worker or a restart.
             await connection.execute('SELECT pg_advisory_xact_lock($1)', discord_user_id)
             ledger_exists = await connection.fetchval(
-                "SELECT to_regclass('public.unified_v2_production_credit_ledger') IS NOT NULL")
+                "SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL")
             if ledger_exists and await connection.fetchval("""SELECT EXISTS(
                 SELECT 1 FROM unified_v2_production_credit_ledger
                 WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real')""",

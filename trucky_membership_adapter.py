@@ -149,7 +149,8 @@ async def fetch_current_member_ids():
             for page in range(1, MAX_PAGES + 1):
                 async with session.get(BASE_URL,
                     params={"page": page, "perPage": 100, "inactive": "false"},
-                    headers={"x-access-token": token, "Accept": "application/json"},
+                    headers={"x-access-token": token, "Accept": "application/json",
+                             "User-Agent": "A&T Transport LTD Command Bot"},
                     allow_redirects=False) as response:
                     if response.status != 200:
                         raise MembershipUnavailable("Trucky roster unavailable")

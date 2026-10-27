@@ -109,3 +109,23 @@ class MembershipLookupDiagnostics(unittest.IsolatedAsyncioTestCase):
                 await membership.inspect_member_identity_fields("123")
         self.assertEqual(caught.exception.diagnostic_code, "http_404")
         self.assertNotIn("never-print-this", str(caught.exception))
+
+
+
+class BulkRosterUserAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_bulk_roster_uses_same_identified_client_as_single_member_lookup(self):
+        calls=[]
+        class Response:
+            status=200
+            async def json(self,content_type=None):
+                return {'current_page':1,'last_page':1,
+                        'data':[{'id':123,'name':'Driver','company_id':49041}]}
+        class Session(_Session):
+            def get(self,*args,**kwargs):
+                calls.append(kwargs)
+                return super().get(*args,**kwargs)
+        with patch.dict('os.environ',{'TRUCKY_API_TOKEN':'test-only'}), patch.object(
+                membership.aiohttp,'ClientSession',side_effect=lambda **kw:Session(Response(),**kw)):
+            self.assertEqual(await membership.fetch_current_member_ids(), {'123'})
+        self.assertEqual(calls[0]['headers']['User-Agent'],'A&T Transport LTD Command Bot')
+        self.assertIs(calls[0]['allow_redirects'],False)

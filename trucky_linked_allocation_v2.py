@@ -138,6 +138,10 @@ async def _settle_candidate(conn, candidate, member_ids):
             candidate['source_sha256'], ownership_digest)
         if inserted is None:
             return 'replayed'
+        await conn.execute("""INSERT INTO unified_v2_production_mileage_baselines
+            (discord_user_id,trucksbook_real_miles)
+            VALUES($1,COALESCE((SELECT real_miles FROM driver_progress WHERE discord_user_id=$1),0))
+            ON CONFLICT(discord_user_id) DO NOTHING""", user)
         real = candidate['miles'] if candidate['mileage_type'] == 'real' else Decimal(0)
         race = candidate['miles'] if candidate['mileage_type'] == 'race' else Decimal(0)
         await conn.execute("""INSERT INTO unified_v2_production_mileage_totals
