@@ -1093,6 +1093,43 @@ class RegistrationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self.conn.fetchval('SELECT completed_at FROM driver_verifications WHERE discord_user_id=$1',user),completed_at)
         self.assertEqual(dict(await self.conn.fetchrow('SELECT * FROM unified_provider_links WHERE discord_user_id=$1',user)),before)
 
+    async def test_either_provider_completes_without_changing_historical_mileage(self):
+        from unittest.mock import patch
+        import unified_registration_workflow_v2 as workflow
+        from tests.test_registration_workflow_v2 import ENV
+        await self.conn.execute("""CREATE TABLE IF NOT EXISTS driver_progress (
+            discord_user_id BIGINT PRIMARY KEY,trucksbook_name TEXT NOT NULL UNIQUE,
+            real_miles BIGINT NOT NULL DEFAULT 0,updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        await self.conn.execute("""CREATE TABLE IF NOT EXISTS processed_jobs (
+            job_id TEXT PRIMARY KEY,discord_user_id BIGINT NOT NULL,trucksbook_name TEXT NOT NULL,
+            accepted_distance INTEGER NOT NULL,statistics TEXT NOT NULL,
+            processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+        for index, provider in enumerate(('trucksbook','trucky')):
+            with self.subTest(provider=provider):
+                user=991234568883001+index
+                channel=991234568883011+index
+                name=f'single-provider-preserve-{index}'
+                job=f'single-provider-history-{index}'
+                await self.conn.execute('INSERT INTO driver_progress(discord_user_id,trucksbook_name,real_miles) VALUES($1,$2,12345)',user,name)
+                await self.conn.execute("""INSERT INTO processed_jobs(job_id,discord_user_id,trucksbook_name,accepted_distance,statistics)
+                    VALUES($1,$2,$3,176,'Real')""",job,user,name)
+                before_progress=dict(await self.conn.fetchrow('SELECT * FROM driver_progress WHERE discord_user_id=$1',user))
+                before_job=dict(await self.conn.fetchrow('SELECT * FROM processed_jobs WHERE job_id=$1',job))
+                await profiles.begin_registration(self.pool,user,channel)
+                await self._legacy_cancel_fixture(user,channel)
+                await self.conn.execute('INSERT INTO unified_steam_links(discord_user_id,steam_id64) VALUES($1,$2)',user,str(76561198888888301+index))
+                with patch.dict(os.environ,ENV,clear=True):
+                    self.assertTrue(await workflow.link_supported_account(self.pool,user,provider,str(998883001+index),name))
+                    self.assertTrue(await workflow.complete_if_ready(self.pool,user,channel_id=channel))
+                    state=await workflow.state(self.pool,user)
+                self.assertTrue(state['ready'])
+                self.assertEqual(state['accounts'][provider]['status'],'Linked')
+                other='trucky' if provider=='trucksbook' else 'trucksbook'
+                self.assertEqual(state['accounts'][other]['status'],'Not Linked')
+                self.assertEqual(dict(await self.conn.fetchrow('SELECT * FROM driver_progress WHERE discord_user_id=$1',user)),before_progress)
+                self.assertEqual(dict(await self.conn.fetchrow('SELECT * FROM processed_jobs WHERE job_id=$1',job)),before_job)
+                self.assertEqual(await self.conn.fetchval('SELECT COUNT(*) FROM unified_provider_job_events WHERE discord_user_id=$1',user),0)
+
 
 if __name__ == "__main__":
     unittest.main()

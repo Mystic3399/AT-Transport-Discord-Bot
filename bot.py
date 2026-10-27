@@ -21,7 +21,7 @@ import trucky_membership_adapter
 import unified_driver_profiles
 import steam_openid_v2
 import trucky_staging_receiver_v2
-from pending_race_mileage_v2 import read_pending_race
+from pending_race_mileage_v2 import read_pending_race, read_pending_account_inventory
 from mileage_audit_confirmation_v2 import (
     SCHEMA as MILEAGE_AUDIT_PREVIEW_SCHEMA, AuditPreviewError,
     create_mileage_audit_preview, validate_mileage_audit_preview,
@@ -4155,6 +4155,19 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
             file=discord.File(BytesIO(json.dumps({'preview_id':preview['preview_id'],
                 'drivers':preview['drivers'],'jobs':preview['job_rows'],
                 'mileage_changed':False},indent=2).encode()),filename='mileageaudit-preview.json'),
+            allowed_mentions=discord.AllowedMentions.none())
+
+    inventory=await read_pending_account_inventory(db_pool,target_driver_id)
+    if inventory['accounts']:
+        await ctx.send(
+            f"Stored Trucky evidence: **{len(inventory['accounts'])} accounts**, "
+            f"**{inventory['accounts_without_link']} need account linking**. "
+            "The attachment separates pending Real and Race miles by stable account ID. "
+            "Names are review labels, not ownership proof. These are not approved additions; "
+            "Real miles may already be credited through TrucksBook. Drivers can complete `/register` "
+            "with Steam and either provider; existing mileage is retained.",
+            file=discord.File(BytesIO(json.dumps(inventory,indent=2).encode()),
+                              filename='pending-provider-accounts.json'),
             allowed_mentions=discord.AllowedMentions.none())
 
     await send_mileage_reconciliation(ctx, source_jobs, {

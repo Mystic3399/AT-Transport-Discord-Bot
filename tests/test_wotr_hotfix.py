@@ -196,6 +196,7 @@ class AuditApplyTests(unittest.TestCase):
             from unittest.mock import AsyncMock
             ns['read_pending_race']=AsyncMock(return_value=dict(verified_pending_miles=0,verified_pending_jobs=0,
                 unverified_miles=0,unverified_jobs=0,classification_pending_jobs=0,conflicting_jobs=0))
+            ns['read_pending_account_inventory']=AsyncMock(return_value={'accounts':[]})
             audit = load_function('mileage_audit', ns)
             apply = load_function('mileage_apply', ns)
             await audit(ctx)
