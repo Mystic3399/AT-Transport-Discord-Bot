@@ -1,6 +1,5 @@
 import unittest
 from unittest.mock import AsyncMock, Mock
-import discord
 from driver_membership_v2 import company_status, inspect_driver
 
 
@@ -59,3 +58,16 @@ class CommandSafetyTests(unittest.TestCase):
         node = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == 'refresh_driver_memberships_v2')
         self.assertNotIn('.execute(', ast.unparse(node))
         self.assertNotIn('real_miles =', ast.unparse(node))
+
+
+class DiscordFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discord_absence_requires_explicit_404(self):
+        class LookupError(Exception):
+            def __init__(self, status): self.status = status
+        for status, expected in ((404, 'Not in server'), (403, 'Unknown (Discord lookup unavailable)'),
+                                 (500, 'Unknown (Discord lookup unavailable)')):
+            guild = Mock(); guild.get_member.return_value = None
+            guild.fetch_member = AsyncMock(side_effect=LookupError(status))
+            report = await inspect_driver({'discord_user_id': 1}, guild, None, AsyncMock())
+            self.assertEqual(report['discord'], expected)
+            self.assertEqual(report['company'], 'Company status unconfirmed')

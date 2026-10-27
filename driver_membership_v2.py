@@ -14,14 +14,12 @@ def company_status(trucksbook, trucky):
 async def inspect_driver(row, guild, roster, tb_lookup):
     user_id = int(row["discord_user_id"])
     # Fetch absence explicitly: a cache miss does not prove someone left Discord.
-    import discord
     try:
         member = guild.get_member(user_id) or await guild.fetch_member(user_id)
         presence = "In server" if member else "Unknown"
-    except discord.NotFound:
-        presence = "Not in server"
-    except (discord.Forbidden, discord.HTTPException):
-        presence = "Unknown (Discord lookup unavailable)"
+    except Exception as error:
+        presence = ("Not in server" if getattr(error, "status", None) == 404
+                    else "Unknown (Discord lookup unavailable)")
     tb = "unknown"
     account = row.get("trucksbook_user_id")
     if account:
