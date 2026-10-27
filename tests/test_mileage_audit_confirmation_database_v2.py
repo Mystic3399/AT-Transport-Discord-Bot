@@ -132,6 +132,10 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
         async with self.pool.acquire() as c:await c.execute('UPDATE mileage_repair_candidates SET source_provider_account_id=NULL WHERE job_id=$1',self.job)
         p=await self.preview();self.assertEqual(p['jobs'],0);self.assertEqual(p['held_jobs'],1)
         await self.apply(self.ctx,'CONFIRM');self.assertEqual(await self.total(),1000)
+        async with self.pool.acquire() as c:
+            await c.execute('UPDATE driver_links SET trucksbook_user_id=0 WHERE discord_user_id=$1',self.user)
+            await c.execute("UPDATE mileage_repair_candidates SET source_provider_account_id='0' WHERE job_id=$1",self.job)
+        p=await self.preview();self.assertEqual(p['jobs'],0);self.assertEqual(p['held_jobs'],1)
 
     async def test_staging_and_parallel_v2_writer_block_legacy_confirmation(self):
         await self.preview()

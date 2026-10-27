@@ -68,7 +68,7 @@ async def create_mileage_audit_preview(pool,guild_id,channel_id,reviewer_id,job_
             candidates=[];held=0
             for row in rows:
                 link=await conn.fetchval('SELECT trucksbook_user_id FROM driver_links WHERE discord_user_id=$1',row['discord_user_id'])
-                if (not audit_source_allowed(row['source_webhook_id']) or link is None
+                if (not audit_source_allowed(row['source_webhook_id']) or type(link) is not int or link<=0
                     or str(link)!=row['source_provider_account_id']):
                     held+=1;continue
                 candidates.append(_candidate(row))
@@ -110,7 +110,8 @@ async def validate_mileage_audit_preview(conn,guild_id,channel_id,reviewer_id,ca
         raise AuditPreviewError('The reviewed repairs changed or were already processed. Run !mileageaudit again.')
     for candidate in current.values():
         link=await conn.fetchval('SELECT trucksbook_user_id FROM driver_links WHERE discord_user_id=$1 FOR UPDATE',candidate['discord_user_id'])
-        if not audit_source_allowed(candidate['source_webhook_id']) or str(link)!=candidate['source_provider_account_id']:
+        if (not audit_source_allowed(candidate['source_webhook_id']) or type(link) is not int or link<=0
+                or str(link)!=candidate['source_provider_account_id']):
             raise AuditPreviewError('A source or driver account link changed. Run a fresh audit.')
     for driver in snapshot['drivers']:
         total=await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1 FOR UPDATE',driver['discord_user_id'])
