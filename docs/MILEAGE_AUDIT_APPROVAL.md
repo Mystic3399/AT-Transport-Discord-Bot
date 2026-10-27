@@ -4,7 +4,7 @@ Server administrators can use these commands in A&T Command's configured server:
 
 1. `!mileageaudit` previews eligible TrucksBook repairs for linked drivers.
 2. `!mileageaudit @Driver` previews only that driver's eligible repairs.
-3. Review each driver's current total, positive addition, proposed total and job count.
+3. Review each driver's current total, positive addition, proposed total and job count. The attached `mileageaudit-preview.json` lists the exact job IDs and positive deltas in that batch.
 4. Run `!mileageaudit CONFIRM` in the same channel, from the same administrator account, within 20 minutes.
 
 The confirmation applies only the saved preview. `!mileageapply CONFIRM` remains a compatible confirmation entry point and requires the same preview. A changed balance, driver account link, job record or expired preview requires another audit. A consumed preview cannot be used twice. Other candidates discovered later are not included silently.

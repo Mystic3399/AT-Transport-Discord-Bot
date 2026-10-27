@@ -85,7 +85,9 @@ async def create_mileage_audit_preview(pool,guild_id,channel_id,reviewer_id,job_
                 (guild_id,channel_id,reviewer_id,snapshot,snapshot_sha256)
                 VALUES($1,$2,$3,$4::jsonb,$5) RETURNING preview_id''',guild_id,channel_id,reviewer_id,raw,digest)
     return dict(preview_id=preview_id,drivers=drivers,jobs=len(candidates),
-                addition=sum(d['addition'] for d in drivers),held_jobs=held,mileage_awarded=False)
+                addition=sum(d['addition'] for d in drivers),held_jobs=held,mileage_awarded=False,
+                job_rows=[{k:r[k] for k in ('job_id','discord_user_id','recorded_distance','actual_distance','missing_distance')}
+                          for r in candidates])
 
 async def validate_mileage_audit_preview(conn,guild_id,channel_id,reviewer_id,candidates):
     """Inside the repair transaction; never fall back to an older preview."""

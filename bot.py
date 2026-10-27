@@ -4133,6 +4133,12 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         lines=[f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + **{d['addition']:,}** = {d['proposed_real_miles']:,} Real miles ({d['jobs']} jobs)"
                for d in preview['drivers'][offset:offset+15]]
         await ctx.send('**Reviewed additions by driver**\n'+'\n'.join(lines),allowed_mentions=discord.AllowedMentions.none())
+    if preview.get('job_rows'):
+        await ctx.send(f"Reviewed batch #{preview['preview_id']} — exact job-level additions:",
+            file=discord.File(BytesIO(json.dumps({'preview_id':preview['preview_id'],
+                'drivers':preview['drivers'],'jobs':preview['job_rows'],
+                'mileage_changed':False},indent=2).encode()),filename='mileageaudit-preview.json'),
+            allowed_mentions=discord.AllowedMentions.none())
 
     await send_mileage_reconciliation(ctx, source_jobs, {
         "scope": scope, "message_limit_per_channel": message_limit,
