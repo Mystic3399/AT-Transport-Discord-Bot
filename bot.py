@@ -1906,7 +1906,8 @@ def active_driver_ids(guild):
     """Linked leaderboard eligibility is limited to members still in A&T."""
     if guild is None:
         return []
-    return [member.id for member in guild.members if not member.bot]
+    return [member.id for member in guild.members if not member.bot
+            and driver_membership_snapshot_v2.get(member.id, {}).get("company") != "Former company driver"]
 
 
 async def fetch_period_rankings(connection, guild, period_start, period_end):
@@ -2086,6 +2087,8 @@ def leaderboard_lines(rows, guild, limit, mark_former=False):
         member = guild.get_member(user_id) if guild else None
         if member:
             label = member.mention
+            if mark_former and driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver":
+                label += " *(Former Driver)*"
         else:
             safe_name = discord.utils.escape_markdown(str(row["trucksbook_name"]))
             label = f"**{safe_name}**"
@@ -2885,6 +2888,8 @@ async def on_ready():
 
     if db_pool is not None and unified_schema_ready:
         await start_public_integrations()
+        if not monitor_driver_memberships_v2.is_running():
+            monitor_driver_memberships_v2.start()
         if (not isolated_staging and os.getenv('AT_V2_TRUCKY_API_INGEST_ENABLED') == 'YES'
                 and not ingest_trucky_company_jobs.is_running()):
             ingest_trucky_company_jobs.start()
@@ -6296,6 +6301,91 @@ async def link_trucky(ctx, account_id: str = None, *, display_name: str = None):
         "completed-job event must match your Steam identity before the link is accepted.",
         mention_author=False,
     )
+
+
+# Company membership is separate from Discord presence. Reports never repair miles.
+driver_membership_snapshot_v2 = {}
+driver_membership_lock_v2 = asyncio.Lock()
+
+
+async def refresh_driver_memberships_v2(guild):
+    import driver_membership_v2
+    import trucky_membership_adapter
+    async with driver_membership_lock_v2:
+        async with db_pool.acquire() as connection:
+            rows = await connection.fetch("""
+                SELECT ids.discord_user_id, legacy.trucksbook_user_id,
+                       trucky.provider_account_id AS trucky_account_id
+                FROM (SELECT discord_user_id FROM driver_links
+                      UNION SELECT discord_user_id FROM driver_progress
+                      UNION SELECT discord_user_id FROM unified_provider_links) ids
+                LEFT JOIN driver_links legacy USING (discord_user_id)
+                LEFT JOIN unified_provider_links trucky
+                  ON trucky.discord_user_id=ids.discord_user_id
+                 AND trucky.provider='trucky' AND trucky.verified_at IS NOT NULL
+                ORDER BY ids.discord_user_id
+            """)
+        try:
+            roster = await trucky_membership_adapter.fetch_current_member_ids()
+        except trucky_membership_adapter.MembershipUnavailable:
+            roster = None
+        reports = await driver_membership_v2.inspect_drivers(
+            rows, guild, roster, fetch_trucksbook_profile)
+        driver_membership_snapshot_v2.clear()
+        driver_membership_snapshot_v2.update({r["discord_user_id"]: r for r in reports})
+        return reports
+
+
+@tasks.loop(hours=6)
+async def monitor_driver_memberships_v2():
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None or db_pool is None:
+        return
+    try:
+        await refresh_driver_memberships_v2(guild)
+    except Exception as error:
+        print(f"DRIVER MEMBERSHIP MONITOR unavailable: {type(error).__name__}", flush=True)
+
+
+@monitor_driver_memberships_v2.before_loop
+async def before_driver_membership_monitor_v2():
+    await bot.wait_until_ready()
+
+
+@bot.command(name="checkdrivers")
+@commands.guild_only()
+@commands.has_permissions(administrator=True)
+@commands.cooldown(1, 300, commands.BucketType.guild)
+async def check_drivers_v2(ctx):
+    if ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    await ctx.reply("Checking saved account IDs against company membership. No mileage or registration changes.",
+                    allowed_mentions=discord.AllowedMentions.none())
+    reports = await refresh_driver_memberships_v2(ctx.guild)
+    lines = [f"<@{r['discord_user_id']}>: {r['company']} | Discord: {r['discord']} | "
+             f"TrucksBook: {r['trucksbook']} | Trucky: {r['trucky']}" for r in reports]
+    for start in range(0, len(lines), 8):
+        await ctx.reply("\n".join(lines[start:start+8]), allowed_mentions=discord.AllowedMentions.none())
+    if not lines:
+        await ctx.reply("No saved driver accounts found.")
+
+
+@bot.command(name="check", aliases=["Check"])
+@commands.guild_only()
+@commands.has_permissions(administrator=True)
+@commands.cooldown(1, 30, commands.BucketType.user)
+async def check_driver_v2(ctx, driver: discord.User):
+    if ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    reports = await refresh_driver_memberships_v2(ctx.guild)
+    report = next((r for r in reports if r["discord_user_id"] == driver.id), None)
+    if report is None:
+        await ctx.reply("No saved account links for that driver; company membership is unknown.")
+        return
+    await ctx.reply(f"{driver.mention}: {report['company']}\nDiscord: {report['discord']}\n"
+                    f"TrucksBook: {report['trucksbook']} | Trucky: {report['trucky']}\n"
+                    f"Checked: {report['checked_at']}\nRead-only: mileage, registration, roles and achievements unchanged.",
+                    allowed_mentions=discord.AllowedMentions.none())
 
 
 @bot.command(name="myaccounts")

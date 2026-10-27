@@ -135,3 +135,33 @@ async def inspect_member_identity_fields(account_id):
     except (ValueError, TypeError) as error:
         raise MembershipUnavailable("Trucky roster response could not be decoded", "invalid_response") from error
     raise MembershipUnavailable("Trucky roster pagination exceeded limit", "page_limit")
+
+
+
+async def fetch_current_member_ids():
+    """One complete validated roster, or an error; never partial absence evidence."""
+    token = os.getenv("TRUCKY_API_TOKEN", "").strip()
+    if not token:
+        raise MembershipUnavailable("Trucky API token not configured")
+    ids, last_page = set(), None
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            for page in range(1, MAX_PAGES + 1):
+                async with session.get(BASE_URL,
+                    params={"page": page, "perPage": 100, "inactive": "false"},
+                    headers={"x-access-token": token, "Accept": "application/json"},
+                    allow_redirects=False) as response:
+                    if response.status != 200:
+                        raise MembershipUnavailable("Trucky roster unavailable")
+                    payload = await response.json(content_type=None)
+                _, last_page, members = validate_roster_page(payload, page, last_page)
+                for member in members:
+                    key = str(member["id"])
+                    if key in ids:
+                        raise MembershipUnavailable("Duplicate roster account")
+                    ids.add(key)
+                if page == last_page:
+                    return ids
+    except (aiohttp.ClientError, TimeoutError, ValueError) as error:
+        raise MembershipUnavailable("Trucky roster unavailable") from error
+    raise MembershipUnavailable("Trucky roster exceeds supported limit")

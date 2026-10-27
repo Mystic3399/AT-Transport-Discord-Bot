@@ -217,6 +217,7 @@ class StartupBackfillSafeModeTests(unittest.TestCase):
             "unified_schema_ready": False,
             "staging_trucky_probe_ran": False,
             "rotate_bot_status": task,
+            "monitor_driver_memberships_v2": task,
             "leaderboard_rollover_task": task,
             "setup_database": setup_database,
             "trucky_linking": SimpleNamespace(install_schema=install_legacy),
@@ -245,3 +246,4 @@ class StartupBackfillSafeModeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
