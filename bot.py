@@ -1243,6 +1243,12 @@ async def record_real_job(
     discord_user_id,
     accepted_distance,
 ):
+    if (os.getenv('AT_V2_ISOLATED_STAGING') == 'YES'
+            or os.getenv('AT_V2_PRODUCTION_MILEAGE_ENABLED') == 'YES'):
+        # Never let the old writer coexist with the activated V2 ledger.
+        # Webhook observation is retained before this point in on_message.
+        return {'status':'held_v2_cutover','real_miles':None,'crossed_milestones':[]}
+
     if db_pool is None:
         print(
             "DATABASE ERROR: Pool is not ready."

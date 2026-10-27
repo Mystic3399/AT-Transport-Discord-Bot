@@ -89,3 +89,16 @@ class ProductionMileageBatchTests(unittest.IsolatedAsyncioTestCase):
         conflict={**row,'evidence':{**evidence,'origin':'London'}}
         self.assertIsNone(comparison_metadata_from_history(event,payload,[row,conflict]))
         self.assertIsNone(payload['job_metadata'])
+
+    async def test_legacy_writer_cannot_coexist_with_v2_activation_or_staging(self):
+        import ast
+        fn=next(n for n in ast.parse(Path('bot.py').read_text()).body if isinstance(n,ast.AsyncFunctionDef) and n.name=='record_real_job')
+        fn.decorator_list=[]
+        for flag in ('AT_V2_ISOLATED_STAGING','AT_V2_PRODUCTION_MILEAGE_ENABLED'):
+            pool=MagicMock();ns={'os':os,'db_pool':pool}
+            exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'),ns)
+            with patch.dict(os.environ,{flag:'YES'},clear=True):
+                result=await ns['record_real_job']('123','Example Driver',789,176)
+            self.assertEqual(result['status'],'held_v2_cutover')
+            self.assertIsNone(result['real_miles'])
+            pool.acquire.assert_not_called()
