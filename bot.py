@@ -6136,22 +6136,10 @@ async def driver_profile(
         )
         return
 
-    history_caption = None
-    if os.getenv("AT_V2_PENDING_HISTORY_ENABLED") == "YES":
-        try:
-            from pending_driver_history_v2 import linked_history_summary, saved_history_caption
-            history = await linked_history_summary(db_pool, target_member.id)
-            history_caption = saved_history_caption(history)
-        except Exception:
-            print("PENDING HISTORY PROFILE READ unavailable", flush=True)
-
     fallback_embed = build_driver_profile_embed(
         target_member,
         profile,
     )
-
-    if history_caption:
-        fallback_embed.add_field(name="Saved history", value=history_caption, inline=False)
 
     try:
         avatar_bytes = await target_member.display_avatar.with_size(256).read()
@@ -6166,7 +6154,6 @@ async def driver_profile(
                 profile_png,
                 filename="at-driver-profile.png",
             ),
-            content=history_caption,
         )
     except Exception as error:
         print(f"GRAPHICAL PROFILE FALLBACK: {error}")
