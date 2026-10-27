@@ -6136,10 +6136,9 @@ async def driver_profile(
     history_caption = None
     if os.getenv("AT_V2_PENDING_HISTORY_ENABLED") == "YES":
         try:
-            from pending_driver_history_v2 import linked_history_summary
+            from pending_driver_history_v2 import linked_history_summary, saved_history_caption
             history = await linked_history_summary(db_pool, target_member.id)
-            if history['jobs']:
-                history_caption = f"Saved provider history: {history['jobs']} job(s) awaiting mileage checks; not added to totals."
+            history_caption = saved_history_caption(history)
         except Exception:
             print("PENDING HISTORY PROFILE READ unavailable", flush=True)
 

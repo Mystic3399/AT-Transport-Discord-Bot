@@ -71,8 +71,16 @@ async def linked_history_summary(pool,discord_user_id):
     async with pool.acquire() as conn:
         async with conn.transaction(readonly=True):
             row=await conn.fetchrow('''
-                SELECT COUNT(DISTINCT (h.provider,h.provider_job_id)) AS jobs,
-                       COALESCE(SUM(h.replay_count),0) AS replays
+                WITH linked AS (
+                SELECT h.*,
+                       EXISTS(SELECT 1 FROM unified_provider_claims c
+                         WHERE c.provider=l.provider AND c.provider_account_id=l.provider_account_id
+                           AND c.discord_user_id=l.discord_user_id AND c.status='approved'
+                           AND c.ownership_confirmed=TRUE AND c.membership_confirmed=TRUE
+                           AND c.ownership_evidence_sha256 IS NOT NULL
+                           AND c.provider='trucky'
+                           AND c.ownership_evidence_kind='trucky_signed_job_steam_match'
+                           AND (c.expires_at IS NULL OR c.expires_at>NOW())) AS ownership_current
                 FROM pending_provider_job_history_v2 h
                 JOIN unified_provider_links l ON l.provider=h.provider
                   AND l.provider_account_id=h.provider_account_id
@@ -80,9 +88,39 @@ async def linked_history_summary(pool,discord_user_id):
                 JOIN unified_steam_links s ON s.discord_user_id=l.discord_user_id
                   AND s.verified_at IS NOT NULL
                 WHERE l.discord_user_id=$1 AND h.source_kind='authenticated_api'
+                ), jobs AS (
+                  SELECT provider,provider_job_id,SUM(replay_count) AS replays,
+                         BOOL_AND(ownership_current) AS ownership_current
+                  FROM linked GROUP BY provider,provider_job_id
+                ), checked AS (
+                  SELECT j.*, (SELECT COUNT(*) FROM pending_provider_job_history_v2 v
+                    WHERE v.provider=j.provider AND v.provider_job_id=j.provider_job_id
+                      AND v.source_kind='authenticated_api')>1 AS conflicting
+                  FROM jobs j
+                )
+                SELECT COUNT(*) AS jobs,COALESCE(SUM(replays),0) AS replays,
+                       COUNT(*) FILTER(WHERE ownership_current AND NOT conflicting) AS ownership_verified_jobs,
+                       COUNT(*) FILTER(WHERE conflicting) AS conflicting_jobs,
+                       COUNT(*) FILTER(WHERE NOT ownership_current AND NOT conflicting) AS ownership_pending_jobs
+                FROM checked
             ''',discord_user_id)
     return {'jobs':int(row['jobs']),'replays':int(row['replays']),
+            'ownership_verified_jobs':int(row['ownership_verified_jobs']),
+            'conflicting_jobs':int(row['conflicting_jobs']),
+            'ownership_pending_jobs':int(row['ownership_pending_jobs']),
+            'ready_to_award':0,
             'status':'pending_mileage_checks','mileage_awarded':False}
+
+
+def saved_history_caption(history):
+    """Separate account association from mileage approval in the live profile."""
+    if not history['jobs']:
+        return None
+    return (f"Saved provider history: {history['jobs']} job(s); "
+            f"{history['ownership_verified_jobs']} with current ownership evidence, "
+            f"{history['ownership_pending_jobs']} awaiting ownership checks, "
+            f"{history['conflicting_jobs']} with conflicting observations. "
+            "All await mileage and duplicate checks; not added to totals.")
 
 
 async def retain_trucksbook_source_observation(pool, *, webhook_id, guild_id,

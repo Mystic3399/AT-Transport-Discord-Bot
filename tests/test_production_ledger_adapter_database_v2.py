@@ -265,12 +265,45 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         summary=await linked_history_summary(self.pool,user)
         self.assertEqual(summary['jobs'],1)
         self.assertEqual(summary['replays'],1)
+        self.assertEqual(summary['ownership_verified_jobs'],1)
+        self.assertEqual(summary['conflicting_jobs'],0)
+        self.assertEqual(summary['ready_to_award'],0)
         await record_pending_history(self.pool,'trucky','991234567890124201','991234567890124202',{'status':'completed','driven_distance_km':635},source_kind='authenticated_api')
-        self.assertEqual((await linked_history_summary(self.pool,user))['jobs'],1)
+        summary=await linked_history_summary(self.pool,user)
+        self.assertEqual(summary['jobs'],1)
+        self.assertEqual(summary['conflicting_jobs'],1)
+        self.assertEqual(summary['ownership_verified_jobs'],0)
         async with self.pool.acquire() as conn:
             self.assertEqual(await conn.fetchval("SELECT count(*) FROM pending_provider_job_history_v2 WHERE provider_job_id='991234567890124201'"),2)
             self.assertIsNone(await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1',user))
         self.assertFalse(summary['mileage_awarded'])
+
+    async def test_saved_history_expired_claim_and_changed_account_are_not_release_ready(self):
+        from pending_driver_history_v2 import install_schema, record_pending_history, linked_history_summary
+        await install_schema(self.pool)
+        user=991234567890124210
+        account='991234567890124212'
+        await self.seed_verified_driver_job(user,'trucky','991234567890124213',account,'1')
+        evidence={'status':'completed','driven_distance_km':100}
+        for job in ('991234567890124214','991234567890124215'):
+            await record_pending_history(self.pool,'trucky',job,account,evidence,source_kind='authenticated_api')
+        await record_pending_history(self.pool,'trucky','991234567890124214','991234567890124299',evidence,source_kind='authenticated_api')
+        await record_pending_history(self.pool,'trucky','991234567890124215',None,{'candidate_driver_label':'untrusted'},source_kind='owner_export')
+        summary=await linked_history_summary(self.pool,user)
+        self.assertEqual(summary['ownership_verified_jobs'],1)
+        self.assertEqual(summary['conflicting_jobs'],1)
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE unified_provider_claims SET expires_at=NOW()-INTERVAL '1 minute' WHERE discord_user_id=$1",user)
+            before=[dict(r) for r in await conn.fetch('SELECT * FROM unified_provider_links WHERE discord_user_id=$1',user)]
+        summary=await linked_history_summary(self.pool,user)
+        self.assertEqual(summary['jobs'],2)
+        self.assertEqual(summary['ownership_verified_jobs'],0)
+        self.assertEqual(summary['ownership_pending_jobs'],1)
+        self.assertEqual(summary['conflicting_jobs'],1)
+        self.assertEqual(summary['ready_to_award'],0)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(before,[dict(r) for r in await conn.fetch('SELECT * FROM unified_provider_links WHERE discord_user_id=$1',user)])
+            self.assertIsNone(await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1',user))
 
     async def test_historical_preview_reads_consistent_database_without_writes(self):
         from historical_mileage_preview_v2 import read_historical_snapshot, build_historical_preview

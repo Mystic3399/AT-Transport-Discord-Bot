@@ -6,6 +6,22 @@ from historical_provider_exports_v2 import trucksbook_speed_check
 from tests.test_historical_provider_exports_v2 import TB
 
 class PendingHistoryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_summary_is_read_only_and_distinguishes_pending_reasons(self):
+        conn=type('Conn',(),{})();conn.fetchrow=AsyncMock(return_value={
+            'jobs':3,'replays':7,'ownership_verified_jobs':1,'ownership_pending_jobs':1,'conflicting_jobs':1})
+        conn.transaction=lambda **kwargs:Acquire(None)
+        pool=type('Pool',(),{'acquire':lambda self:Acquire(conn)})()
+        result=await linked_history_summary(pool,123)
+        self.assertEqual(result['ready_to_award'],0)
+        self.assertFalse(result['mileage_awarded'])
+        from pending_driver_history_v2 import saved_history_caption
+        caption=saved_history_caption(result)
+        self.assertIn('1 with current ownership evidence',caption)
+        self.assertIn('1 awaiting ownership checks',caption)
+        self.assertIn('1 with conflicting observations',caption)
+        self.assertIn('not added to totals',caption)
+        self.assertIsNone(saved_history_caption({'jobs':0}))
+
     async def test_only_evidence_written_and_account_not_discord_identity(self):
         conn=type('Conn',(),{})();conn.execute=AsyncMock()
         conn.transaction=lambda **kwargs:Acquire(None)
