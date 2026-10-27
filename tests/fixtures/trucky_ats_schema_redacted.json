@@ -1,0 +1,30 @@
+{
+  "source": "authenticated company jobs API; redacted field samples only, not ownership or shared-journey proof",
+  "observed_date": "2026-10-27",
+  "samples": [
+    {
+      "game_id": 2,
+      "game": {
+        "id": 2,
+        "code": "ATS"
+      },
+      "status": "completed",
+      "stats_type": "race_miles",
+      "max_speed": 132,
+      "max_speed_kmh": 132,
+      "distance_unit": "km"
+    },
+    {
+      "game_id": 2,
+      "game": {
+        "id": 2,
+        "code": "ATS"
+      },
+      "status": "completed",
+      "stats_type": "real_miles",
+      "max_speed": 129,
+      "max_speed_kmh": 129,
+      "distance_unit": "km"
+    }
+  ]
+}

@@ -1069,7 +1069,8 @@ async def auto_approve_trucky_if_steam_matches(
 
 async def record_normalized_provider_job(
     pool, provider, provider_job_id, discord_user_id, distance, unit,
-    *, provider_account_id=None, mileage_type="real", delivered_at=None, job_metadata=None
+    *, provider_account_id=None, mileage_type="real", delivered_at=None, job_metadata=None,
+    classification_evidence=None
 ):
     """Idempotently stage a provider job in canonical miles; do not award mileage.
 
@@ -1104,13 +1105,22 @@ async def record_normalized_provider_job(
     exact_miles = (original * (KM_TO_MILES if canonical_unit == 'km' else Decimal(1))).quantize(Decimal('0.0000000001'))
     real = miles if mileage_type == "real" else 0
     race = miles if mileage_type == "race" else 0
-    audit_payload = json.dumps({
+    audit_data = {
         "original_distance": str(original),
         "original_unit": canonical_unit,
         "canonical_miles": str(exact_miles),
         "mileage_type": mileage_type,
         "job_metadata": job_metadata,
-    })
+    }
+    if classification_evidence is not None:
+        if (not isinstance(classification_evidence,dict)
+                or set(classification_evidence) not in (
+                    {'game','provider_stats_type','policy'},
+                    {'game','provider_stats_type','policy','max_speed_kmh'})
+                or any(type(v) is not str for v in classification_evidence.values())):
+            raise ValueError('Invalid classification evidence')
+        audit_data['classification_evidence']=classification_evidence
+    audit_payload=json.dumps(audit_data)
     async with pool.acquire() as conn:
         async with conn.transaction():
             verified = await conn.fetchval("""

@@ -4,7 +4,7 @@ from trucky_verified_identity_lookup_v2 import (
     get_verified_trucky_account_id, review_job_for_registered_driver,
 )
 
-JOB = {"company_id": 49041, "id": 123, "user_id": 456,
+JOB = {"company_id": 49041, "game_id": 1, "id": 123, "user_id": 456,
        "status": "completed", "completed_at": "2026-10-01T12:00:00Z",
        "stats_type": "real_miles", "distance_unit": "km",
        "driven_distance_km": 120.5}

@@ -28,7 +28,7 @@ def test_missing_shared_evidence_does_not_confirm_or_credit_duplicate():
 def test_provider_driven_distance_matches_tracker_without_overwriting_old_evidence():
     from trucky_verified_job_candidate_v2 import normalize_verified_trucky_job
     tr=EVIDENCE['trucky']
-    job=dict(company_id=49041,id=int(tr['provider_job_id']),user_id=1234,
+    job=dict(company_id=49041,game_id=1,id=int(tr['provider_job_id']),user_id=1234,
         status='completed',completed_at='2026-10-26T19:50:23Z',stats_type='real_miles',distance_unit='km',
         driven_distance_km=int(tr['driven_distance_km']),real_driven_distance_km=int(tr['original_distance']))
     candidate=normalize_verified_trucky_job(job,verified_provider_account_id='1234',discord_user_id=123)

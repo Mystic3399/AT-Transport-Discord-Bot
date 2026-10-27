@@ -28,16 +28,28 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
         return None
     if job.get("status") != "completed" or not isinstance(job.get("completed_at"), str) or not job["completed_at"]:
         return None
-    if job.get("stats_type") != "real_miles" or job.get("distance_unit") != "km":
+    statistics = {'real_miles':'Real','race_miles':'Race'}.get(job.get('stats_type'))
+    if statistics is None or job.get("distance_unit") != "km":
+        return None
+    # Observed authenticated API contract: game 1 = ETS2, game 2 = ATS.
+    # A conflicting nested game descriptor is not an acceptable fallback.
+    game = {1:'ETS2',2:'ATS'}.get(job.get('game_id')) if type(job.get('game_id')) is int else None
+    if game is None:
+        return None
+    descriptor=job.get('game')
+    if descriptor is not None and (not isinstance(descriptor,dict)
+            or descriptor.get('code')!=game
+            or type(descriptor.get('id')) is not int or descriptor['id']!=job['game_id']):
         return None
     # World of Trucks is an event tag, not a reason to discard Real Miles.
     # Keep this adapter read-only until provider API verification is complete.
-    from world_of_trucks_policy_v2 import classify_event_mileage
+    from world_of_trucks_policy_v2 import classify_job_mileage
     event_tag = job.get("event_tag")
     if event_tag not in (None, "WoTr"):
         return None  # Unknown event tags require provider schema review.
-    classification = classify_event_mileage("trucky", "Real, WoTr" if event_tag == "WoTr" else "Real")
-    if classification is None or classification.mileage_type != "real":
+    classification = classify_job_mileage('trucky',statistics+(', WoTr' if event_tag=='WoTr' else ''),
+        game=game,max_speed=job.get('max_speed_kmh'),speed_unit='km/h')
+    if classification is None:
         return None
     try:
         # The authenticated completed-job driven_distance_km matches Trucky
@@ -54,17 +66,25 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
         return None
     if delivered_at.tzinfo is None or delivered_at.astimezone(timezone.utc) > datetime.now(timezone.utc):
         return None
-    return {
+    result = {
         "delivered_at": delivered_at,
         "provider": "trucky",
         "provider_job_id": str(job["id"]),
         "discord_user_id": discord_user_id,
-        "mileage_type": "real",
+        "mileage_type": classification.mileage_type,
         "kilometers": km,
         "verified_delivery": True,
         "eligible_for_award": False,
         "trusted": False,
     }
+    if game=='ATS' or classification.mileage_type=='race':
+        result['classification_evidence']={
+            'game':game,'provider_stats_type':job['stats_type'],
+            'policy':'ats_maximum_speed_0_81_real_82_112_race' if game=='ATS' else 'ets2_provider_classification',
+        }
+        if game=='ATS':
+            result['classification_evidence']['max_speed_kmh']=str(job['max_speed_kmh'])
+    return result
 
 
 

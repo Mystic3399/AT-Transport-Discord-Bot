@@ -58,10 +58,18 @@ class AuthenticatedTruckyIngestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['counts']['replayed'],1)
 
     async def test_unverified_race_schema_or_incomplete_job_stays_pending(self):
-        for changes in ({'stats_type':'race_miles'},{'status':'in_progress'},{'user_id':999}):
+        for changes in ({'stats_type':'road_trip_race'},{'status':'in_progress'},{'user_id':999},
+                        {'game_id':2,'max_speed_kmh':None}):
             result,record=await self.run_ingest(Pool(),{**JOB,**changes})
             record.assert_not_awaited()
             self.assertEqual(result['counts']['classification_or_completion_pending'],1)
+
+    async def test_ats_race_reaches_separate_normalized_bucket_without_award(self):
+        result,record=await self.run_ingest(Pool(),{**JOB,'game_id':2,'max_speed_kmh':132})
+        self.assertEqual(result['counts']['recorded'],1)
+        self.assertEqual(record.call_args.kwargs['mileage_type'],'race')
+        self.assertEqual(record.call_args.kwargs['classification_evidence']['max_speed_kmh'],'132')
+        self.assertFalse(result['mileage_awarded'])
 
     async def test_conflicting_replay_is_quarantined(self):
         with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':[JOB]})),patch('unified_driver_profiles.record_normalized_provider_job',AsyncMock(side_effect=ValueError('Conflicting replay'))):

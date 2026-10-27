@@ -321,10 +321,12 @@ async def _ingest_authenticated_job_records(pool, records):
             counts['classification_or_completion_pending'] += 1
             continue
         try:
+            classification_kwargs=({'classification_evidence':candidate['classification_evidence']}
+                if 'classification_evidence' in candidate else {})
             inserted = await profiles.record_normalized_provider_job(pool,'trucky',candidate['provider_job_id'],
                 owner['discord_user_id'],candidate['kilometers'],'km',
-                provider_account_id=owner['provider_account_id'],mileage_type='real',
-                delivered_at=candidate['delivered_at'])
+                provider_account_id=owner['provider_account_id'],mileage_type=candidate['mileage_type'],
+                delivered_at=candidate['delivered_at'],**classification_kwargs)
         except ValueError:
             counts['conflicting_event_pending'] += 1
             continue

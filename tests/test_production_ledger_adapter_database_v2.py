@@ -614,6 +614,41 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',user),1)
 
 
+    async def test_signed_ats_jobs_use_company_speed_policy_and_preserve_conflicting_replays(self):
+        import hashlib,json
+        from unittest.mock import AsyncMock
+        from unified_driver_profiles import record_trucky_webhook_receipt,attest_trucky_receipt_identity
+        import trucky_jobs_api_v2 as api
+        await self.install_ledger()
+        user,account=991234567890127201,'8827201'
+        await self.seed_verified_driver_job(user,'trucky','8827200',account,'1')
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE unified_driver_profiles SET status='active' WHERE discord_user_id=$1",user)
+        records=[]
+        for job_id,speed,stats in [('8827202',129,'race_miles'),('8827203',132,'real_miles')]:
+            digest=hashlib.sha256(('signed-ats-'+job_id).encode()).hexdigest()
+            receipt=await record_trucky_webhook_receipt(self.pool,digest,'job_completed',job_id)
+            raw_id=receipt['receipt_id'] if isinstance(receipt,dict) else receipt
+            self.assertTrue(await attest_trucky_receipt_identity(self.pool,raw_id,job_id,digest,user,account))
+            records.append(dict(id=int(job_id),user_id=int(account),company_id=49041,status='completed',
+                game_id=2,game={'id':2,'code':'ATS'},max_speed_kmh=speed,
+                completed_at='2026-10-19T12:00:00Z',stats_type=stats,distance_unit='km',driven_distance_km=100))
+        with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':records})):
+            self.assertEqual((await api.ingest_authenticated_completed_jobs(self.pool))['counts']['recorded'],2)
+            self.assertEqual((await api.ingest_authenticated_completed_jobs(self.pool))['counts']['replayed'],2)
+        async with self.pool.acquire() as conn:
+            rows=await conn.fetch("SELECT provider_job_id,real_miles,race_miles,source_payload FROM unified_provider_job_events WHERE provider_job_id IN ('8827202','8827203') ORDER BY provider_job_id")
+            self.assertGreater(rows[0]['real_miles'],0);self.assertEqual(rows[0]['race_miles'],0)
+            self.assertGreater(rows[1]['race_miles'],0);self.assertEqual(rows[1]['real_miles'],0)
+            self.assertEqual(json.loads(rows[1]['source_payload'])['classification_evidence']['max_speed_kmh'],'132')
+            before=[dict(row) for row in rows]
+        with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value=[{**records[1],'max_speed_kmh':129}])):
+            self.assertEqual((await api.ingest_authenticated_completed_jobs(self.pool))['counts']['conflicting_event_pending'],1)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(before,[dict(row) for row in await conn.fetch("SELECT provider_job_id,real_miles,race_miles,source_payload FROM unified_provider_job_events WHERE provider_job_id IN ('8827202','8827203') ORDER BY provider_job_id")])
+            self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',user),0)
+            self.assertIsNone(await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1',user))
+
     async def test_signed_identity_receipt_advances_only_after_exact_api_job(self):
         from unittest.mock import AsyncMock
         from unified_driver_profiles import record_trucky_webhook_receipt,attest_trucky_receipt_identity
@@ -627,7 +662,7 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         raw_id=receipt['receipt_id'] if isinstance(receipt,dict) else receipt
         self.assertTrue(await attest_trucky_receipt_identity(self.pool,raw_id,job_id,'7'*64,user,account))
         record=dict(id=int(job_id),user_id=int(account),company_id=49041,status='completed',
-                    completed_at='2026-10-19T12:00:00Z',stats_type='real_miles',distance_unit='km',driven_distance_km=176,real_driven_distance_km=200)
+                    game_id=1,completed_at='2026-10-19T12:00:00Z',stats_type='real_miles',distance_unit='km',driven_distance_km=176,real_driven_distance_km=200)
         with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':[record]})):
             result=await api.ingest_authenticated_completed_jobs(self.pool)
             replay=await api.ingest_authenticated_completed_jobs(self.pool)
