@@ -609,7 +609,16 @@ async def process_approved_mileage_batch(pool, *, config=None, runtime=None):
             counts['ownership_or_receipt_pending']+=1;continue
         try:
             payload=json.loads(row['source_payload']) if isinstance(row['source_payload'],str) else row['source_payload']
-            _normalized_metadata(payload.get('job_metadata'))
+            metadata = payload.get('job_metadata')
+            if metadata is None:
+                async with pool.acquire() as conn:
+                    async with conn.transaction(readonly=True):
+                        if await conn.fetchval("SELECT to_regclass('public.pending_provider_job_history_v2') IS NOT NULL"):
+                            versions = await conn.fetch("""SELECT provider,provider_job_id,provider_account_id,source_kind,evidence
+                                FROM pending_provider_job_history_v2 WHERE provider='trucky'
+                                  AND provider_job_id=$1 AND source_kind='authenticated_api'""",row['provider_job_id'])
+                            metadata = comparison_metadata_from_history(row,payload,[dict(v) for v in versions])
+            _normalized_metadata(metadata)
             kind=payload['mileage_type']
             if kind not in ('real','race') or row['delivered_at'] is None:
                 raise ValueError('Incomplete event')
@@ -621,7 +630,7 @@ async def process_approved_mileage_batch(pool, *, config=None, runtime=None):
             if (getattr(watermark,'tzinfo',None) is None
                     or watermark<row['delivered_at']+timedelta(minutes=30)):
                 feed['complete']=False
-            source_digest=hashlib.sha256(json.dumps({'event':payload,'receipt':row['receipt_sha256']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+            source_digest=hashlib.sha256(json.dumps({'event':payload,'receipt':row['receipt_sha256'],'comparison_metadata':metadata},sort_keys=True,separators=(',',':')).encode()).hexdigest()
         except (ValueError,TypeError,KeyError,AttributeError):
             counts['comparison_evidence_pending']+=1;continue
         job=dict(provider='trucky',provider_job_id=row['provider_job_id'],
@@ -640,3 +649,49 @@ async def process_approved_mileage_batch(pool, *, config=None, runtime=None):
             reviewer_id=item.get('reviewer_id'))
         counts[result['status']]+=1
     return {'status':'processed','counts':dict(counts),'mileage_awarded':counts['credited']>0}
+
+def comparison_metadata_from_history(event,payload,versions):
+    """Read-only enrichment: exact API job/owner/time/class/distance must agree.
+
+    Names suggest comparison candidates only. Neither old immutable events nor
+    ownership claims are updated, and changed route observations stay pending.
+    """
+    import json
+    from pending_race_mileage_v2 import merge_history_observations
+    from trucky_verified_job_candidate_v2 import normalize_verified_trucky_job
+    from unified_distance_units import KM_TO_MILES
+    if not versions or any(v.get('provider')!='trucky'
+            or v.get('source_kind')!='authenticated_api'
+            or v.get('provider_job_id')!=event['provider_job_id'] for v in versions):
+        return None
+    try:
+        merged=merge_history_observations(versions)
+        if merged is None or merged['provider_account_id']!=event['provider_account_id']:
+            return None
+        evidence=merged['evidence']
+        names={}
+        for version in versions:
+            item=json.loads(version['evidence']) if isinstance(version['evidence'],str) else version['evidence']
+            for key in ('game','origin','destination','cargo'):
+                value=item.get(key)
+                if value is not None:
+                    if not isinstance(value,str) or not value.strip() or len(value)>300:
+                        return None
+                    if key in names and names[key]!=value:
+                        return None
+                    names[key]=value
+        if set(names)!={'game','origin','destination','cargo'}:
+            return None
+        record={**evidence,'id':int(event['provider_job_id']),
+            'user_id':int(event['provider_account_id']),'company_id':49041,
+            'source_city_name':names['origin'],'destination_city_name':names['destination'],'cargo_name':names['cargo']}
+        candidate=normalize_verified_trucky_job(record,verified_provider_account_id=event['provider_account_id'],
+            discord_user_id=event['discord_user_id'])
+        if (candidate is None or candidate.get('job_metadata')!=names
+                or candidate['delivered_at']!=event['delivered_at']
+                or candidate['mileage_type']!=payload['mileage_type']
+                or (candidate['kilometers']*KM_TO_MILES).quantize(Decimal('0.0000000001'))!=Decimal(payload['canonical_miles'])):
+            return None
+        return names
+    except (ValueError,TypeError,KeyError,AttributeError,InvalidOperation):
+        return None

@@ -67,3 +67,25 @@ class ProductionMileageBatchTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ,{'AT_V2_TRUCKY_API_INGEST_ENABLED':'YES','AT_V2_PENDING_HISTORY_ENABLED':'YES'},clear=True),patch.object(api,'ingest_authenticated_completed_jobs',AsyncMock(return_value={})) as ingest,patch.object(api,'sweep_saved_trucky_history',AsyncMock(return_value={})) as sweep,patch.object(ledger,'read_approved_mileage_preflight',side_effect=ValueError('No acceptance manifest')),patch.object(ledger,'process_approved_mileage_batch',AsyncMock()) as batch:
             await ns['ingest_trucky_company_jobs']()
             ingest.assert_awaited_once();sweep.assert_awaited_once();batch.assert_not_awaited()
+
+    async def test_old_event_comparison_uses_only_exact_authenticated_history(self):
+        from datetime import datetime,timezone
+        from decimal import Decimal
+        from unified_distance_units import KM_TO_MILES
+        from unified_production_ledger_adapter_v2 import comparison_metadata_from_history
+        event=dict(provider_job_id='123',provider_account_id='456',discord_user_id=789,
+                   delivered_at=datetime(2026,10,19,12,tzinfo=timezone.utc))
+        payload=dict(mileage_type='real',canonical_miles=str((Decimal(100)*KM_TO_MILES).quantize(Decimal('.0000000001'))),job_metadata=None)
+        evidence=dict(game_id=1,status='completed',stats_type='real_miles',driven_distance_km=100,
+            distance_unit='km',completed_at='2026-10-19T12:00:00Z',game='ETS2',origin='Paris',destination='Lille',cargo='Pet Food')
+        row=dict(provider='trucky',provider_job_id='123',provider_account_id='456',source_kind='authenticated_api',evidence=evidence)
+        self.assertEqual(comparison_metadata_from_history(event,payload,[row]),
+                         dict(game='ETS2',origin='Paris',destination='Lille',cargo='Pet Food'))
+        for bad in ({**row,'source_kind':'owner_export'}, {**row,'provider_account_id':'999'},
+                    {**row,'provider_job_id':'999'}, {**row,'evidence':{**evidence,'driven_distance_km':101}},
+                    {**row,'evidence':{**evidence,'completed_at':'2026-10-19T12:01:00Z'}},
+                    {**row,'evidence':{**evidence,'stats_type':'race_miles'}}):
+            self.assertIsNone(comparison_metadata_from_history(event,payload,[bad]))
+        conflict={**row,'evidence':{**evidence,'origin':'London'}}
+        self.assertIsNone(comparison_metadata_from_history(event,payload,[row,conflict]))
+        self.assertIsNone(payload['job_metadata'])
