@@ -26,6 +26,13 @@ ALTER TABLE pending_provider_job_history_v2 ADD CONSTRAINT pending_provider_job_
  CHECK(source_kind IN ('authenticated_api','owner_export','verified_webhook_source'));
 CREATE INDEX IF NOT EXISTS pending_history_account_idx
  ON pending_provider_job_history_v2(provider,provider_account_id);
+CREATE TABLE IF NOT EXISTS pending_history_capture_cursor_v2 (
+ provider TEXT PRIMARY KEY CHECK(provider='trucky'),
+ next_page INTEGER NOT NULL DEFAULT 2 CHECK(next_page BETWEEN 2 AND 100),
+ previous_page_sha256 TEXT,
+ last_success_at TIMESTAMPTZ,
+ completed_sweeps BIGINT NOT NULL DEFAULT 0
+);
 '''
 
 FIELDS={'game','game_id','status','stats_type','driven_distance_km','distance_unit','max_speed',

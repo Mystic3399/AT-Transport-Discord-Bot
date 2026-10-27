@@ -254,17 +254,23 @@ async def ingest_authenticated_completed_jobs(pool, page=1):
     persists evidence only; reconciliation/credit activation stays separate.
     No display names, raw payloads or account identifiers are returned/logged.
     """
-    from collections import Counter
-    import unified_driver_profiles as profiles
-    from trucky_verified_job_candidate_v2 import normalize_verified_trucky_job
     payload = await fetch_trucky_jobs_page(page)
     records = payload if isinstance(payload, list) else payload.get('data')
     if not isinstance(records, list):
         raise TruckyJobLookupUnavailable('Unsupported company jobs response')
+    return await _ingest_authenticated_job_records(pool, records)
+
+
+async def _ingest_authenticated_job_records(pool, records):
+    """Shared evidence path for live page one and durable historical sweeps."""
+    from collections import Counter
+    import unified_driver_profiles as profiles
+    from trucky_verified_job_candidate_v2 import normalize_verified_trucky_job
     counts = Counter()
     for job in records:
         counts['observed'] += 1
-        if not isinstance(job, dict) or type(job.get('user_id')) is not int or type(job.get('id')) is not int:
+        if (not isinstance(job, dict) or type(job.get('user_id')) is not int
+                or type(job.get('id')) is not int or job['user_id']<=0 or job['id']<=0):
             counts['invalid_record'] += 1
             continue
         if os.getenv('AT_V2_PENDING_HISTORY_ENABLED') == 'YES':
@@ -332,3 +338,40 @@ async def ingest_authenticated_completed_jobs(pool, page=1):
         counts['receipts_verified'] += int(transitioned.split()[-1])
         counts['recorded' if inserted else 'replayed'] += 1
     return {'status':'evidence_processed','counts':dict(counts),'mileage_awarded':False}
+
+
+async def sweep_saved_trucky_history(pool):
+    """One bounded historical page per poll; never an award or complete-feed claim.
+
+    Page one keeps its existing live poll. A database lock serializes sweep
+    workers. Evidence commits before the checkpoint: a crash may replay a page
+    but cannot skip it. Failures roll back the checkpoint, not retained evidence.
+    Old jobs still require the same signed receipt/ownership checks to normalize.
+    """
+    if (os.getenv('AT_V2_PENDING_HISTORY_ENABLED')!='YES'
+            or os.getenv('AT_V2_ISOLATED_STAGING')=='YES'):
+        return {'status':'disabled','mileage_awarded':False}
+    import hashlib
+    import json
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if not await conn.fetchval('SELECT pg_try_advisory_xact_lock(490410027)'):
+                return {'status':'worker_busy','mileage_awarded':False}
+            await conn.execute("INSERT INTO pending_history_capture_cursor_v2(provider) VALUES('trucky') ON CONFLICT DO NOTHING")
+            cursor=await conn.fetchrow("SELECT next_page,previous_page_sha256 FROM pending_history_capture_cursor_v2 WHERE provider='trucky' FOR UPDATE")
+            page=cursor['next_page']
+            payload=await fetch_trucky_jobs_page(page)
+            records=payload if isinstance(payload,list) else payload.get('data') if isinstance(payload,dict) else None
+            if not isinstance(records,list):
+                raise TruckyJobLookupUnavailable('Unsupported company jobs response')
+            if not records:
+                await conn.execute("UPDATE pending_history_capture_cursor_v2 SET next_page=2,previous_page_sha256=NULL,last_success_at=NOW(),completed_sweeps=completed_sweeps+1 WHERE provider='trucky'")
+                return {'status':'sweep_end_observed','page':page,'feed_complete':False,'mileage_awarded':False}
+            digest=hashlib.sha256(json.dumps([r.get('id') if isinstance(r,dict) else None for r in records],separators=(',',':')).encode()).hexdigest()
+            if digest==cursor['previous_page_sha256']:
+                return {'status':'repeated_page_pending','page':page,'feed_complete':False,'mileage_awarded':False}
+            result=await _ingest_authenticated_job_records(pool,records)
+            if page==100:
+                return {'status':'page_limit_pending','page':page,'counts':result['counts'],'feed_complete':False,'mileage_awarded':False}
+            await conn.execute("UPDATE pending_history_capture_cursor_v2 SET next_page=$1,previous_page_sha256=$2,last_success_at=NOW() WHERE provider='trucky'",page+1,digest)
+            return {'status':'history_page_processed','page':page,'counts':result['counts'],'feed_complete':False,'mileage_awarded':False}

@@ -2812,6 +2812,9 @@ async def ingest_trucky_company_jobs():
         result = await trucky_jobs_api_v2.ingest_authenticated_completed_jobs(db_pool)
         import json
         print('TRUCKY_API_INGEST ' + json.dumps(result,sort_keys=True),flush=True)
+        if os.getenv('AT_V2_PENDING_HISTORY_ENABLED') == 'YES':
+            sweep = await trucky_jobs_api_v2.sweep_saved_trucky_history(db_pool)
+            print('TRUCKY_HISTORY_SWEEP ' + json.dumps(sweep,sort_keys=True),flush=True)
     except Exception as error:
         print(f'TRUCKY_API_INGEST RETRY PENDING: {type(error).__name__}',flush=True)
 

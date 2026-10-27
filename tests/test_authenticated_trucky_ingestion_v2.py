@@ -17,6 +17,18 @@ class Pool:
     def acquire(self):return Acquire(self)
 
 class AuthenticatedTruckyIngestionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_history_sweep_disabled_before_database_access(self):
+        import os
+        for env in ({'AT_V2_PENDING_HISTORY_ENABLED':'NO'},
+                    {'AT_V2_PENDING_HISTORY_ENABLED':'YES','AT_V2_ISOLATED_STAGING':'YES'}):
+            with patch.dict(os.environ,env,clear=True):
+                self.assertEqual((await api.sweep_saved_trucky_history(None))['status'],'disabled')
+
+    async def test_nonpositive_api_identity_does_not_break_capture_batch(self):
+        result,record=await self.run_ingest(Pool(),{**JOB,'user_id':0})
+        self.assertEqual(result['counts']['invalid_record'],1)
+        record.assert_not_awaited()
+
     async def run_ingest(self,pool,job=None,inserted=True):
         with patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':[dict(JOB) if job is None else job]})),patch('unified_driver_profiles.record_normalized_provider_job',AsyncMock(return_value=inserted)) as record:
             result=await api.ingest_authenticated_completed_jobs(pool)

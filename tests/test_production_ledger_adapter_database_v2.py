@@ -305,6 +305,74 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(before,[dict(r) for r in await conn.fetch('SELECT * FROM unified_provider_links WHERE discord_user_id=$1',user)])
             self.assertIsNone(await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1',user))
 
+    async def test_history_sweep_checkpoint_restart_replay_and_failed_page(self):
+        from unittest.mock import AsyncMock,patch
+        from pending_driver_history_v2 import install_schema,record_pending_history
+        import trucky_jobs_api_v2 as api
+        await install_schema(self.pool)
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM pending_history_capture_cursor_v2")
+        records=[{'id':991234567890124300,'user_id':991234567890124301,'company_id':49041,
+                  'status':'completed','driven_distance_km':100}]
+        async def capture(pool,rows):
+            for row in rows:
+                await record_pending_history(pool,'trucky',str(row['id']),str(row['user_id']),
+                    {'status':'completed','driven_distance_km':row['driven_distance_km']},source_kind='authenticated_api')
+            return {'counts':{'history_retained':len(rows)}}
+        env={'AT_V2_PENDING_HISTORY_ENABLED':'YES','AT_V2_ISOLATED_STAGING':'NO'}
+        with patch.dict(os.environ,env),patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value={'data':records})) as fetch,patch.object(api,'_ingest_authenticated_job_records',side_effect=capture):
+            result=await api.sweep_saved_trucky_history(self.pool)
+            self.assertEqual(result['status'],'history_page_processed')
+            fetch.assert_awaited_with(2)
+            self.assertFalse(result['mileage_awarded'])
+            self.assertFalse(result['feed_complete'])
+            self.assertEqual((await api.sweep_saved_trucky_history(self.pool))['status'],'repeated_page_pending')
+            fetch.assert_awaited_with(3)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval("SELECT next_page FROM pending_history_capture_cursor_v2"),3)
+        async def failed_capture(pool,rows):
+            await capture(pool,rows)
+            raise RuntimeError('interrupted after evidence commit')
+        next_records=[{**records[0],'id':991234567890124302}]
+        with patch.dict(os.environ,env),patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value=next_records)),patch.object(api,'_ingest_authenticated_job_records',side_effect=failed_capture):
+            with self.assertRaises(RuntimeError):await api.sweep_saved_trucky_history(self.pool)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval("SELECT next_page FROM pending_history_capture_cursor_v2"),3)
+        with patch.dict(os.environ,env),patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value=next_records)),patch.object(api,'_ingest_authenticated_job_records',side_effect=capture):
+            self.assertEqual((await api.sweep_saved_trucky_history(self.pool))['page'],3)
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval("SELECT replay_count FROM pending_provider_job_history_v2 WHERE provider_job_id='991234567890124302'"),1)
+            await conn.execute("UPDATE pending_history_capture_cursor_v2 SET next_page=100,previous_page_sha256=NULL")
+        with patch.dict(os.environ,env),patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value=next_records)),patch.object(api,'_ingest_authenticated_job_records',side_effect=capture):
+            limit=await api.sweep_saved_trucky_history(self.pool)
+            self.assertEqual(limit['status'],'page_limit_pending')
+            self.assertFalse(limit['feed_complete'])
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval('SELECT next_page FROM pending_history_capture_cursor_v2'),100)
+        with patch.dict(os.environ,env),patch.object(api,'fetch_trucky_jobs_page',AsyncMock(return_value=[])):
+            self.assertEqual((await api.sweep_saved_trucky_history(self.pool))['status'],'sweep_end_observed')
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval("SELECT next_page FROM pending_history_capture_cursor_v2"),2)
+            self.assertEqual(await conn.fetchval("SELECT completed_sweeps FROM pending_history_capture_cursor_v2"),1)
+
+    async def test_history_sweep_concurrent_workers_and_invalid_schema_hold_checkpoint(self):
+        from unittest.mock import AsyncMock,patch
+        from pending_driver_history_v2 import install_schema
+        import trucky_jobs_api_v2 as api
+        await install_schema(self.pool)
+        async with self.pool.acquire() as conn:await conn.execute('DELETE FROM pending_history_capture_cursor_v2')
+        entered=asyncio.Event();release=asyncio.Event()
+        async def fetch(page):
+            entered.set();await release.wait();return {'unexpected':[]}
+        with patch.dict(os.environ,{'AT_V2_PENDING_HISTORY_ENABLED':'YES','AT_V2_ISOLATED_STAGING':'NO'}),patch.object(api,'fetch_trucky_jobs_page',side_effect=fetch):
+            worker=asyncio.create_task(api.sweep_saved_trucky_history(self.pool))
+            await asyncio.wait_for(entered.wait(),5)
+            try:self.assertEqual((await api.sweep_saved_trucky_history(self.pool))['status'],'worker_busy')
+            finally:release.set()
+            with self.assertRaises(api.TruckyJobLookupUnavailable):await worker
+        async with self.pool.acquire() as conn:
+            self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM pending_history_capture_cursor_v2'),0)
+
     async def test_historical_preview_reads_consistent_database_without_writes(self):
         from historical_mileage_preview_v2 import read_historical_snapshot, build_historical_preview
         user = 991234567890124100
