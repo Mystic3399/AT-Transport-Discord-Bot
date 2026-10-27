@@ -26,6 +26,43 @@ FIELDS=('job_id','discord_user_id','trucksbook_name','recorded_distance','actual
 class AuditPreviewError(ValueError):
     pass
 
+def audit_confirmation_guidance(preview):
+    if preview['jobs'] == 0:
+        return ('No approved additions: CONFIRM will not change any profile mileage. '
+                'Stored or held Trucky jobs are not part of this TrucksBook repair batch.')
+    return ('Review the driver breakdown below, then run `!mileageaudit CONFIRM` '
+            'within 20 minutes in this channel. This applies only the displayed '
+            'TrucksBook repairs; held Trucky jobs are not approved by this confirmation.')
+
+
+async def read_trucky_allocation_audit(pool, discord_user_id=None):
+    """Report actual credits and unresolved decisions, never proposed additions."""
+    if discord_user_id is not None and (type(discord_user_id) is not int or discord_user_id <= 0):
+        raise ValueError('Invalid driver')
+    result = dict(credited_real_jobs=0, credited_real_miles='0', credited_race_jobs=0,
+                  credited_race_miles='0', held_real_jobs=0, mileage_changed=False)
+    async with pool.acquire() as conn:
+        async with conn.transaction(readonly=True, isolation='repeatable_read'):
+            if not await conn.fetchval("SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"):
+                return result
+            rows = await conn.fetch("""SELECT mileage_type,COUNT(*) AS jobs,SUM(miles)::text AS miles
+                FROM unified_v2_production_credit_ledger WHERE provider='trucky'
+                  AND ($1::bigint IS NULL OR discord_user_id=$1) GROUP BY mileage_type""", discord_user_id)
+            for row in rows:
+                result['credited_'+row['mileage_type']+'_jobs'] = row['jobs']
+                result['credited_'+row['mileage_type']+'_miles'] = row['miles']
+            if await conn.fetchval("SELECT to_regclass('unified_v2_production_mileage_decisions') IS NOT NULL"):
+                result['held_real_jobs'] = await conn.fetchval("""SELECT COUNT(*) FROM (
+                    SELECT DISTINCT ON (d.provider_job_id) d.*
+                    FROM unified_v2_production_mileage_decisions d WHERE d.provider='trucky'
+                      AND ($1::bigint IS NULL OR d.discord_user_id=$1)
+                    ORDER BY d.provider_job_id,d.decision_id DESC
+                ) latest WHERE decision='pending_reconciliation'
+                  AND reason_code='historical_or_trucksbook_overlap'
+                  AND NOT EXISTS(SELECT 1 FROM unified_v2_production_credit_ledger l
+                    WHERE l.provider='trucky' AND l.provider_job_id=latest.provider_job_id)""", discord_user_id)
+    return result
+
 def audit_source_allowed(webhook_id,config=None):
     env=os.environ if config is None else config
     value=env.get('TRUCKSBOOK_HISTORY_WEBHOOK_IDS') or env.get('TRUCKSBOOK_WEBHOOK_ID','')
@@ -114,6 +151,15 @@ async def validate_mileage_audit_preview(conn,guild_id,channel_id,reviewer_id,ca
                 or str(link)!=candidate['source_provider_account_id']):
             raise AuditPreviewError('A source or driver account link changed. Run a fresh audit.')
     for driver in snapshot['drivers']:
+        # Same lock/order as the live Trucky worker. Disabling that worker
+        # does not make its existing Real credits safe to duplicate via repair.
+        await conn.execute('SELECT pg_advisory_xact_lock($1)',driver['discord_user_id'])
+        if await conn.fetchval("SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"):
+            overlap = await conn.fetchval("""SELECT EXISTS(SELECT 1
+                FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1
+                  AND provider='trucky' AND mileage_type='real')""",driver['discord_user_id'])
+            if overlap:
+                raise AuditPreviewError('This driver has credited Trucky Real jobs. Cross-provider reconciliation is required before adding TrucksBook repairs. No mileage changed.')
         total=await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1 FOR UPDATE',driver['discord_user_id'])
         if int(total or 0)!=driver['current_real_miles']:
             raise AuditPreviewError('A driver balance changed after the preview. Run !mileageaudit again.')

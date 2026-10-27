@@ -142,3 +142,34 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
         for key in ('AT_V2_ISOLATED_STAGING','AT_V2_PRODUCTION_MILEAGE_ENABLED'):
             with patch.dict(os.environ,{key:'YES'}):await self.apply(self.ctx,'CONFIRM')
             self.assertEqual(await self.total(),1000)
+
+
+    async def test_empty_confirmation_is_not_recorded_as_applied(self):
+        preview=await self.preview(ids=[])
+        self.assertEqual(preview['addition'],0)
+        await self.apply(self.ctx,'CONFIRM')
+        self.assertEqual(await self.total(),1000)
+        async with self.pool.acquire() as c:
+            self.assertIsNone(await c.fetchval('SELECT applied_at FROM mileage_audit_previews_v2 WHERE preview_id=$1',preview['preview_id']))
+        self.assertIn('No mileage changed',self.ctx.reply.call_args.args[0])
+
+    async def test_trucky_real_credit_blocks_legacy_repair_even_with_worker_disabled(self):
+        from unified_driver_profiles import SCHEMA as PROFILE
+        from unified_production_ledger_adapter_v2 import SCHEMA as LEDGER
+        await self.preview()
+        async with self.pool.acquire() as c:
+            await c.execute(PROFILE)
+            await c.execute(LEDGER)
+            await c.execute("INSERT INTO unified_driver_profiles(discord_user_id,status) VALUES($1,'active')",self.user)
+            await c.execute("""INSERT INTO unified_v2_production_credit_ledger
+                (provider,provider_job_id,discord_user_id,provider_account_id,mileage_type,miles,
+                 canonical_credit_key,source_evidence_sha256,ownership_evidence_sha256)
+                VALUES('trucky',$1,$2,'999','real',10,$1,$3,$3)""",self.job,self.user,'a'*64)
+        try:
+            await self.apply(self.ctx,'CONFIRM')
+            self.assertEqual(await self.total(),1000)
+            self.assertIn('Cross-provider reconciliation is required',self.ctx.reply.call_args.args[0])
+        finally:
+            async with self.pool.acquire() as c:
+                await c.execute('DELETE FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',self.user)
+                await c.execute('DELETE FROM unified_driver_profiles WHERE discord_user_id=$1',self.user)

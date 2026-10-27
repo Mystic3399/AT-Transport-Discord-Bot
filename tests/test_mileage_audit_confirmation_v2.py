@@ -45,3 +45,24 @@ class AuditSourceTests(unittest.TestCase):
         self.assertEqual(explicit_audit_miles(embed('1,234 mi')),1234)
         for value in ('123 km','123.5 mi','123','-123 mi'):
             self.assertIsNone(explicit_audit_miles(embed(value)))
+
+
+class AuditOutcomeTests(unittest.TestCase):
+    def test_empty_preview_does_not_invite_confirmation(self):
+        from mileage_audit_confirmation_v2 import audit_confirmation_guidance
+        text=audit_confirmation_guidance({'jobs':0})
+        self.assertIn('CONFIRM will not change',text)
+        self.assertNotIn('within 20 minutes',text)
+
+    def test_positive_preview_only_approves_explicit_repairs(self):
+        from mileage_audit_confirmation_v2 import audit_confirmation_guidance
+        text=audit_confirmation_guidance({'jobs':2})
+        self.assertIn('!mileageaudit CONFIRM',text)
+        self.assertIn('held Trucky jobs are not approved',text)
+
+    def test_allocation_report_is_displayed_separately(self):
+        node=next(n for n in ast.parse(SOURCE).body if isinstance(n,ast.AsyncFunctionDef) and n.name=='mileage_audit')
+        body=ast.unparse(node)
+        self.assertIn('read_trucky_allocation_audit',body)
+        self.assertIn('Already credited Real',body)
+        self.assertIn('Real jobs held',body)

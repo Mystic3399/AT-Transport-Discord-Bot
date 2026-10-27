@@ -186,3 +186,18 @@ class LinkedAllocationDatabaseTests(unittest.IsolatedAsyncioTestCase):
         async with self.pool.acquire() as c:
             self.assertEqual(await c.fetchval('SELECT COUNT(*) FROM processed_jobs'),0)
             self.assertEqual(await c.fetchval('SELECT real_miles FROM driver_progress'),0)
+
+
+    async def test_audit_reports_actual_credits_and_pending_decisions_without_writes(self):
+        from mileage_audit_confirmation_v2 import read_trucky_allocation_audit
+        self.assertEqual(await self.settle(),'credited_real')
+        async with self.pool.acquire() as c:
+            await c.execute('INSERT INTO driver_links VALUES(789)')
+        self.assertEqual(await self.settle(observation(job='702')),'pending_reconciliation')
+        result=await read_trucky_allocation_audit(self.pool,789)
+        self.assertEqual(result['credited_real_jobs'],1)
+        self.assertEqual(result['held_real_jobs'],1)
+        self.assertFalse(result['mileage_changed'])
+        other=await read_trucky_allocation_audit(self.pool,790)
+        self.assertEqual(other['credited_real_jobs'],0)
+        self.assertEqual(other['held_real_jobs'],0)

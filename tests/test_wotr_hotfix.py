@@ -194,12 +194,17 @@ class AuditApplyTests(unittest.TestCase):
                 explicit_audit_miles=explicit_audit_miles,create_mileage_audit_preview=preview,
                 validate_mileage_audit_preview=validate,consume_mileage_audit_preview=consume)
             from unittest.mock import AsyncMock
+            ns['read_pending_account_inventory']=AsyncMock(return_value={'accounts':[]})
             ns['read_pending_race']=AsyncMock(return_value=dict(verified_pending_miles=0,verified_pending_jobs=0,
                 unverified_miles=0,unverified_jobs=0,classification_pending_jobs=0,conflicting_jobs=0))
-            ns['read_pending_account_inventory']=AsyncMock(return_value={'accounts':[]})
             audit = load_function('mileage_audit', ns)
             apply = load_function('mileage_apply', ns)
-            await audit(ctx)
+            from unittest.mock import patch
+            with patch('mileage_audit_confirmation_v2.read_trucky_allocation_audit', AsyncMock(return_value=dict(
+                    credited_real_jobs=0,credited_real_miles='0',credited_race_jobs=0,
+                    credited_race_miles='0',held_real_jobs=0,mileage_changed=False))):
+                await audit(ctx)
+            self.assertTrue(all(len(text)<=2000 for text in replies))
             self.assertEqual(total[0], 13)  # preview never credits mileage
             self.assertEqual(set(candidates), {'68007306', '123', '127'})
             self.assertEqual(candidates['123']['missing_distance'], 100)
@@ -219,7 +224,10 @@ class AuditApplyTests(unittest.TestCase):
             self.assertEqual(jobs['68007306']['processed_at'], delivered)
             self.assertTrue(connection.asserted_insert)
             self.assertGreater(len(syncs), 0)
-            await audit(ctx)
+            with patch('mileage_audit_confirmation_v2.read_trucky_allocation_audit', AsyncMock(return_value=dict(
+                    credited_real_jobs=0,credited_real_miles='0',credited_race_jobs=0,
+                    credited_race_miles='0',held_real_jobs=0,mileage_changed=False))):
+                await audit(ctx)
             await apply(ctx, 'CONFIRM')
             self.assertEqual(total[0], 336)
             # If a live delivery wins after audit, consume its candidate with no credit.

@@ -4153,6 +4153,8 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
 
     preview=await create_mileage_audit_preview(db_pool,ctx.guild.id,ctx.channel.id,ctx.author.id,reviewed_job_ids)
     race=await read_pending_race(db_pool,target_driver_id)
+    from mileage_audit_confirmation_v2 import audit_confirmation_guidance, read_trucky_allocation_audit
+    trucky_allocation=await read_trucky_allocation_audit(db_pool,target_driver_id)
     await ctx.send(
         "✅ **Dry-run audit complete — no mileage changed.**\n"
         f"Mileage channels scanned: `{channels_scanned:,}`\n"
@@ -4175,8 +4177,14 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         f"This preview approves only `{preview['jobs']:,}` reviewed jobs / `{preview['addition']:,}` miles.\n"
         f"Held for source/account evidence: `{preview['held_jobs']:,}` jobs.\n"
         "Unexplained balances are already in existing totals and are not added again.\n"
-        "Review the driver breakdown below, then run `!mileageaudit CONFIRM` within 20 minutes in this channel."
-        " Race miles remain separate and are not applied by this confirmation."
+        + audit_confirmation_guidance(preview)
+    )
+    await ctx.send(
+        "**Trucky allocation — separate from this repair preview**\n"
+        + f"Already credited Real: `{float(trucky_allocation['credited_real_miles']):,.2f}` miles / `{trucky_allocation['credited_real_jobs']}` jobs\n"
+        + f"Already credited Race: `{float(trucky_allocation['credited_race_miles']):,.2f}` miles / `{trucky_allocation['credited_race_jobs']}` jobs\n"
+        + f"Real jobs held for cross-provider/historical reconciliation: `{trucky_allocation['held_real_jobs']}`\n"
+        + "Held jobs remain stored. CONFIRM cannot release them or add them to the profile."
     )
     for offset in range(0,len(preview['drivers']),15):
         lines=[f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + **{d['addition']:,}** = {d['proposed_real_miles']:,} Real miles ({d['jobs']} jobs)"
@@ -4366,8 +4374,7 @@ async def mileage_apply(ctx, confirmation: str = ""):
                 return
             candidates=[c for c in candidates if c['job_id'] in approval['job_ids']]
             if not candidates:
-                await consume_mileage_audit_preview(connection,approval['preview_id'])
-                await ctx.reply('No verified additions were approved in that preview. No mileage changed.',mention_author=False)
+                await ctx.reply('No additions were approved in this preview. No mileage changed. Stored or held Trucky jobs are not approved by this TrucksBook repair command.',mention_author=False)
                 return
 
             for candidate in candidates:
