@@ -6386,15 +6386,26 @@ async def check_drivers_v2(ctx):
 @commands.guild_only()
 @commands.has_permissions(administrator=True)
 @commands.cooldown(1, 30, commands.BucketType.user)
-async def check_driver_v2(ctx, driver: discord.User):
+async def check_driver_v2(ctx, *, driver: str = ""):
     if ctx.guild.id != GUILD_ID or db_pool is None:
         return
     reports = await refresh_driver_memberships_v2(ctx.guild)
-    report = next((r for r in reports if r["discord_user_id"] == driver.id), None)
+    from driver_membership_v2 import resolve_driver_query
+    try:
+        driver_id = resolve_driver_query(driver, ctx.guild, reports)
+    except ValueError:
+        await ctx.reply("More than one driver matches that name. Select their Discord @mention or use their numeric Discord ID.",
+                        allowed_mentions=discord.AllowedMentions.none())
+        return
+    if driver_id is None:
+        await ctx.reply("Driver not found. Use `!check @Driver`, their exact Discord/TrucksBook name, or their numeric Discord ID.",
+                        allowed_mentions=discord.AllowedMentions.none())
+        return
+    report = next((r for r in reports if r["discord_user_id"] == driver_id), None)
     if report is None:
         await ctx.reply("No saved account links for that driver; company membership is unknown.")
         return
-    await ctx.reply(f"{driver.mention}: {report['company']}\nDiscord: {report['discord']}\n"
+    await ctx.reply(f"<@{driver_id}>: {report['company']}\nDiscord: {report['discord']}\n"
                     f"TrucksBook: {report['trucksbook']} | Trucky: {report['trucky']}\n"
                     f"Saved TrucksBook name: {discord.utils.escape_markdown(report['trucksbook_name'] or 'not saved')}\n"
                     f"Saved TrucksBook ID: {report['trucksbook_user_id'] or 'not saved'}\n"

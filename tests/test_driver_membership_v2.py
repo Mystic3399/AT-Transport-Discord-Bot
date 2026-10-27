@@ -91,3 +91,27 @@ class SavedRegistrationTests(unittest.IsolatedAsyncioTestCase):
         lookup.assert_not_awaited()
         self.assertEqual(report['trucksbook'], 'unknown')
         self.assertTrue(report['trucksbook_link_conflict'])
+
+
+class NameResolutionTests(unittest.TestCase):
+    def setUp(self):
+        from types import SimpleNamespace
+        self.guild = SimpleNamespace(members=[SimpleNamespace(id=1, bot=False,
+            name='quietghost', display_name='QUIETGHOST', global_name=None)])
+        self.reports = [{'discord_user_id': 1, 'trucksbook_name': 'Quietghost'}]
+
+    def test_plain_name_case_and_optional_at(self):
+        from driver_membership_v2 import resolve_driver_query
+        for query in ('@Quietghost', 'QUIETGHOST', 'quietghost', '<@1>', '<@!1>', '1'):
+            self.assertEqual(resolve_driver_query(query, self.guild, self.reports), 1)
+
+    def test_ambiguous_names_are_not_guessed(self):
+        from driver_membership_v2 import resolve_driver_query
+        with self.assertRaises(ValueError):
+            resolve_driver_query('Quietghost', self.guild,
+                self.reports + [{'discord_user_id': 2, 'trucksbook_name': 'Quietghost'}])
+
+    def test_no_fuzzy_matching_and_missing_name(self):
+        from driver_membership_v2 import resolve_driver_query
+        for query in ('', '@', 'ghost', '0'):
+            self.assertIsNone(resolve_driver_query(query, self.guild, self.reports))

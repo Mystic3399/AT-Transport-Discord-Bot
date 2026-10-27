@@ -51,3 +51,27 @@ async def inspect_drivers(rows, guild, roster, tb_lookup):
         async with semaphore:
             return await inspect_driver(dict(row), guild, roster, tb_lookup)
     return await asyncio.gather(*(inspect(row) for row in rows))
+
+
+def resolve_driver_query(query, guild, reports):
+    """Resolve mentions/IDs or unique exact names; never guess between drivers."""
+    import re
+    text = query.strip()
+    mention = re.fullmatch(r'<@!?(\d+)>', text)
+    if mention or text.isascii() and text.isdecimal():
+        value = int(mention.group(1) if mention else text)
+        return value if value > 0 else None
+    name = text.removeprefix('@').strip().casefold()
+    if not name:
+        return None
+    matches = set()
+    for member in guild.members:
+        if not member.bot and any(str(value or '').casefold() == name for value in
+                (member.name, member.display_name, getattr(member, 'global_name', None))):
+            matches.add(member.id)
+    for report in reports:
+        if str(report.get('trucksbook_name') or '').casefold() == name:
+            matches.add(report['discord_user_id'])
+    if len(matches) > 1:
+        raise ValueError('ambiguous_driver_name')
+    return next(iter(matches), None)
