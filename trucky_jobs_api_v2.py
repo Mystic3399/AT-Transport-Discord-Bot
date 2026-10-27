@@ -330,7 +330,23 @@ async def _ingest_authenticated_job_records(pool, records):
             classification_kwargs=({'classification_evidence':candidate['classification_evidence']}
                 if 'classification_evidence' in candidate else {})
             if 'job_metadata' in candidate:
-                classification_kwargs['job_metadata']=candidate['job_metadata']
+                # Previously normalized records are immutable. New API route
+                # evidence lives in pending history; it must not turn an old
+                # identical delivery into a conflicting replay solely because
+                # that old record predates metadata capture.
+                async with pool.acquire() as conn:
+                    previous_payload = await conn.fetchval('''SELECT source_payload
+                        FROM unified_provider_job_events WHERE provider='trucky'
+                        AND provider_job_id=$1''',candidate['provider_job_id'])
+                if isinstance(previous_payload,str):
+                    import json
+                    previous_payload=json.loads(previous_payload)
+                if previous_payload is None or (isinstance(previous_payload,dict)
+                        and previous_payload.get('job_metadata') is not None):
+                    classification_kwargs['job_metadata']=candidate['job_metadata']
+                elif not isinstance(previous_payload,dict):
+                    counts['conflicting_event_pending'] += 1
+                    continue
             inserted = await profiles.record_normalized_provider_job(pool,'trucky',candidate['provider_job_id'],
                 owner['discord_user_id'],candidate['kilometers'],'km',
                 provider_account_id=owner['provider_account_id'],mileage_type=candidate['mileage_type'],

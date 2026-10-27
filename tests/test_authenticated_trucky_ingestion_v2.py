@@ -10,9 +10,9 @@ class Acquire:
     async def __aexit__(self,*args):pass
 
 class Pool:
-    def __init__(self,owners=None,receipt=True):
+    def __init__(self,owners=None,receipt=True,previous_payload=None):
         self.fetch=AsyncMock(return_value=owners if owners is not None else [dict(discord_user_id=789,provider_account_id='456')])
-        self.fetchval=AsyncMock(return_value=receipt)
+        self.fetchval=AsyncMock(side_effect=lambda sql,*args: previous_payload if 'SELECT source_payload' in sql else receipt)
         self.execute=AsyncMock(return_value="UPDATE 1")
     def acquire(self):return Acquire(self)
 
@@ -113,3 +113,18 @@ class AuthenticatedTruckyIngestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('shared_journey_id',evidence)
         record.assert_not_awaited()
         self.assertFalse(result['mileage_awarded'])
+
+    async def test_old_metadata_less_event_replays_without_rewriting_its_audit(self):
+        route=dict(source_city_name='Paris',destination_city_name='Lille',cargo_name='Pet Food')
+        result,record=await self.run_ingest(Pool(previous_payload={'job_metadata':None}),{**JOB,**route},inserted=False)
+        self.assertNotIn('job_metadata',record.call_args.kwargs)
+        self.assertEqual(result['counts']['replayed'],1)
+        self.assertFalse(result['mileage_awarded'])
+
+    async def test_existing_metadata_is_still_compared_and_invalid_stored_payload_is_held(self):
+        route=dict(source_city_name='Paris',destination_city_name='Lille',cargo_name='Pet Food')
+        _,record=await self.run_ingest(Pool(previous_payload={'job_metadata':route}),{**JOB,**route})
+        self.assertIn('job_metadata',record.call_args.kwargs)
+        result,record=await self.run_ingest(Pool(previous_payload=True),{**JOB,**route})
+        self.assertEqual(result['counts']['conflicting_event_pending'],1)
+        record.assert_not_awaited()
