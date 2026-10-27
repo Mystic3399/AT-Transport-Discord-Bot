@@ -5012,6 +5012,15 @@ async def cancel_verification_record(
 # A&T DRIVER PROFILE
 # --------------------------------------------------
 
+def profile_linked_accounts(profile):
+    """Display saved account links; Linked never implies authenticated mileage."""
+    if 'linked_accounts' in profile:
+        return profile['linked_accounts']
+    return [dict(provider='TrucksBook',name=profile['trucksbook_name'],
+                 account_id=profile.get('trucksbook_user_id'),status='Linked')]
+
+
+
 def build_driver_profile_embed(target_member, profile):
     """Build the original read-only embed used as the safe fallback."""
     trucksbook_name = profile["trucksbook_name"]
@@ -5025,9 +5034,11 @@ def build_driver_profile_embed(target_member, profile):
     )
     embed.set_thumbnail(url=target_member.display_avatar.url)
     embed.add_field(name="Discord Driver", value=target_member.mention, inline=True)
-    tb_id = profile.get("trucksbook_user_id")
-    tb_label = f"`{trucksbook_name}`" + (f"\nAccount ID: `{tb_id}`" if tb_id else "\nAccount ID not recorded")
-    embed.add_field(name="TrucksBook Driver", value=tb_label, inline=True)
+    for account in profile_linked_accounts(profile):
+        label = f"`{discord.utils.escape_markdown(account['name'])}`"
+        label += f"\nAccount ID: `{account['account_id']}`" if account['account_id'] else "\nAccount ID not recorded"
+        label += f"\nStatus: {account['status']}"
+        embed.add_field(name=account['provider'] + " Driver",value=label,inline=True)
     embed.add_field(name="Current Progression Rank", value=f"🏅 **{current_rank_name}**", inline=False)
     embed.add_field(name="Real Miles", value=f"🚛 **{real_miles:,}**", inline=True)
     if profile.get("trucky_race_miles") is not None:
@@ -5090,6 +5101,7 @@ def build_driver_profile_embed(target_member, profile):
     )
     embed.set_footer(text="A&T Transport LTD • Verified Real data • Driven Beyond Horizons")
     return embed
+
 
 
 def profile_font_candidates(bold=False):
@@ -5719,10 +5731,19 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
     profile_text(draw, (200, 388), safe_discord_name, discord_font, white, anchor="mm", shadow=3)
     profile_text(draw, (200, 431), "DISCORD DRIVER", load_profile_font(13, True), ice, anchor="ma", shadow=0)
     draw.line((78, 455, 323, 455), fill=(91, 197, 214, 130), width=1)
-    profile_text(draw, (200, 480), "TRUCKSBOOK DRIVER", load_profile_font(12, True), ice, anchor="ma", shadow=0)
-    profile_text(draw, (200, 515), safe_trucksbook_name, trucksbook_font, muted, anchor="ma")
-    if profile.get("trucksbook_user_id"):
-        profile_text(draw, (200, 535), f"ID {profile['trucksbook_user_id']}", load_profile_font(11), muted, anchor="ma", shadow=0)
+    accounts = profile_linked_accounts(profile)
+    heading = "LINKED ACCOUNTS" if len(accounts)>1 else accounts[0]['provider'].upper()+" DRIVER"
+    profile_text(draw,(200,480),heading,load_profile_font(12,True),ice,anchor="ma",shadow=0)
+    if len(accounts)>1:
+        for index,account in enumerate(accounts):
+            label = f"{account['provider']}: {account['name']}"
+            if account['account_id']:label += f" | {account['account_id']}"
+            label,font=fit_profile_label(draw,sanitise_profile_name(label),270,13,True,min_size=9)
+            profile_text(draw,(200,510+index*23),label,font,muted,anchor="ma",shadow=0)
+    else:
+        profile_text(draw,(200,515),safe_trucksbook_name,trucksbook_font,muted,anchor="ma")
+        if accounts[0]['account_id']:
+            profile_text(draw,(200,535),f"ID {accounts[0]['account_id']}",load_profile_font(11),muted,anchor="ma",shadow=0)
     draw.line((78, 552, 323, 552), fill=(91, 197, 214, 90), width=1)
     identity_verified = load_profile_icon("verified", (45, 45))
     profile_composite(card, identity_verified, (92, 554))
@@ -5994,6 +6015,7 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
     return output
 
 
+
 def generate_profile_prestige_previews(output_directory):
     """Render native and mobile synthetic previews without production reads."""
     output_directory = Path(output_directory)
@@ -6060,10 +6082,14 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     row = await connection.fetchrow(
         """
         SELECT
-            links.trucksbook_name,
+            COALESCE(links.trucksbook_name,tb.provider_display_name,tr.provider_display_name,'A&T Driver') AS trucksbook_name,
+            links.discord_user_id IS NOT NULL AS legacy_linked,
+            tr.provider_account_id AS trucky_account_id,
+            tr.provider_display_name AS trucky_display_name,
+            tr.verified_at IS NOT NULL AS trucky_verified,
             COALESCE(links.trucksbook_user_id::text,
                 (SELECT provider_account_id FROM unified_provider_links
-                 WHERE discord_user_id=links.discord_user_id AND provider='trucksbook'))
+                 WHERE discord_user_id=driver.discord_user_id AND provider='trucksbook'))
                 AS trucksbook_user_id,
             COALESCE(progress.real_miles, 0)::BIGINT AS real_miles,
             COALESCE(jobs.jobs_completed, 0)::BIGINT AS jobs_completed,
@@ -6077,9 +6103,12 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
             fame.immortal_number,
             COALESCE(wins.weekly_wins, 0)::BIGINT AS weekly_wins,
             COALESCE(wins.monthly_wins, 0)::BIGINT AS monthly_wins
-        FROM driver_links AS links
+        FROM (SELECT $1::BIGINT AS discord_user_id) AS driver
+        LEFT JOIN driver_links AS links ON links.discord_user_id=driver.discord_user_id
+        LEFT JOIN unified_provider_links AS tb ON tb.discord_user_id=driver.discord_user_id AND tb.provider='trucksbook'
+        LEFT JOIN unified_provider_links AS tr ON tr.discord_user_id=driver.discord_user_id AND tr.provider='trucky' 
         LEFT JOIN driver_progress AS progress
-            ON progress.discord_user_id = links.discord_user_id
+            ON progress.discord_user_id = driver.discord_user_id
         LEFT JOIN LATERAL (
             SELECT
                 COUNT(*)::BIGINT AS jobs_completed,
@@ -6087,7 +6116,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
                     AS average_job_distance,
                 MAX(accepted_distance)::BIGINT AS longest_job_distance
             FROM processed_jobs
-            WHERE discord_user_id = links.discord_user_id
+            WHERE discord_user_id = driver.discord_user_id
               AND LOWER(statistics) = 'real'
               AND accepted_distance > 0
         ) AS jobs ON TRUE
@@ -6095,10 +6124,10 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
             SELECT ARRAY_AGG(achievement_miles ORDER BY achievement_miles)
                 AS earned_thresholds
             FROM permanent_achievements
-            WHERE discord_user_id = links.discord_user_id
+            WHERE discord_user_id = driver.discord_user_id
         ) AS achievements ON TRUE
         LEFT JOIN hall_of_fame AS fame
-            ON fame.discord_user_id = links.discord_user_id
+            ON fame.discord_user_id = driver.discord_user_id
         LEFT JOIN LATERAL (
             SELECT
                 COUNT(*) FILTER (WHERE period_type = 'weekly')::BIGINT
@@ -6106,14 +6135,29 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
                 COUNT(*) FILTER (WHERE period_type = 'monthly')::BIGINT
                     AS monthly_wins
             FROM competition_wins
-            WHERE discord_user_id = links.discord_user_id
+            WHERE discord_user_id = driver.discord_user_id
         ) AS wins ON TRUE
-        WHERE links.discord_user_id = $1;
+        WHERE links.discord_user_id IS NOT NULL OR EXISTS (
+            SELECT 1 FROM unified_driver_profiles p
+            JOIN unified_registration_sessions r USING(discord_user_id)
+            JOIN unified_steam_links steam USING(discord_user_id)
+            WHERE p.discord_user_id=driver.discord_user_id AND p.status='active'
+              AND r.status='approved' AND steam.verified_at IS NOT NULL
+              AND (tb.provider_account_id IS NOT NULL OR tr.provider_account_id IS NOT NULL)
+        );
         """,
         discord_user_id,
     )
     if row is None:
         return None
+    accounts = []
+    if row.get('legacy_linked', True) or row['trucksbook_user_id']:
+        accounts.append(dict(provider='TrucksBook',name=str(row['trucksbook_name']),
+                             account_id=row['trucksbook_user_id'],status='Linked'))
+    if row.get('trucky_account_id'):
+        accounts.append(dict(provider='Trucky',name=str(row.get('trucky_display_name') or 'Trucky Driver'),
+                             account_id=row['trucky_account_id'],
+                             status='Verified' if row.get('trucky_verified') else 'Linked'))
     credited = None
     if os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
         from unified_production_ledger_adapter_v2 import read_credited_progression_totals
@@ -6121,6 +6165,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         if credited is None:
             raise RuntimeError('Verified mileage baseline unavailable; profile totals preserved')
     return {
+        "linked_accounts": accounts,
         "trucksbook_name": str(row["trucksbook_name"]),
         "trucksbook_user_id": row["trucksbook_user_id"],
         "real_miles": max(int(credited["real_miles"] if credited else row["real_miles"] or 0), 0),
@@ -6143,6 +6188,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         "weekly_wins": max(int(row["weekly_wins"] or 0), 0),
         "monthly_wins": max(int(row["monthly_wins"] or 0), 0),
     }
+
 
 
 @bot.command(
@@ -6207,14 +6253,14 @@ async def driver_profile(
         if target_member.id == ctx.author.id:
             message = (
                 "❌ Your Discord account is not "
-                "linked to an A&T TrucksBook "
+                "linked to an A&T "
                 "driver profile. Please complete "
                 "driver verification first."
             )
         else:
             message = (
                 f"❌ {target_member.mention} is not "
-                "linked to an A&T TrucksBook "
+                "linked to an A&T "
                 "driver profile."
             )
 
@@ -6246,6 +6292,7 @@ async def driver_profile(
     except Exception as error:
         print(f"GRAPHICAL PROFILE FALLBACK: {error}")
         await ctx.send(embed=fallback_embed)
+
 
 
 @driver_profile.error
