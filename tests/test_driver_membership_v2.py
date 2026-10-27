@@ -71,3 +71,23 @@ class DiscordFailureTests(unittest.IsolatedAsyncioTestCase):
             report = await inspect_driver({'discord_user_id': 1}, guild, None, AsyncMock())
             self.assertEqual(report['discord'], expected)
             self.assertEqual(report['company'], 'Company status unconfirmed')
+
+
+class SavedRegistrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_saved_name_and_numeric_id_preserved(self):
+        guild = Mock(); guild.get_member.return_value = object()
+        lookup = AsyncMock(return_value={'success': True, 'belongs_to_at': True})
+        report = await inspect_driver({'discord_user_id': 1, 'trucksbook_user_id': '23',
+            'trucksbook_name': 'Example driver'}, guild, None, lookup)
+        lookup.assert_awaited_once_with(23)
+        self.assertEqual(report['trucksbook_name'], 'Example driver')
+        self.assertEqual(report['trucksbook_user_id'], '23')
+
+    async def test_conflicting_links_are_not_used_for_membership(self):
+        guild = Mock(); guild.get_member.return_value = object()
+        lookup = AsyncMock()
+        report = await inspect_driver({'discord_user_id': 1, 'trucksbook_user_id': '23',
+            'trucksbook_link_conflict': True}, guild, None, lookup)
+        lookup.assert_not_awaited()
+        self.assertEqual(report['trucksbook'], 'unknown')
+        self.assertTrue(report['trucksbook_link_conflict'])

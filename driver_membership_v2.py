@@ -22,7 +22,7 @@ async def inspect_driver(row, guild, roster, tb_lookup):
                     else "Unknown (Discord lookup unavailable)")
     tb = "unknown"
     account = row.get("trucksbook_user_id")
-    if account:
+    if account and not row.get("trucksbook_link_conflict"):
         try:
             profile = await tb_lookup(int(account))
             # Existing parser only establishes positive membership. A missing
@@ -36,6 +36,10 @@ async def inspect_driver(row, guild, roster, tb_lookup):
     if account and roster is not None:
         tr = "member" if str(account) in roster else "not_member"
     return {"discord_user_id": user_id, "discord": presence,
+            "trucksbook_user_id": row.get("trucksbook_user_id"),
+            "trucksbook_name": row.get("trucksbook_name"),
+            "registration_status": row.get("registration_status"),
+            "trucksbook_link_conflict": bool(row.get("trucksbook_link_conflict")),
             "trucksbook": tb, "trucky": tr,
             "company": company_status(tb, tr),
             "checked_at": datetime.now(timezone.utc).isoformat()}

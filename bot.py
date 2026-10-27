@@ -6314,12 +6314,24 @@ async def refresh_driver_memberships_v2(guild):
     async with driver_membership_lock_v2:
         async with db_pool.acquire() as connection:
             rows = await connection.fetch("""
-                SELECT ids.discord_user_id, legacy.trucksbook_user_id,
-                       trucky.provider_account_id AS trucky_account_id
+                SELECT ids.discord_user_id,
+                       CASE WHEN legacy.trucksbook_user_id IS NOT NULL
+                                  AND tb.provider_account_id IS NOT NULL
+                                  AND legacy.trucksbook_user_id::TEXT <> tb.provider_account_id
+                            THEN NULL ELSE COALESCE(legacy.trucksbook_user_id::TEXT,
+                                                   tb.provider_account_id) END AS trucksbook_user_id,
+                       COALESCE(legacy.trucksbook_name, tb.provider_display_name) AS trucksbook_name,
+                       (legacy.trucksbook_user_id IS NOT NULL AND tb.provider_account_id IS NOT NULL
+                        AND legacy.trucksbook_user_id::TEXT <> tb.provider_account_id) AS trucksbook_link_conflict,
+                       trucky.provider_account_id AS trucky_account_id,
+                       verification.status AS registration_status
                 FROM (SELECT discord_user_id FROM driver_links
                       UNION SELECT discord_user_id FROM driver_progress
                       UNION SELECT discord_user_id FROM unified_provider_links) ids
                 LEFT JOIN driver_links legacy USING (discord_user_id)
+                LEFT JOIN driver_verifications verification USING (discord_user_id)
+                LEFT JOIN unified_provider_links tb
+                  ON tb.discord_user_id=ids.discord_user_id AND tb.provider='trucksbook'
                 LEFT JOIN unified_provider_links trucky
                   ON trucky.discord_user_id=ids.discord_user_id
                  AND trucky.provider='trucky' AND trucky.verified_at IS NOT NULL
@@ -6363,7 +6375,7 @@ async def check_drivers_v2(ctx):
                     allowed_mentions=discord.AllowedMentions.none())
     reports = await refresh_driver_memberships_v2(ctx.guild)
     lines = [f"<@{r['discord_user_id']}>: {r['company']} | Discord: {r['discord']} | "
-             f"TrucksBook: {r['trucksbook']} | Trucky: {r['trucky']}" for r in reports]
+             f"TrucksBook: {discord.utils.escape_markdown((r['trucksbook_name'] or 'not linked')[:60])} / ID {r['trucksbook_user_id'] or 'not saved'} / {r['trucksbook']} | Trucky: {r['trucky']} | Registration: {r['registration_status'] or 'not recorded'}" for r in reports]
     for start in range(0, len(lines), 8):
         await ctx.reply("\n".join(lines[start:start+8]), allowed_mentions=discord.AllowedMentions.none())
     if not lines:
@@ -6384,6 +6396,10 @@ async def check_driver_v2(ctx, driver: discord.User):
         return
     await ctx.reply(f"{driver.mention}: {report['company']}\nDiscord: {report['discord']}\n"
                     f"TrucksBook: {report['trucksbook']} | Trucky: {report['trucky']}\n"
+                    f"Saved TrucksBook name: {discord.utils.escape_markdown(report['trucksbook_name'] or 'not saved')}\n"
+                    f"Saved TrucksBook ID: {report['trucksbook_user_id'] or 'not saved'}\n"
+                    f"Saved registration status: {report['registration_status'] or 'not recorded'}\n"
+                    f"Conflicting saved links: {'yes — review required' if report['trucksbook_link_conflict'] else 'no'}\n"
                     f"Checked: {report['checked_at']}\nRead-only: mileage, registration, roles and achievements unchanged.",
                     allowed_mentions=discord.AllowedMentions.none())
 
