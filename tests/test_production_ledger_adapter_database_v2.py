@@ -373,6 +373,32 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
         async with self.pool.acquire() as conn:
             self.assertEqual(await conn.fetchval('SELECT COUNT(*) FROM pending_history_capture_cursor_v2'),0)
 
+    async def test_pending_race_inventory_rechecks_claims_without_touching_totals(self):
+        from pending_driver_history_v2 import install_schema,record_pending_history,linked_history_summary
+        from pending_race_mileage_v2 import read_pending_race
+        from unified_distance_units import KM_TO_MILES
+        await install_schema(self.pool)
+        user,account=991234567890128001,'8828001'
+        await self.seed_verified_driver_job(user,'trucky','8828002',account,'1')
+        async with self.pool.acquire() as conn:
+            await conn.execute("UPDATE unified_driver_profiles SET status='active' WHERE discord_user_id=$1",user)
+        evidence=dict(game_id=2,status='completed',stats_type='race_miles',distance_unit='km',
+            driven_distance_km=100,completed_at='2026-10-19T12:00:00Z')
+        await record_pending_history(self.pool,'trucky','8828003',account,evidence,source_kind='authenticated_api')
+        await record_pending_history(self.pool,'trucky','8828003',account,{**evidence,'max_speed_kmh':132},source_kind='authenticated_api')
+        result=await read_pending_race(self.pool,user)
+        self.assertEqual(result['verified_pending_miles'],100*KM_TO_MILES)
+        self.assertFalse(result['mileage_awarded'])
+        summary=await linked_history_summary(self.pool,user)
+        self.assertEqual(summary['ownership_verified_jobs'],1)
+        self.assertEqual(summary['conflicting_jobs'],0)
+        async with self.pool.acquire() as conn:
+            self.assertIsNone(await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1',user))
+            await conn.execute("UPDATE unified_provider_claims SET expires_at=NOW()-INTERVAL '1 minute' WHERE discord_user_id=$1",user)
+        result=await read_pending_race(self.pool,user)
+        self.assertEqual(result['verified_pending_miles'],0)
+        self.assertEqual(result['unverified_miles'],100*KM_TO_MILES)
+
     async def test_historical_preview_reads_consistent_database_without_writes(self):
         from historical_mileage_preview_v2 import read_historical_snapshot, build_historical_preview
         user = 991234567890124100

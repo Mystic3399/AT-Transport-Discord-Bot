@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS pending_history_capture_cursor_v2 (
 );
 '''
 
-FIELDS={'game','game_id','status','stats_type','driven_distance_km','distance_unit','max_speed',
+FIELDS={'game','game_id','status','stats_type','driven_distance_km','distance_unit','max_speed','max_speed_kmh',
         'completed_at','origin','destination','cargo','distance','unit','max_speed_unit',
         'source_completion_local','candidate_driver_label','company_policy_classification'}
 
@@ -100,9 +100,18 @@ async def linked_history_summary(pool,discord_user_id):
                          BOOL_AND(ownership_current) AS ownership_current
                   FROM linked GROUP BY provider,provider_job_id
                 ), checked AS (
-                  SELECT j.*, (SELECT COUNT(*) FROM pending_provider_job_history_v2 v
+                  SELECT j.*, (SELECT COUNT(DISTINCT v.provider_account_id)>1 OR EXISTS(
+                    SELECT 1 FROM pending_provider_job_history_v2 x
+                    CROSS JOIN LATERAL jsonb_each(x.evidence) item
+                    WHERE x.provider=j.provider AND x.provider_job_id=j.provider_job_id
+                      AND x.source_kind='authenticated_api'
+                      AND item.key IN ('game_id','status','stats_type','driven_distance_km',
+                                       'distance_unit','completed_at','max_speed_kmh')
+                      AND item.value<>'null'::jsonb
+                    GROUP BY item.key HAVING COUNT(DISTINCT item.value)>1
+                  ) FROM pending_provider_job_history_v2 v
                     WHERE v.provider=j.provider AND v.provider_job_id=j.provider_job_id
-                      AND v.source_kind='authenticated_api')>1 AS conflicting
+                      AND v.source_kind='authenticated_api') AS conflicting
                   FROM jobs j
                 )
                 SELECT COUNT(*) AS jobs,COALESCE(SUM(replays),0) AS replays,

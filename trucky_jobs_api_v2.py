@@ -280,7 +280,7 @@ async def _ingest_authenticated_job_records(pool, records):
                 from pending_driver_history_v2 import record_pending_history
                 retained = {key:job[key] for key in (
                     'game_id','status','stats_type','driven_distance_km',
-                    'distance_unit','max_speed','completed_at') if key in job}
+                    'distance_unit','max_speed','max_speed_kmh','completed_at') if key in job}
                 await record_pending_history(pool,'trucky',str(job['id']),str(job['user_id']),
                                              retained,source_kind='authenticated_api')
                 counts['history_retained'] += 1

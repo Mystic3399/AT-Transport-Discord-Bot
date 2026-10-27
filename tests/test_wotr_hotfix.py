@@ -193,6 +193,9 @@ class AuditApplyTests(unittest.TestCase):
             ns.update(AuditPreviewError=AuditPreviewError,audit_source_allowed=lambda id:id==9,
                 explicit_audit_miles=explicit_audit_miles,create_mileage_audit_preview=preview,
                 validate_mileage_audit_preview=validate,consume_mileage_audit_preview=consume)
+            from unittest.mock import AsyncMock
+            ns['read_pending_race']=AsyncMock(return_value=dict(verified_pending_miles=0,verified_pending_jobs=0,
+                unverified_miles=0,unverified_jobs=0,classification_pending_jobs=0,conflicting_jobs=0))
             audit = load_function('mileage_audit', ns)
             apply = load_function('mileage_apply', ns)
             await audit(ctx)
@@ -202,6 +205,8 @@ class AuditApplyTests(unittest.TestCase):
             self.assertEqual(candidates['68007306']['repair_kind'], 'missing_wotr')
             self.assertEqual(candidates['127']['repair_kind'], 'missing_real')
             self.assertTrue(any('Mileage channels scanned: `1`' in text for text in replies))
+            self.assertTrue(any('Missing Race Miles (Trucky, stored pending)' in text for text in replies))
+            self.assertTrue(any('Historical Real jobs held for baseline review: `1` / `500` miles' in text for text in replies))
             self.assertNotIn('124', candidates)
             self.assertEqual(len(reports[0]), 5)  # unique Real jobs, including older excluded jobs
             self.assertIn('124', {job['job_id'] for job in reports[0]})

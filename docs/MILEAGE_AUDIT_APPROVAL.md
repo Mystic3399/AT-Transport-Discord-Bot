@@ -13,4 +13,6 @@ The audit uses the explicitly configured TrucksBook webhook sources. Each approv
 
 An unexplained balance is already part of the current driver total. It is never added again as missing mileage. The command repairs the existing legacy TrucksBook job ledger; it does not import all provider export totals, approve Trucky duplicates or enable the V2 award engine.
 
+The menu also shows Missing Race Miles from authenticated Trucky history. Race records with current verified account ownership and records awaiting ownership are counted separately. Neither is an approved award. Duplicate observations count once; conflicting distance, account, game or classification evidence stays pending. ATS uses the provider's explicit `max_speed_kmh`, with 0–81 mph Real and 82–112 mph Race; missing speeds and the fractional gap stay pending. ETS2 uses explicit provider classifications. Race values never increase Real totals or unlock Company Mods, and the driver profile remains unchanged while this inventory is pending.
+
 Staging confirmation is disabled. Legacy confirmation is also disabled if the production V2 award engine is active, preventing parallel award writers. Candidate, credit and approval-consumption updates share the existing repair transaction. Failed transactions leave the preview available to retry; Discord updates run only after committed mileage.

@@ -21,6 +21,7 @@ import trucky_membership_adapter
 import unified_driver_profiles
 import steam_openid_v2
 import trucky_staging_receiver_v2
+from pending_race_mileage_v2 import read_pending_race
 from mileage_audit_confirmation_v2 import (
     SCHEMA as MILEAGE_AUDIT_PREVIEW_SCHEMA, AuditPreviewError,
     create_mileage_audit_preview, validate_mileage_audit_preview,
@@ -3918,6 +3919,8 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
     missing_from_database = 0
     missing_event_jobs_staged = 0
     missing_real_jobs_staged = 0
+    historical_real_held_jobs = 0
+    historical_real_held_miles = 0
     unlinked_event_jobs = 0
     unresolved_links = []
     seen_jobs = set()
@@ -3993,6 +3996,9 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
                             verified_historical = verified_historical_real_repair(
                                 parsed, embed, historical_message)
                             if not event_job and historical_message.created_at < MILEAGE_LINK_RECOVERY_SINCE and not verified_historical:
+                                historical_real_held_jobs += 1
+                                historical_real_held_miles += actual
+                                source_jobs[-1]['hold_reason']='historical_baseline_coverage_required'
                                 continue
                             name = ((embed.to_dict().get("author") or {})
                                     .get("name") or "").strip()
@@ -4109,6 +4115,7 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         )
 
     preview=await create_mileage_audit_preview(db_pool,ctx.guild.id,ctx.channel.id,ctx.author.id,reviewed_job_ids)
+    race=await read_pending_race(db_pool,target_driver_id)
     await ctx.send(
         "✅ **Dry-run audit complete — no mileage changed.**\n"
         f"Mileage channels scanned: `{channels_scanned:,}`\n"
@@ -4123,11 +4130,16 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         f"Jobs skipped — driver not linked: `{unlinked_event_jobs:,}`\n"
         f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
         f"`{int(totals['drivers']):,}` drivers\n"
-        f"Missing mileage pending: `{int(totals['missing_miles']):,}`\n\n"
+        f"Missing Real Miles pending repair: `{int(totals['missing_miles']):,}`\n"
+        f"Missing Race Miles (Trucky, stored pending): `{race['verified_pending_miles']:,.2f}` across `{race['verified_pending_jobs']:,}` jobs\n"
+        f"Race miles stored without verified ownership: `{race['unverified_miles']:,.2f}` across `{race['unverified_jobs']:,}` jobs\n"
+        f"Race observations held for classification/conflicts: `{race['classification_pending_jobs']+race['conflicting_jobs']:,}` jobs\n"
+        f"Historical Real jobs held for baseline review: `{historical_real_held_jobs:,}` / `{historical_real_held_miles:,}` miles\n\n"
         f"This preview approves only `{preview['jobs']:,}` reviewed jobs / `{preview['addition']:,}` miles.\n"
         f"Held for source/account evidence: `{preview['held_jobs']:,}` jobs.\n"
         "Unexplained balances are already in existing totals and are not added again.\n"
         "Review the driver breakdown below, then run `!mileageaudit CONFIRM` within 20 minutes in this channel."
+        " Race miles remain separate and are not applied by this confirmation."
     )
     for offset in range(0,len(preview['drivers']),15):
         lines=[f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + **{d['addition']:,}** = {d['proposed_real_miles']:,} Real miles ({d['jobs']} jobs)"
