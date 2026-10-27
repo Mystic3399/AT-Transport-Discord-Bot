@@ -85,3 +85,31 @@ class AuthenticatedTruckyIngestionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(retain.call_args.kwargs,{'source_kind':'authenticated_api'})
         self.assertEqual(result['counts']['ownership_pending'],1)
         record.assert_not_awaited()
+
+    async def test_authenticated_route_and_cargo_reach_reconciliation_storage(self):
+        route=dict(source_city_name='Praha',destination_city_name='Lille',cargo_name='Pet Food')
+        result,record=await self.run_ingest(Pool(),{**JOB,**route})
+        self.assertEqual(record.call_args.kwargs['job_metadata'],
+            dict(game='ETS2',origin='Praha',destination='Lille',cargo='Pet Food'))
+        self.assertEqual(result['counts']['recorded'],1)
+        self.assertFalse(result['mileage_awarded'])
+
+    async def test_incomplete_route_is_not_invented(self):
+        for route in ({'source_city_name':'Praha'},
+                      {'source_city_name':'Praha','destination_city_name':'Lille','cargo_name':{'name':'Pet Food'}},
+                      {'source_city_name':'x'*301,'destination_city_name':'Lille','cargo_name':'Pet Food'}):
+            _,record=await self.run_ingest(Pool(),{**JOB,**route})
+            self.assertNotIn('job_metadata',record.call_args.kwargs)
+
+    async def test_history_retains_provider_metadata_without_linking_driver_or_awarding(self):
+        import os
+        route=dict(source_city_name='Paris',destination_city_name='Lille',cargo_name='Pet Food')
+        with patch.dict(os.environ,{'AT_V2_PENDING_HISTORY_ENABLED':'YES'}),patch('pending_driver_history_v2.record_pending_history',AsyncMock()) as retain:
+            result,record=await self.run_ingest(Pool(owners=[]),{**JOB,**route})
+        evidence=retain.call_args.args[4]
+        self.assertEqual({k:evidence[k] for k in ('game','origin','destination','cargo')},
+            dict(game='ETS2',origin='Paris',destination='Lille',cargo='Pet Food'))
+        self.assertNotIn('discord_user_id',evidence)
+        self.assertNotIn('shared_journey_id',evidence)
+        record.assert_not_awaited()
+        self.assertFalse(result['mileage_awarded'])

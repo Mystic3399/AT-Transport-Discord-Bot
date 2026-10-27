@@ -281,6 +281,11 @@ async def _ingest_authenticated_job_records(pool, records):
                 retained = {key:job[key] for key in (
                     'game_id','status','stats_type','driven_distance_km',
                     'distance_unit','max_speed','max_speed_kmh','completed_at') if key in job}
+                metadata = {'game':{1:'ETS2',2:'ATS'}.get(job.get('game_id')),
+                    'origin':job.get('source_city_name'),
+                    'destination':job.get('destination_city_name'),'cargo':job.get('cargo_name')}
+                if all(isinstance(value,str) and value.strip() and len(value)<=300 for value in metadata.values()):
+                    retained.update(metadata)
                 await record_pending_history(pool,'trucky',str(job['id']),str(job['user_id']),
                                              retained,source_kind='authenticated_api')
                 counts['history_retained'] += 1
@@ -298,6 +303,7 @@ async def _ingest_authenticated_job_records(pool, records):
                   AND p.status='active' AND c.status='approved'
                   AND c.ownership_confirmed=TRUE AND c.membership_confirmed=TRUE
                   AND c.ownership_evidence_kind='trucky_signed_job_steam_match'
+                  AND c.ownership_evidence_sha256 IS NOT NULL
                   AND (c.expires_at IS NULL OR c.expires_at>NOW())
             """, str(job['user_id']))
             receipt_verified = await conn.fetchval("""
@@ -323,6 +329,8 @@ async def _ingest_authenticated_job_records(pool, records):
         try:
             classification_kwargs=({'classification_evidence':candidate['classification_evidence']}
                 if 'classification_evidence' in candidate else {})
+            if 'job_metadata' in candidate:
+                classification_kwargs['job_metadata']=candidate['job_metadata']
             inserted = await profiles.record_normalized_provider_job(pool,'trucky',candidate['provider_job_id'],
                 owner['discord_user_id'],candidate['kilometers'],'km',
                 provider_account_id=owner['provider_account_id'],mileage_type=candidate['mileage_type'],

@@ -77,6 +77,12 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
         "eligible_for_award": False,
         "trusted": False,
     }
+    # Field names independently observed in the authenticated company jobs API.
+    # Preserve complete comparison metadata; never invent a shared journey ID.
+    metadata = {'game':game, 'origin':job.get('source_city_name'),
+                'destination':job.get('destination_city_name'), 'cargo':job.get('cargo_name')}
+    if all(isinstance(value,str) and value.strip() and len(value)<=300 for value in metadata.values()):
+        result['job_metadata'] = metadata
     if game=='ATS' or classification.mileage_type=='race':
         result['classification_evidence']={
             'game':game,'provider_stats_type':job['stats_type'],
