@@ -108,3 +108,20 @@ class PendingTrucksBookSourceTests(unittest.IsolatedAsyncioTestCase):
                     configured_webhook_id='123',parsed_job={'job_id':'456'},driver_label='redacted')
                 self.assertEqual(result['status'],'source_rejected')
         store.assert_not_awaited()
+
+    async def test_separate_ets2_and_ats_sources_are_explicit_and_fail_closed(self):
+        from pending_driver_history_v2 import retain_trucksbook_source_observation
+        from unittest.mock import patch
+        with patch('pending_driver_history_v2.record_pending_history',AsyncMock(return_value={'mileage_awarded':False})) as store:
+            for webhook in (123,456):
+                await retain_trucksbook_source_observation(None,webhook_id=webhook,guild_id=9,expected_guild_id=9,
+                    configured_webhook_id='',configured_webhook_ids='123,456',parsed_job={'job_id':'789'},driver_label='redacted')
+            self.assertEqual(store.await_count,2)
+            for sources in ('123,x','123,,456','123,123','0,456','-123,456'):
+                result=await retain_trucksbook_source_observation(None,webhook_id=123,guild_id=9,expected_guild_id=9,
+                    configured_webhook_id='123',configured_webhook_ids=sources,parsed_job={'job_id':'789'},driver_label='redacted')
+                self.assertEqual(result['status'],'source_rejected')
+            result=await retain_trucksbook_source_observation(None,webhook_id=789,guild_id=9,expected_guild_id=9,
+                configured_webhook_id='',configured_webhook_ids='123,456',parsed_job={'job_id':'789'},driver_label='redacted')
+            self.assertEqual(result['status'],'source_rejected')
+            self.assertEqual(store.await_count,2)

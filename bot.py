@@ -3221,6 +3221,7 @@ async def on_message(message):
                     db_pool, webhook_id=message.webhook_id,
                     guild_id=getattr(message_guild, "id", None), expected_guild_id=GUILD_ID,
                     configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
+                    configured_webhook_ids=os.getenv("TRUCKSBOOK_HISTORY_WEBHOOK_IDS", "").strip(),
                     parsed_job=extract_trucksbook_job_from_embed(history_embed),
                     driver_label=(history_data.get("author") or {}).get("name"))
             except Exception:

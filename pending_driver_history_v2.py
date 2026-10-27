@@ -87,7 +87,7 @@ async def linked_history_summary(pool,discord_user_id):
 
 async def retain_trucksbook_source_observation(pool, *, webhook_id, guild_id,
                                               expected_guild_id, configured_webhook_id,
-                                              parsed_job, driver_label):
+                                              parsed_job, driver_label, configured_webhook_ids=""):
     """Keep genuine-source unlinked deliveries, without authenticating their owner.
 
     The legacy embed parser does not establish units or account ownership. Keep
@@ -97,8 +97,18 @@ async def retain_trucksbook_source_observation(pool, *, webhook_id, guild_id,
     # Use the helper's strict configured-ID comparison in every environment.
     # Its legacy production mode accepts arbitrary webhook sources and is not
     # sufficient evidence for this new history store.
-    if guild_id!=expected_guild_id or not is_authorized_trucksbook_webhook(
-        webhook_id,isolated_staging=True,configured_id=configured_webhook_id):
+    if configured_webhook_ids:
+        if not isinstance(configured_webhook_ids,str):
+            return {'status':'source_rejected','mileage_awarded':False}
+        sources=[source.strip() for source in configured_webhook_ids.split(',')]
+        valid=(1<=len(sources)<=20 and len(sources)==len(set(sources))
+               and all(len(source)<=20 and source.isascii() and source.isdecimal() and 0<int(source) for source in sources))
+        allowed=valid and any(is_authorized_trucksbook_webhook(
+            webhook_id,isolated_staging=True,configured_id=source) for source in sources)
+    else:
+        allowed=is_authorized_trucksbook_webhook(webhook_id,isolated_staging=True,configured_id=configured_webhook_id)
+    if (type(guild_id) is not int or type(expected_guild_id) is not int
+            or guild_id<=0 or expected_guild_id<=0 or guild_id!=expected_guild_id or not allowed):
         return {'status':'source_rejected','mileage_awarded':False}
     if not isinstance(parsed_job,dict) or not parsed_job.get('job_id'):
         return {'status':'malformed','mileage_awarded':False}
