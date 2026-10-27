@@ -707,6 +707,38 @@ class ProductionLedgerAdapterDatabaseTests(unittest.IsolatedAsyncioTestCase):
             pending=await api.ingest_authenticated_completed_jobs(self.pool)
         self.assertEqual(pending['counts']['signed_receipt_pending'],1)
 
+    async def test_approved_batch_credits_once_and_does_not_let_pending_jobs_block_others(self):
+        import json
+        from datetime import timedelta
+        from unified_production_ledger_adapter_v2 import process_approved_mileage_batch
+        await self.install_ledger()
+        user=991234568887001
+        account='998887001'
+        for job_id in ('998887001','998887002'):
+            await self.seed_verified_driver_job(user,'trucky',job_id,account,'0.125')
+        async with self.pool.acquire() as c:
+            await c.execute("UPDATE unified_driver_profiles SET status='active' WHERE discord_user_id=$1",user)
+            await c.execute("""UPDATE unified_provider_job_events SET source_payload=
+                jsonb_set(source_payload,'{job_metadata}',$1::jsonb)
+                WHERE provider='trucky' AND provider_job_id IN ('998887001','998887002')""",
+                json.dumps(dict(game='ETS2',origin='Paris',destination='Lille',cargo='Pet Food')))
+            await c.execute("""INSERT INTO unified_trucky_webhook_receipts(payload_sha256,event_type,candidate_job_id,
+                review_status,identity_discord_user_id,identity_provider_account_id,identity_verified_at)
+                VALUES($1,'job_completed','998887002','verified',$2,$3,NOW())""",'9'*64,user,account)
+        feed={**self.complete_feed(),'watermark':datetime(2026,10,20,tzinfo=timezone.utc).isoformat()}
+        runtime={**self.runtime,'mileage_jobs':[dict(provider='trucky',provider_job_id=job_id,
+            feed_evidence=feed,reconciliation_status='no_candidate') for job_id in ('998887001','998887002')]}
+        first=await process_approved_mileage_batch(self.pool,config=self.config,runtime=runtime)
+        self.assertEqual(first['counts']['ownership_or_receipt_pending'],1)
+        self.assertEqual(first['counts']['credited'],1)
+        second=await process_approved_mileage_batch(self.pool,config=self.config,runtime=runtime)
+        self.assertEqual(second['counts']['duplicate_provider_job'],1)
+        self.assertFalse(second['mileage_awarded'])
+        async with self.pool.acquire() as c:
+            self.assertEqual(await c.fetchval('SELECT combined_real_miles FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1',user),Decimal('0.125'))
+            self.assertEqual(await c.fetchval('SELECT COUNT(*) FROM driver_progress WHERE discord_user_id=$1',user),0)
+
+
 
 if __name__ == "__main__":
     unittest.main()

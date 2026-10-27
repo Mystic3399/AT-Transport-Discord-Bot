@@ -340,6 +340,16 @@ async def apply_verified_credit(
                     await log_decision("pending_reconciliation", "review_case_or_companion_unverified")
                     return {"status": "pending_reconciliation", "reason": "review_case_or_companion_unverified"}
 
+            if job.get('receipt_evidence_sha256') is not None:
+                receipt = await conn.fetchval("""SELECT payload_sha256 FROM unified_trucky_webhook_receipts
+                    WHERE payload_sha256=$1 AND candidate_job_id=$2 AND event_type='job_completed'
+                      AND review_status='verified' AND identity_verified_at IS NOT NULL
+                      AND identity_provider_account_id=$3 AND identity_discord_user_id=$4 FOR SHARE""",
+                    job['receipt_evidence_sha256'],provider_job_id,account_id,user_id)
+                if receipt is None:
+                    await log_decision('rejected_evidence','signed_receipt_changed')
+                    return {'status':'rejected_evidence','reason':'signed_receipt_changed'}
+
             ownership = await conn.fetchval("""
                 SELECT EXISTS(
                   SELECT 1 FROM unified_provider_links l
@@ -517,3 +527,116 @@ async def read_credited_progression_totals(conn, discord_user_id):
         LEFT JOIN unified_v2_production_mileage_totals t USING(discord_user_id)
         WHERE b.discord_user_id=$1
     """, discord_user_id)
+
+def read_approved_mileage_preflight(environ=None):
+    """Reuse the checksum-bound acceptance manifest, independently of roles."""
+    env = dict(os.environ if environ is None else environ)
+    if (env.get('AT_V2_PRODUCTION_MILEAGE_ENABLED') != 'YES'
+            or env.get('AT_V2_ISOLATED_STAGING') == 'YES'
+            or env.get('AT_V2_TEST_DATABASE_DISPOSABLE') == 'YES'
+            or env.get('AT_V2_MILEAGE_ENGINE_TEST_ENABLED') == 'YES'):
+        return None
+    # This selects the existing manifest reader only; it enables no role worker.
+    env['AT_V2_PROGRESSION_ENABLED'] = 'YES'
+    return read_approved_progression_preflight(env)
+
+
+async def process_approved_mileage_batch(pool, *, config=None, runtime=None):
+    """Connect a bounded, explicitly reviewed manifest batch to the real ledger.
+
+    Evidence flags, account, driver and amounts come from stored verified
+    events/claims/receipts, never manifest assertions. The manifest supplies
+    only selected job references and approved reconciliation/feed evidence.
+    No migrations, legacy writes, roles or unlocks are performed here.
+    """
+    import hashlib
+    import json
+    from collections import Counter
+    from datetime import datetime, timedelta
+    from unified_job_matching_v2 import _normalized_metadata
+    env = os.environ if config is None else config
+    if (env.get('AT_V2_PRODUCTION_MILEAGE_ENABLED') != 'YES'
+            or os.getenv('AT_V2_ISOLATED_STAGING') == 'YES'
+            or os.getenv('AT_V2_TEST_DATABASE_DISPOSABLE') == 'YES'
+            or os.getenv('AT_V2_MILEAGE_ENGINE_TEST_ENABLED') == 'YES'):
+        return {'status':'disabled','mileage_awarded':False}
+    if not isinstance(runtime,dict):
+        return {'status':'activation_blocked','blockers':['preflight_acceptance_missing'],'mileage_awarded':False}
+    selections = runtime.get('mileage_jobs')
+    if not isinstance(selections,list) or not 1<=len(selections)<=100:
+        return {'status':'invalid_batch','mileage_awarded':False}
+    references=[]
+    for item in selections:
+        if (not isinstance(item,dict) or item.get('provider')!='trucky'
+                or not isinstance(item.get('provider_job_id'),str)
+                or not item['provider_job_id'].isascii() or not item['provider_job_id'].isdecimal()
+                or int(item['provider_job_id'])<=0):
+            return {'status':'invalid_batch','mileage_awarded':False}
+        references.append(item['provider_job_id'])
+    if len(set(references))!=len(references):
+        return {'status':'invalid_batch','mileage_awarded':False}
+    async with pool.acquire() as conn:
+        blockers=await _activation_blockers_for_connection(conn,env,runtime)
+        if blockers:
+            return {'status':'activation_blocked','blockers':blockers,'mileage_awarded':False}
+        if not await conn.fetchval("SELECT to_regclass('public.unified_v2_production_credit_ledger') IS NOT NULL"):
+            return {'status':'migration_required','mileage_awarded':False}
+    counts=Counter()
+    for item in selections:
+        async with pool.acquire() as conn:
+            async with conn.transaction(readonly=True):
+                row=await conn.fetchrow('''SELECT e.*,c.ownership_evidence_sha256,
+                    r.payload_sha256 AS receipt_sha256 FROM unified_provider_job_events e
+                    JOIN unified_provider_links l ON l.provider=e.provider
+                      AND l.provider_account_id=e.provider_account_id AND l.discord_user_id=e.discord_user_id
+                    JOIN unified_provider_claims c ON c.provider=l.provider
+                      AND c.provider_account_id=l.provider_account_id AND c.discord_user_id=l.discord_user_id
+                    JOIN unified_steam_links s ON s.discord_user_id=l.discord_user_id
+                    JOIN unified_driver_profiles p ON p.discord_user_id=l.discord_user_id
+                    JOIN LATERAL (SELECT payload_sha256 FROM unified_trucky_webhook_receipts
+                      WHERE candidate_job_id=e.provider_job_id AND event_type='job_completed'
+                        AND review_status='verified' AND identity_verified_at IS NOT NULL
+                        AND identity_provider_account_id=e.provider_account_id
+                        AND identity_discord_user_id=e.discord_user_id
+                      ORDER BY receipt_id LIMIT 1) r ON TRUE
+                    WHERE e.provider='trucky' AND e.provider_job_id=$1
+                      AND l.verified_at IS NOT NULL AND s.verified_at IS NOT NULL AND p.status='active'
+                      AND c.status='approved' AND c.ownership_confirmed=TRUE AND c.membership_confirmed=TRUE
+                      AND c.ownership_evidence_kind='trucky_signed_job_steam_match'
+                      AND c.ownership_evidence_sha256 IS NOT NULL
+                      AND (c.expires_at IS NULL OR c.expires_at>NOW())''',item['provider_job_id'])
+        if row is None:
+            counts['ownership_or_receipt_pending']+=1;continue
+        try:
+            payload=json.loads(row['source_payload']) if isinstance(row['source_payload'],str) else row['source_payload']
+            _normalized_metadata(payload.get('job_metadata'))
+            kind=payload['mileage_type']
+            if kind not in ('real','race') or row['delivered_at'] is None:
+                raise ValueError('Incomplete event')
+            amount=_decimal_miles(payload['canonical_miles'])
+            feed=dict(item.get('feed_evidence') or {})
+            if isinstance(feed.get('watermark'),str):
+                feed['watermark']=datetime.fromisoformat(feed['watermark'].replace('Z','+00:00'))
+            watermark=feed.get('watermark')
+            if (getattr(watermark,'tzinfo',None) is None
+                    or watermark<row['delivered_at']+timedelta(minutes=30)):
+                feed['complete']=False
+            source_digest=hashlib.sha256(json.dumps({'event':payload,'receipt':row['receipt_sha256']},sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        except (ValueError,TypeError,KeyError,AttributeError):
+            counts['comparison_evidence_pending']+=1;continue
+        job=dict(provider='trucky',provider_job_id=row['provider_job_id'],
+            provider_account_id=row['provider_account_id'],discord_user_id=row['discord_user_id'],
+            miles=str(amount),mileage_type=kind,provider_authenticated=True,completed=True,
+            job_status='completed',ownership_verified=True,steam_identity_verified=True,
+            ownership_evidence_kind='trucky_signed_job_steam_match',
+            ownership_evidence_sha256=row['ownership_evidence_sha256'],source_evidence_sha256=source_digest,
+            receipt_evidence_sha256=row['receipt_sha256'],
+            delivered_at=row['delivered_at'],canonical_credit_key=canonical_credit_key('trucky',row['provider_job_id']))
+        for key in ('reconciliation_primary','reconciliation_companion'):
+            if key in item:job[key]=item[key]
+        result=await apply_verified_credit(pool,job,config=env,runtime=runtime,feed_evidence=feed,
+            reconciliation_status=item.get('reconciliation_status','pending'),
+            reconciliation_evidence_sha256=item.get('reconciliation_evidence_sha256'),
+            reviewer_id=item.get('reviewer_id'))
+        counts[result['status']]+=1
+    return {'status':'processed','counts':dict(counts),'mileage_awarded':counts['credited']>0}

@@ -2828,6 +2828,14 @@ async def ingest_trucky_company_jobs():
         if os.getenv('AT_V2_PENDING_HISTORY_ENABLED') == 'YES':
             sweep = await trucky_jobs_api_v2.sweep_saved_trucky_history(db_pool)
             print('TRUCKY_HISTORY_SWEEP ' + json.dumps(sweep,sort_keys=True),flush=True)
+        try:
+            import unified_production_ledger_adapter_v2 as ledger
+            approved = ledger.read_approved_mileage_preflight()
+            if approved is not None:
+                credits = await ledger.process_approved_mileage_batch(db_pool,runtime=approved)
+                print('V2 MILEAGE BATCH ' + json.dumps(credits,sort_keys=True),flush=True)
+        except Exception as error:
+            print(f'V2 MILEAGE BATCH RETRY PENDING: {type(error).__name__}',flush=True)
     except Exception as error:
         print(f'TRUCKY_API_INGEST RETRY PENDING: {type(error).__name__}',flush=True)
 
