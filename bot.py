@@ -1257,6 +1257,17 @@ async def record_real_job(
 
     async with db_pool.acquire() as connection:
         async with connection.transaction():
+            # Shared lock with accepted-link Trucky allocation. This also
+            # protects retries after disabling that worker or a restart.
+            await connection.execute('SELECT pg_advisory_xact_lock($1)', discord_user_id)
+            ledger_exists = await connection.fetchval(
+                "SELECT to_regclass('public.unified_v2_production_credit_ledger') IS NOT NULL")
+            if ledger_exists and await connection.fetchval("""SELECT EXISTS(
+                SELECT 1 FROM unified_v2_production_credit_ledger
+                WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real')""",
+                discord_user_id):
+                return {'status':'pending_cross_provider_reconciliation',
+                        'real_miles':None,'crossed_milestones':[]}
 
             previous_real_miles = await connection.fetchval(
                 """
@@ -2834,6 +2845,13 @@ async def ingest_trucky_company_jobs():
         if os.getenv('AT_V2_PENDING_HISTORY_ENABLED') == 'YES':
             sweep = await trucky_jobs_api_v2.sweep_saved_trucky_history(db_pool)
             print('TRUCKY_HISTORY_SWEEP ' + json.dumps(sweep,sort_keys=True),flush=True)
+        try:
+            from trucky_linked_allocation_v2 import allocate_saved_linked_history
+            linked_credits = await allocate_saved_linked_history(db_pool)
+            if linked_credits['status'] != 'disabled':
+                print('TRUCKY LINKED ALLOCATION ' + json.dumps(linked_credits,sort_keys=True),flush=True)
+        except Exception as error:
+            print(f'TRUCKY LINKED ALLOCATION RETRY PENDING: {type(error).__name__}',flush=True)
         try:
             import unified_production_ledger_adapter_v2 as ledger
             approved = ledger.read_approved_mileage_preflight()
@@ -6172,6 +6190,10 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         accounts.append(dict(provider='Trucky',name=str(row.get('trucky_display_name') or 'Trucky Driver'),
                              account_id=row['trucky_account_id'],
                              status='Verified' if row.get('trucky_verified') else 'Linked'))
+    linked_race = None
+    if os.getenv('AT_V2_LINKED_TRUCKY_MILEAGE_ENABLED') == 'YES':
+        if await connection.fetchval("SELECT to_regclass('public.unified_v2_production_mileage_totals') IS NOT NULL"):
+            linked_race = await connection.fetchval('SELECT trucky_race_miles FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1', discord_user_id)
     credited = None
     if os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
         from unified_production_ledger_adapter_v2 import read_credited_progression_totals
@@ -6183,7 +6205,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         "trucksbook_name": str(row["trucksbook_name"]),
         "trucksbook_user_id": row["trucksbook_user_id"],
         "real_miles": max(int(credited["real_miles"] if credited else row["real_miles"] or 0), 0),
-        "trucky_race_miles": str(credited["trucky_race_miles"]) if credited else None,
+        "trucky_race_miles": str(credited["trucky_race_miles"]) if credited else (str(linked_race) if linked_race is not None else None),
         "jobs_completed": max(int(row["jobs_completed"] or 0), 0),
         "average_job_distance": max(
             int(row["average_job_distance"] or 0), 0
@@ -6202,7 +6224,6 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         "weekly_wins": max(int(row["weekly_wins"] or 0), 0),
         "monthly_wins": max(int(row["monthly_wins"] or 0), 0),
     }
-
 
 
 @bot.command(
