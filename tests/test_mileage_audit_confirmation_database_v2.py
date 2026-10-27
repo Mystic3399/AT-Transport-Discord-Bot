@@ -28,8 +28,8 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
                 discord_user_id BIGINT PRIMARY KEY,trucksbook_name TEXT NOT NULL,trucksbook_user_id BIGINT,
                 linked_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
                 CREATE TABLE IF NOT EXISTS processed_jobs (
-                job_id TEXT PRIMARY KEY,discord_user_id BIGINT NOT NULL,trucksbook_name TEXT NOT NULL,
-                accepted_distance INTEGER NOT NULL,statistics TEXT NOT NULL,processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+                job_id TEXT PRIMARY KEY,discord_user_id BIGINT NOT NULL,trucksbook_name TEXT NOT NULL DEFAULT '',
+                accepted_distance INTEGER NOT NULL DEFAULT 0,statistics TEXT NOT NULL DEFAULT '',processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
                 CREATE TABLE IF NOT EXISTS mileage_repair_candidates (
                 job_id TEXT PRIMARY KEY,discord_user_id BIGINT NOT NULL,trucksbook_name TEXT NOT NULL,
                 recorded_distance INTEGER NOT NULL,actual_distance INTEGER NOT NULL,
@@ -41,6 +41,7 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.user=990000000000000000+int(hashlib.sha256(self._testMethodName.encode()).hexdigest()[:8],16)
         self.job=str(self.user);self.channel=9910001;self.guild=9910002;self.reviewer=9910003
         await self.seed(self.user,self.job,105)
+        self.addAsyncCleanup(self.cleanup_rows)
         self.ctx=SimpleNamespace(guild=SimpleNamespace(id=self.guild),channel=SimpleNamespace(id=self.channel),
             author=SimpleNamespace(id=self.reviewer),reply=AsyncMock(),send=AsyncMock())
         ns=dict(NS,GUILD_ID=self.guild,db_pool=self.pool,PROGRESSION_ROLES=[],VERIFIED_HISTORICAL_REAL_REPAIRS={},
@@ -50,7 +51,16 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
             refresh_driver_leaderboard=AsyncMock())
         self.apply=load_function('mileage_apply',ns)
 
-    async def seed(self,user,job,delta,account=777):
+    async def cleanup_rows(self):
+        async with self.pool.acquire() as c:
+            await c.execute('DELETE FROM mileage_audit_previews_v2 WHERE guild_id=$1 AND reviewer_id=$2',self.guild,self.reviewer)
+            await c.execute('DELETE FROM mileage_repair_candidates WHERE discord_user_id=ANY($1::bigint[])',[self.user,self.user+1])
+            await c.execute('DELETE FROM processed_jobs WHERE discord_user_id=ANY($1::bigint[])',[self.user,self.user+1])
+            await c.execute('DELETE FROM driver_links WHERE discord_user_id=ANY($1::bigint[])',[self.user,self.user+1])
+            await c.execute('DELETE FROM driver_progress WHERE discord_user_id=ANY($1::bigint[])',[self.user,self.user+1])
+
+    async def seed(self,user,job,delta,account=None):
+        account=user if account is None else account
         async with self.pool.acquire() as c:
             await c.execute('INSERT INTO driver_progress(discord_user_id,trucksbook_name,real_miles) VALUES($1,$2,1000)',user,str(user))
             await c.execute('INSERT INTO driver_links(discord_user_id,trucksbook_name,trucksbook_user_id) VALUES($1,$2,$3)',user,str(user),account)

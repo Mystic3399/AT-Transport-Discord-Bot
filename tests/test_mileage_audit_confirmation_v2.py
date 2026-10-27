@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from mileage_audit_confirmation_v2 import audit_source_allowed,explicit_audit_miles
-from tests.test_wotr_hotfix import load_function,NS,TREE
+from tests.test_wotr_hotfix import load_function,NS,SOURCE
 import ast
 
 class AuditCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -24,7 +24,7 @@ class AuditCommandTests(unittest.IsolatedAsyncioTestCase):
 
     def test_admin_and_guild_checks_remain_on_both_entry_points(self):
         for name in ('mileage_audit','mileage_apply'):
-            node=next(n for n in TREE.body if isinstance(n,ast.AsyncFunctionDef) and n.name==name)
+            node=next(n for n in ast.parse(SOURCE).body if isinstance(n,ast.AsyncFunctionDef) and n.name==name)
             decorators=' '.join(ast.unparse(d) for d in node.decorator_list)
             self.assertIn('guild_only',decorators)
             self.assertIn('administrator=True',decorators)
