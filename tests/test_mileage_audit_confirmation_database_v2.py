@@ -158,6 +158,7 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
         from unified_production_ledger_adapter_v2 import SCHEMA as LEDGER
         await self.preview()
         async with self.pool.acquire() as c:
+            ledger_existed=await c.fetchval("SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL")
             await c.execute(PROFILE)
             await c.execute(LEDGER)
             await c.execute("INSERT INTO unified_driver_profiles(discord_user_id,status) VALUES($1,'active')",self.user)
@@ -173,3 +174,7 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
             async with self.pool.acquire() as c:
                 await c.execute('DELETE FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',self.user)
                 await c.execute('DELETE FROM unified_driver_profiles WHERE discord_user_id=$1',self.user)
+                if not ledger_existed:
+                    # Restore only the disposable tables this test introduced;
+                    # later migration tests deliberately start without them.
+                    await c.execute('DROP TABLE unified_v2_production_mileage_decisions, unified_v2_production_mileage_baselines, unified_v2_production_mileage_totals, unified_v2_production_credit_ledger')
