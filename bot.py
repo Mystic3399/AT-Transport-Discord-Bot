@@ -5080,10 +5080,6 @@ def build_driver_profile_embed(target_member, profile):
         embed.add_field(name=account['provider'] + " Driver",value=label,inline=True)
     embed.add_field(name="Current Progression Rank", value=f"🏅 **{current_rank_name}**", inline=False)
     embed.add_field(name="Real Miles", value=f"🚛 **{real_miles:,}**", inline=True)
-    if profile.get("trucky_real_miles") is not None:
-        embed.add_field(name="Trucky Real (included in total)", value=profile["trucky_real_miles"], inline=True)
-    if profile.get("trucky_race_miles") is not None:
-        embed.add_field(name="Trucky Race Miles", value=profile["trucky_race_miles"], inline=True)
     embed.add_field(
         name="Verified Real Jobs",
         value=f"**{profile['jobs_completed']:,}**",
@@ -6036,14 +6032,7 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
         profile_text(draw, (centre_x, 1094), label, fit_profile_text(draw, label, 142, 10, True), ice, anchor="ma", shadow=0)
         if ribbon:
             profile_text(draw, (centre_x, 1115), ribbon, fit_profile_text(draw, ribbon, 140, 9, True), muted, anchor="ma", shadow=0)
-    from decimal import Decimal
-    career_footer = "JOB STATS: TRUCKSBOOK REAL JOBS"
-    if profile.get("trucky_real_miles") is not None:
-        career_footer += f"   •   TRUCKY REAL INCLUDED: {Decimal(profile['trucky_real_miles']):,.2f} MI"
-    if profile.get("trucky_race_miles") is not None:
-        career_footer += f"   •   TRUCKY RACE MILES: {Decimal(profile['trucky_race_miles']):,.2f} MI"
-    profile_text(draw, (69, 1152), career_footer,
-                 fit_profile_text(draw, career_footer, 850, 13, True), ice, shadow=0)
+    profile_text(draw, (69, 1152), "JOB STATS: TRUCKSBOOK REAL JOBS", load_profile_font(11, True), muted, shadow=0)
 
     if profile.get("is_preview"):
         draw.rounded_rectangle((504, 1162, 1096, 1192), 10, fill=(1, 8, 17, 225), outline=(*gold[:3], 205), width=1)
