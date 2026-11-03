@@ -5080,6 +5080,8 @@ def build_driver_profile_embed(target_member, profile):
         embed.add_field(name=account['provider'] + " Driver",value=label,inline=True)
     embed.add_field(name="Current Progression Rank", value=f"🏅 **{current_rank_name}**", inline=False)
     embed.add_field(name="Real Miles", value=f"🚛 **{real_miles:,}**", inline=True)
+    if profile.get("trucky_real_miles") is not None:
+        embed.add_field(name="Trucky Real (included in total)", value=profile["trucky_real_miles"], inline=True)
     if profile.get("trucky_race_miles") is not None:
         embed.add_field(name="Trucky Race Miles", value=profile["trucky_race_miles"], inline=True)
     embed.add_field(
@@ -6034,7 +6036,14 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
         profile_text(draw, (centre_x, 1094), label, fit_profile_text(draw, label, 142, 10, True), ice, anchor="ma", shadow=0)
         if ribbon:
             profile_text(draw, (centre_x, 1115), ribbon, fit_profile_text(draw, ribbon, 140, 9, True), muted, anchor="ma", shadow=0)
-    profile_text(draw, (69, 1152), "VERIFIED TRUCKSBOOK REAL JOBS ONLY", load_profile_font(11, True), muted, shadow=0)
+    from decimal import Decimal
+    career_footer = "JOB STATS: TRUCKSBOOK REAL JOBS"
+    if profile.get("trucky_real_miles") is not None:
+        career_footer += f"   •   TRUCKY REAL INCLUDED: {Decimal(profile['trucky_real_miles']):,.2f} MI"
+    if profile.get("trucky_race_miles") is not None:
+        career_footer += f"   •   TRUCKY RACE MILES: {Decimal(profile['trucky_race_miles']):,.2f} MI"
+    profile_text(draw, (69, 1152), career_footer,
+                 fit_profile_text(draw, career_footer, 850, 13, True), ice, shadow=0)
 
     if profile.get("is_preview"):
         draw.rounded_rectangle((504, 1162, 1096, 1192), 10, fill=(1, 8, 17, 225), outline=(*gold[:3], 205), width=1)
@@ -6197,10 +6206,16 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         accounts.append(dict(provider='Trucky',name=str(row.get('trucky_display_name') or 'Trucky Driver'),
                              account_id=row['trucky_account_id'],
                              status='Verified' if row.get('trucky_verified') else 'Linked'))
-    linked_race = None
+    linked_race = linked_real = None
     if os.getenv('AT_V2_LINKED_TRUCKY_MILEAGE_ENABLED') == 'YES':
         if await connection.fetchval("SELECT to_regclass('public.unified_v2_production_mileage_totals') IS NOT NULL"):
             linked_race = await connection.fetchval('SELECT trucky_race_miles FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1', discord_user_id)
+            if await connection.fetchval("SELECT to_regclass('public.unified_v2_production_credit_ledger') IS NOT NULL"):
+                linked_real = await connection.fetchval(
+                    """SELECT SUM(miles) FROM unified_v2_production_credit_ledger
+                       WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real'""",
+                    discord_user_id,
+                )
     credited = None
     if os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
         from unified_production_ledger_adapter_v2 import read_credited_progression_totals
@@ -6212,6 +6227,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         "trucksbook_name": str(row["trucksbook_name"]),
         "trucksbook_user_id": row["trucksbook_user_id"],
         "real_miles": max(int(credited["real_miles"] if credited else row["real_miles"] or 0), 0),
+        "trucky_real_miles": str(linked_real) if linked_real is not None else None,
         "trucky_race_miles": str(credited["trucky_race_miles"]) if credited else (str(linked_race) if linked_race is not None else None),
         "jobs_completed": max(int(row["jobs_completed"] or 0), 0),
         "average_job_distance": max(
