@@ -3946,12 +3946,22 @@ async def trucky_logbook_audit(ctx):
             vault_status = await conn.fetch("""
                 SELECT CASE WHEN COUNT(DISTINCT h.provider_account_id) <> 1 THEN 'conflicting account'
                             WHEN COUNT(DISTINCT l.discord_user_id) = 0 THEN 'waiting for profile link'
-                            WHEN COUNT(DISTINCT l.discord_user_id) = 1 THEN 'linked, pending allocation review'
+                            WHEN COUNT(DISTINCT l.discord_user_id) = 1 THEN
+                                CASE WHEN BOOL_OR(COALESCE(history.has_trucksbook, FALSE))
+                                    THEN 'linked, TrucksBook history'
+                                    ELSE 'linked, no TrucksBook history found' END
                             ELSE 'conflicting profile link' END AS status,
                        h.provider_job_id
                 FROM pending_provider_job_history_v2 h
                 LEFT JOIN unified_provider_links l
                   ON l.provider=h.provider AND l.provider_account_id=h.provider_account_id
+                LEFT JOIN LATERAL (
+                    SELECT EXISTS(SELECT 1 FROM unified_provider_links b
+                                  WHERE b.discord_user_id=l.discord_user_id AND b.provider='trucksbook')
+                        OR EXISTS(SELECT 1 FROM driver_links b WHERE b.discord_user_id=l.discord_user_id)
+                        OR EXISTS(SELECT 1 FROM processed_jobs b WHERE b.discord_user_id=l.discord_user_id)
+                        AS has_trucksbook
+                ) history ON TRUE
                 WHERE h.provider='trucky' AND h.source_kind='authenticated_api'
                   AND h.provider_job_id=ANY($1::text[])
                 GROUP BY h.provider_job_id
