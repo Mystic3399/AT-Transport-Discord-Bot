@@ -70,6 +70,18 @@ class ReconciliationTests(unittest.TestCase):
                          "shared_journey_id": "proof-abc", "shared_id_verified": True}
                 self.assertEqual(classify_delivery(incoming, [other]), "duplicate")
 
+    def test_verified_trip_id_matches_despite_distance_and_route_disagreement(self):
+        incoming = {**BASE, "shared_journey_id": "proof-abc", "shared_id_verified": True}
+        other = {**incoming, "provider": "trucksbook", "credited": True, "miles": "125",
+                 "metadata": {**BASE["metadata"], "destination": "Different label"}}
+        self.assertEqual(classify_delivery(incoming, [other]), "duplicate")
+
+    def test_matching_real_race_disagreement_stays_pending_with_complete_feed(self):
+        other = {**BASE, "provider": "trucksbook", "mileage_type": "race"}
+        self.assertEqual(classify_delivery(
+            BASE, [other], provider_watermark=TIME + timedelta(hours=1),
+            provider_feed_complete=True), "pending")
+
     def test_unverified_or_different_shared_id_stays_pending(self):
         incoming = {**BASE, "shared_journey_id": "proof-abc", "shared_id_verified": True}
         for candidate in (

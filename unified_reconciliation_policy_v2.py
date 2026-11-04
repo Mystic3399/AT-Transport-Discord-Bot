@@ -63,15 +63,21 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
                 return "pending"
             if candidate.get("discord_user_id") != incoming["discord_user_id"]:
                 continue
-            if is_candidate_duplicate(incoming, candidate):
-                if (_verified_shared_journey(incoming, candidate)
-                        and candidate.get("credited") is True):
+            # A verified journey identity survives changes to distance or route labels.
+            if _verified_shared_journey(incoming, candidate):
+                if (candidate.get("credited") is True
+                        and incoming["mileage_type"] == candidate.get("mileage_type")):
                     return "duplicate"
-                # Route/cargo/time/distance similarity is only a review lead.
-                # Even a previously credited similar job cannot prove that the
-                # two records are the same journey.
                 ambiguous_candidate = True
-        except (ValueError, KeyError, TypeError):
+                continue
+            # A Real/Race disagreement on an otherwise matching delivery
+            # requires review before either record is treated as independent.
+            comparison = candidate
+            if candidate.get("mileage_type") in ("real", "race"):
+                comparison = dict(candidate, mileage_type=incoming["mileage_type"])
+            if is_candidate_duplicate(incoming, comparison):
+                ambiguous_candidate = True
+        except (ValueError, KeyError, TypeError, InvalidOperation):
             return "pending"
     if ambiguous_candidate:
         return "pending"

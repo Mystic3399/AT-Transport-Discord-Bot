@@ -97,12 +97,19 @@ async def _settle_candidate(conn, candidate, member_ids):
             mileage_type,miles,source_evidence_sha256 FROM unified_v2_production_credit_ledger
             WHERE provider='trucky' AND provider_job_id=$1""", job_id)
         if previous:
-            return 'replayed' if (
+            if (
                 previous['discord_user_id'] == user and previous['provider_account_id'] == account
                 and previous['mileage_type'] == candidate['mileage_type']
                 and previous['miles'] == candidate['miles']
                 and previous['source_evidence_sha256'] == candidate['source_sha256']
-            ) else 'conflicting_job_pending'
+            ):
+                await conn.execute(
+                    "UPDATE unified_v2_production_credit_ledger SET delivered_at=$2 "
+                    "WHERE provider='trucky' AND provider_job_id=$1 AND delivered_at IS NULL",
+                    job_id, candidate['delivered_at'],
+                )
+                return 'replayed'
+            return 'conflicting_job_pending'
         totals = await conn.fetchrow("""SELECT combined_real_miles,trucky_race_miles
             FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1 FOR UPDATE""", user)
         existing_real = totals['combined_real_miles'] if totals else Decimal(0)
@@ -131,11 +138,11 @@ async def _settle_candidate(conn, candidate, member_ids):
         }, sort_keys=True).encode()).hexdigest()
         inserted = await conn.fetchval("""INSERT INTO unified_v2_production_credit_ledger
             (provider,provider_job_id,discord_user_id,provider_account_id,mileage_type,miles,
-             canonical_credit_key,source_evidence_sha256,ownership_evidence_sha256)
-            VALUES('trucky',$1,$2,$3,$4,$5,$6,$7,$8)
+             canonical_credit_key,source_evidence_sha256,ownership_evidence_sha256,delivered_at)
+            VALUES('trucky',$1,$2,$3,$4,$5,$6,$7,$8,$9)
             ON CONFLICT DO NOTHING RETURNING provider_job_id""", job_id, user, account,
             candidate['mileage_type'], candidate['miles'], 'accepted-link-trucky:' + job_id,
-            candidate['source_sha256'], ownership_digest)
+            candidate['source_sha256'], ownership_digest, candidate['delivered_at'])
         if inserted is None:
             return 'replayed'
         await conn.execute("""INSERT INTO unified_v2_production_mileage_baselines

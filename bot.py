@@ -1931,24 +1931,40 @@ async def fetch_period_rankings(connection, guild, period_start, period_end):
     member_ids = active_driver_ids(guild)
     if not member_ids:
         return []
-    return await connection.fetch(
+    trucky_jobs = ""
+    if await connection.fetchval("""
+        SELECT EXISTS(SELECT 1 FROM information_schema.columns
+                      WHERE table_schema='public'
+                        AND table_name='unified_v2_production_credit_ledger'
+                        AND column_name='delivered_at')
+    """):
+        trucky_jobs = """
+            UNION ALL
+            SELECT c.discord_user_id, 'Trucky:' || c.provider_account_id,
+                   c.miles, c.delivered_at
+            FROM unified_v2_production_credit_ledger c
+            WHERE c.provider='trucky' AND c.mileage_type='real'
+              AND c.delivered_at >= $1 AND c.delivered_at < $2
+              AND c.discord_user_id = ANY($3::BIGINT[])
         """
-        SELECT
-            jobs.discord_user_id,
-            COALESCE(links.trucksbook_name, MAX(jobs.trucksbook_name))
-                AS trucksbook_name,
-            SUM(jobs.accepted_distance)::BIGINT AS real_miles,
-            MIN(jobs.processed_at) AS first_job_at
-        FROM processed_jobs AS jobs
-        LEFT JOIN driver_links AS links
-            ON links.discord_user_id = jobs.discord_user_id
-        WHERE LOWER(jobs.statistics) = 'real'
-          AND jobs.accepted_distance > 0
-          AND jobs.processed_at >= $1
-          AND jobs.processed_at < $2
-          AND jobs.discord_user_id = ANY($3::BIGINT[])
+    return await connection.fetch(
+        f"""
+        WITH eligible_jobs AS (
+            SELECT discord_user_id, trucksbook_name, accepted_distance, processed_at
+            FROM processed_jobs
+            WHERE LOWER(statistics) = 'real' AND accepted_distance > 0
+              AND processed_at >= $1 AND processed_at < $2
+              AND discord_user_id = ANY($3::BIGINT[])
+            {trucky_jobs}
+        )
+        SELECT jobs.discord_user_id,
+               COALESCE(links.trucksbook_name, MAX(jobs.trucksbook_name)) AS trucksbook_name,
+               FLOOR(SUM(jobs.accepted_distance))::BIGINT AS real_miles,
+               MIN(jobs.processed_at) AS first_job_at
+        FROM eligible_jobs jobs
+        LEFT JOIN driver_links links ON links.discord_user_id = jobs.discord_user_id
         GROUP BY jobs.discord_user_id, links.trucksbook_name
-        HAVING SUM(jobs.accepted_distance) > 0
+        HAVING FLOOR(SUM(jobs.accepted_distance)) > 0
         ORDER BY real_miles DESC, first_job_at ASC, jobs.discord_user_id ASC;
         """,
         uk_midnight_utc(period_start),
@@ -2831,6 +2847,49 @@ async def apply_verified_v2_progression(discord_user_id, real_miles, company_mod
         company_mods_eligible=company_mods_eligible)
 
 
+trucky_hall_refresh_pending = True
+
+
+async def reconcile_linked_trucky_career_records(guild):
+    """Catch up permanent records from committed Real Miles after a retry or restart."""
+    global trucky_hall_refresh_pending
+    thresholds = [miles for miles, _, _ in ACHIEVEMENT_ROLES if miles != 40000]
+    hall_threshold = HALL_OF_FAME_ROLES[0][0]
+    async with db_pool.acquire() as conn:
+        drivers = await conn.fetch("""
+            SELECT p.discord_user_id, p.trucksbook_name, p.real_miles
+            FROM driver_progress p
+            LEFT JOIN hall_of_fame h USING (discord_user_id)
+            WHERE EXISTS (
+                SELECT 1 FROM unified_v2_production_credit_ledger c
+                WHERE c.discord_user_id=p.discord_user_id
+                  AND c.provider='trucky' AND c.mileage_type='real'
+            ) AND (
+                (p.real_miles >= $2
+                 AND p.real_miles > COALESCE(h.highest_verified_real_miles, 0))
+                OR EXISTS (
+                    SELECT 1 FROM unnest($1::bigint[]) AS threshold(miles)
+                    WHERE threshold.miles <= p.real_miles
+                      AND NOT EXISTS (
+                          SELECT 1 FROM permanent_achievements a
+                          WHERE a.discord_user_id=p.discord_user_id
+                            AND a.achievement_miles=threshold.miles
+                      )
+                )
+            )
+        """, thresholds, hall_threshold)
+    if drivers:
+        trucky_hall_refresh_pending = True
+    for driver in drivers:
+        await reconcile_permanent_records(
+            driver["discord_user_id"], driver["trucksbook_name"], driver["real_miles"],
+            guild.get_member(driver["discord_user_id"]) is not None,
+            company_mods_eligible=False,
+        )
+    if trucky_hall_refresh_pending and HALL_OF_FAME_CHANNEL_ID is not None:
+        trucky_hall_refresh_pending = not await refresh_hall_of_fame_display()
+
+
 @tasks.loop(seconds=60)
 async def ingest_trucky_company_jobs():
     """Poll the existing authenticated API; never awards from tracker messages."""
@@ -2850,6 +2909,9 @@ async def ingest_trucky_company_jobs():
             linked_credits = await allocate_saved_linked_history(db_pool)
             if linked_credits['status'] != 'disabled':
                 print('TRUCKY LINKED ALLOCATION ' + json.dumps(linked_credits,sort_keys=True),flush=True)
+            guild = bot.get_guild(GUILD_ID)
+            if guild is not None and linked_credits['status'] == 'linked_history_processed':
+                await reconcile_linked_trucky_career_records(guild)
         except Exception as error:
             print(f'TRUCKY LINKED ALLOCATION RETRY PENDING: {type(error).__name__}',flush=True)
         try:
@@ -3990,6 +4052,7 @@ async def trucky_logbook_audit(ctx):
     from unified_job_matching_v2 import credited_route_overlaps, unique_overlap_topups
     overlaps = credited_route_overlaps(route_pairs)
     topups = unique_overlap_topups(overlaps)
+    jobs_with_timed_pairs = {row["trucky_job_id"] for row in route_pairs}
     from collections import Counter
     pending_counts = Counter(row["status"] for row in vault_status)
     pending_lines = "".join(f"\n{status.capitalize()}: {count}" for status, count in sorted(pending_counts.items()))
@@ -4002,7 +4065,9 @@ async def trucky_logbook_audit(ctx):
         f"Already credited: {len(credited_ids)}\n"
         f"In authenticated vault, awaiting credit review: {len(vault_ids - credited_ids)}"
         f"{pending_lines}\n"
+        f"Pending jobs with a credited TrucksBook record in the delivery window: {len(jobs_with_timed_pairs)}\n"
         f"Possible overlap with a credited TrucksBook trip: {len(overlaps)}\n"
+        f"Jobs outside the available comparison records remain unresolved.\n"
         f"One-to-one matches: {len(topups)}. Unconfirmed top-up preview: {sum(topups.values()):,.2f} mi.\n"
         f"No authenticated vault or credit record: {len(audited_ids - vault_ids - credited_ids)}",
         allowed_mentions=discord.AllowedMentions.none(),

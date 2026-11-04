@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS unified_v2_production_credit_ledger (
  PRIMARY KEY(provider,provider_job_id),
  UNIQUE(discord_user_id,canonical_credit_key)
 );
+ALTER TABLE unified_v2_production_credit_ledger
+ ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ;
 CREATE TABLE IF NOT EXISTS unified_v2_production_mileage_totals (
  discord_user_id BIGINT PRIMARY KEY REFERENCES unified_driver_profiles(discord_user_id),
  combined_real_miles NUMERIC(24,10) NOT NULL DEFAULT 0 CHECK(combined_real_miles >= 0),
@@ -247,6 +249,10 @@ async def apply_verified_credit(
             return {"status": "activation_blocked", "blockers": blockers}
 
         async with conn.transaction():
+            # Use the same per-driver lock as the legacy TrucksBook writer
+            # and linked Trucky allocator before checking credits or history.
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", user_id)
+
             async def log_decision(decision, reason):
                 await conn.execute("""
                     INSERT INTO unified_v2_production_mileage_decisions
@@ -398,12 +404,12 @@ async def apply_verified_credit(
                 INSERT INTO unified_v2_production_credit_ledger
                   (provider,provider_job_id,discord_user_id,provider_account_id,
                    mileage_type,miles,canonical_credit_key,
-                   source_evidence_sha256,ownership_evidence_sha256)
-                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                   source_evidence_sha256,ownership_evidence_sha256,delivered_at)
+                VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                 ON CONFLICT DO NOTHING RETURNING provider_job_id
             """, provider, provider_job_id, user_id, account_id,
                  job["mileage_type"], amount, job["canonical_credit_key"],
-                 job["source_evidence_sha256"], job["ownership_evidence_sha256"])
+                 job["source_evidence_sha256"], job["ownership_evidence_sha256"], job.get("delivered_at"))
             if inserted is None:
                 existing = await conn.fetchrow("""
                     SELECT discord_user_id,miles,mileage_type,canonical_credit_key
