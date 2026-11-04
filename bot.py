@@ -3918,31 +3918,31 @@ async def trucky_logbook_audit(ctx):
 
     source = os.getenv("TRUCKY_TRACKER_WEBHOOK_ID", "").strip()
     channel = ctx.guild.get_channel(TRACKER_CHANNEL_ID)
-    if channel is None or not re.fullmatch(r"[1-9][0-9]{0,19}", source):
-        await ctx.reply("Trucky logbook audit needs the channel and configured webhook sender ID.")
-        return
-    job_ids = set()
-    try:
-        async for message in channel.history(limit=500):
-            observation = inspect_trucky_message(message, expected_webhook_id=int(source))
-            if observation:
-                job_ids.add(observation["provider_job_id"])
-    except discord.HTTPException:
-        await ctx.reply("Could not read Trucky logbook history. Check the bot’s channel permissions.")
-        return
+    job_ids = None
+    if channel is not None and re.fullmatch(r"[1-9][0-9]{0,19}", source):
+        observed_ids = set()
+        try:
+            async for message in channel.history(limit=500):
+                observation = inspect_trucky_message(message, expected_webhook_id=int(source))
+                if observation:
+                    observed_ids.add(observation["provider_job_id"])
+        except discord.HTTPException:
+            pass  # The authenticated vault remains available if Discord history is unreadable.
+        else:
+            job_ids = sorted(observed_ids)
     async with db_pool.acquire() as conn:
         async with conn.transaction(readonly=True):
             vault_ids = set(await conn.fetchval("""
                 SELECT ARRAY(SELECT DISTINCT provider_job_id
                 FROM pending_provider_job_history_v2
                 WHERE provider='trucky' AND source_kind='authenticated_api'
-                  AND provider_job_id=ANY($1::text[]))
-            """, sorted(job_ids)))
+                  AND ($1::text[] IS NULL OR provider_job_id=ANY($1::text[])))
+            """, job_ids))
             credited_ids = set(await conn.fetchval("""
                 SELECT ARRAY(SELECT provider_job_id
                 FROM unified_v2_production_credit_ledger
-                WHERE provider='trucky' AND provider_job_id=ANY($1::text[]))
-            """, sorted(job_ids)))
+                WHERE provider='trucky' AND ($1::text[] IS NULL OR provider_job_id=ANY($1::text[])))
+            """, job_ids))
             vault_status = await conn.fetch("""
                 SELECT CASE WHEN COUNT(DISTINCT h.provider_account_id) <> 1 THEN 'conflicting account'
                             WHEN COUNT(DISTINCT l.discord_user_id) = 0 THEN 'waiting for profile link'
@@ -3983,15 +3983,18 @@ async def trucky_logbook_audit(ctx):
     from collections import Counter
     pending_counts = Counter(row["status"] for row in vault_status)
     pending_lines = "".join(f"\n{status.capitalize()}: {count}" for status, count in sorted(pending_counts.items()))
+    audited_ids = vault_ids | credited_ids if job_ids is None else set(job_ids)
+    scope = ("Trucky mileage audit (authenticated vault and ledger)"
+             if job_ids is None else "Trucky logbook audit (latest 500 messages)")
     await ctx.reply(
-        f"Trucky logbook audit (latest 500 messages)\n"
-        f"Distinct completed jobs: {len(job_ids)}\n"
+        f"{scope}\n"
+        f"Distinct completed jobs: {len(audited_ids)}\n"
         f"Already credited: {len(credited_ids)}\n"
         f"In authenticated vault, awaiting credit review: {len(vault_ids - credited_ids)}"
         f"{pending_lines}\n"
         f"Possible overlap with a credited TrucksBook trip: {len(overlaps)}\n"
         f"One-to-one matches: {len(topups)}. Unconfirmed top-up preview: {sum(topups.values()):,.2f} mi.\n"
-        f"No authenticated vault or credit record: {len(job_ids - vault_ids - credited_ids)}",
+        f"No authenticated vault or credit record: {len(audited_ids - vault_ids - credited_ids)}",
         allowed_mentions=discord.AllowedMentions.none(),
     )
 
