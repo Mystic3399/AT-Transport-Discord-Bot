@@ -3,11 +3,11 @@ import asyncio
 from datetime import datetime, timezone
 
 
-def company_status(trucksbook, trucky):
+def company_status(trucksbook, trucky, discord_presence=None):
+    if discord_presence == "Not in server" or "not_member" in (trucksbook, trucky):
+        return "Former company driver"
     if "member" in (trucksbook, trucky):
         return "Active company driver"
-    if trucksbook == trucky == "not_member":
-        return "Former company driver"
     return "Company status unconfirmed"
 
 
@@ -29,6 +29,8 @@ async def inspect_driver(row, guild, roster, tb_lookup):
             # name on a changed/private page is NOT authoritative departure.
             if profile.get("success") and profile.get("belongs_to_at") is True:
                 tb = "member"
+            elif profile.get("success") and profile.get("membership_status") == "not_member":
+                tb = "not_member"
         except Exception:
             pass
     tr = "unknown"
@@ -41,7 +43,7 @@ async def inspect_driver(row, guild, roster, tb_lookup):
             "registration_status": row.get("registration_status"),
             "trucksbook_link_conflict": bool(row.get("trucksbook_link_conflict")),
             "trucksbook": tb, "trucky": tr,
-            "company": company_status(tb, tr),
+            "company": company_status(tb, tr, presence),
             "checked_at": datetime.now(timezone.utc).isoformat()}
 
 
@@ -75,3 +77,25 @@ def resolve_driver_query(query, guild, reports):
     if len(matches) > 1:
         raise ValueError('ambiguous_driver_name')
     return next(iter(matches), None)
+
+
+async def trucksbook_departures(channel, webhook_id):
+    """Read newest first so a later verified join supersedes a departure."""
+    import re
+    departures = {}
+    async for message in channel.history(limit=500):
+        if message.webhook_id != webhook_id:
+            continue
+        lines = message.content.strip().splitlines()
+        if len(lines) != 3:
+            continue
+        title, detail, url = lines
+        match = re.fullmatch(r"https://trucksbook\.eu/profile/([1-9][0-9]*)", url.strip("<>"))
+        if not match:
+            continue
+        title = title.strip("*")
+        if title == "User leaving the company" and re.fullmatch(r"User .+ has left your company\.", detail):
+            departures.setdefault(int(match[1]), True)
+        elif title == "New user in the company" and re.fullmatch(r"User .+ has been accepted to join the company\.", detail):
+            departures.setdefault(int(match[1]), False)
+    return {account for account, departed in departures.items() if departed}

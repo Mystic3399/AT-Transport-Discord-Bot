@@ -6448,8 +6448,23 @@ async def refresh_driver_memberships_v2(guild):
             roster = await trucky_membership_adapter.fetch_current_member_ids()
         except trucky_membership_adapter.MembershipUnavailable:
             roster = None
+        departures = set()
+        channel = guild.get_channel(1541479027024470086)
+        source = os.getenv("TRUCKSBOOK_ADMIN_WEBHOOK_ID", "")
+        if channel is not None and source.isascii() and source.isdecimal() and len(source) <= 20:
+            try:
+                departures = await driver_membership_v2.trucksbook_departures(channel, int(source))
+            except discord.HTTPException as error:
+                print(f"TRUCKSBOOK ADMIN HISTORY unavailable: {error.status}", flush=True)
+
+        async def lookup_membership(account):
+            profile = await fetch_trucksbook_profile(account)
+            if account in departures and profile.get("belongs_to_at") is not True:
+                return dict(profile, success=True, membership_status="not_member")
+            return profile
+
         reports = await driver_membership_v2.inspect_drivers(
-            rows, guild, roster, fetch_trucksbook_profile)
+            rows, guild, roster, lookup_membership)
         driver_membership_snapshot_v2.clear()
         driver_membership_snapshot_v2.update({r["discord_user_id"]: r for r in reports})
         return reports

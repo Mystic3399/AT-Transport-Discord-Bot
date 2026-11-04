@@ -1,13 +1,13 @@
 import unittest
 from unittest.mock import AsyncMock, Mock
-from driver_membership_v2 import company_status, inspect_driver
+from driver_membership_v2 import company_status, inspect_driver, trucksbook_departures
 
 
 class StatusTests(unittest.TestCase):
     def test_membership_is_not_discord_presence(self):
         self.assertEqual(company_status('not_member', 'not_member'), 'Former company driver')
-        self.assertEqual(company_status('member', 'not_member'), 'Active company driver')
-        self.assertEqual(company_status('unknown', 'not_member'), 'Company status unconfirmed')
+        self.assertEqual(company_status('member', 'not_member'), 'Former company driver')
+        self.assertEqual(company_status('unknown', 'not_member'), 'Former company driver')
         self.assertEqual(company_status('unknown', 'unknown'), 'Company status unconfirmed')
 
 
@@ -24,9 +24,16 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_profile_is_not_departure(self):
         guild = Mock(); guild.get_member.return_value = object()
         result = await inspect_driver({'discord_user_id': 1, 'trucksbook_user_id': 2,
-            'trucky_account_id': '3'}, guild, set(), AsyncMock(return_value={
+            'trucky_account_id': '3'}, guild, None, AsyncMock(return_value={
                 'success': True, 'belongs_to_at': False}))
         self.assertEqual(result['company'], 'Company status unconfirmed')
+
+    async def test_confirmed_trucksbook_departure_overrides_active_trucky(self):
+        guild = Mock(); guild.get_member.return_value = object()
+        result = await inspect_driver({'discord_user_id': 1, 'trucksbook_user_id': 2,
+            'trucky_account_id': '3'}, guild, {'3'}, AsyncMock(return_value={
+                'success': True, 'membership_status': 'not_member'}))
+        self.assertEqual(result['company'], 'Former company driver')
 
     async def test_provider_outage_does_not_mark_former(self):
         guild = Mock(); guild.get_member.return_value = object()
@@ -70,7 +77,8 @@ class DiscordFailureTests(unittest.IsolatedAsyncioTestCase):
             guild.fetch_member = AsyncMock(side_effect=LookupError(status))
             report = await inspect_driver({'discord_user_id': 1}, guild, None, AsyncMock())
             self.assertEqual(report['discord'], expected)
-            self.assertEqual(report['company'], 'Company status unconfirmed')
+            self.assertEqual(report['company'], 'Former company driver' if status == 404
+                             else 'Company status unconfirmed')
 
 
 class SavedRegistrationTests(unittest.IsolatedAsyncioTestCase):
@@ -115,3 +123,44 @@ class NameResolutionTests(unittest.TestCase):
         from driver_membership_v2 import resolve_driver_query
         for query in ('', '@', 'ghost', '0'):
             self.assertIsNone(resolve_driver_query(query, self.guild, self.reports))
+
+
+class TrucksBookNoticeTests(unittest.IsolatedAsyncioTestCase):
+    departure = (
+        "**User leaving the company**\n"
+        "User VestedIce has left your company.\n"
+        "<https://trucksbook.eu/profile/582923>"
+    )
+    rejoin = (
+        "**New user in the company**\n"
+        "User VestedIce has been accepted to join the company.\n"
+        "<https://trucksbook.eu/profile/582923>"
+    )
+
+    def channel_with_notices(self, *notices):
+        async def history(*, limit):
+            for sender_id, content in notices:
+                yield Mock(webhook_id=sender_id, content=content)
+
+        return Mock(history=history)
+
+    async def test_departure_matches_profile_link_from_configured_sender(self):
+        channel = self.channel_with_notices((123, self.departure))
+        self.assertEqual(await trucksbook_departures(channel, 123), {582923})
+
+    async def test_newer_verified_rejoin_supersedes_departure(self):
+        channel = self.channel_with_notices((123, self.rejoin), (123, self.departure))
+        self.assertEqual(await trucksbook_departures(channel, 123), set())
+
+        channel = self.channel_with_notices((123, self.departure), (123, self.rejoin))
+        self.assertEqual(await trucksbook_departures(channel, 123), {582923})
+
+    async def test_untrusted_sender_and_username_only_cannot_mark_departure(self):
+        channel = self.channel_with_notices(
+            (456, self.departure),
+            (123, self.departure.rsplit("\n", 1)[0]),
+        )
+        self.assertEqual(await trucksbook_departures(channel, 123), set())
+
+        channel = self.channel_with_notices((456, self.rejoin), (123, self.departure))
+        self.assertEqual(await trucksbook_departures(channel, 123), {582923})
