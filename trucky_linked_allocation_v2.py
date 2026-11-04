@@ -72,6 +72,54 @@ def vault_candidate(versions, driver_id):
     return candidate
 
 
+def historical_job_approved(candidate, approvals):
+    """Accept only explicitly reviewed driver, provider-job and exact-mile tuples."""
+    reference = (
+        f"{candidate['discord_user_id']}:{candidate['provider_job_id']}:"
+        f"{candidate['miles']:.10f}"
+    )
+    return reference in {item.strip() for item in approvals.split(",") if item.strip()}
+
+
+async def preview_historical_real_batch(pool, discord_user_id, job_ids, approvals):
+    """Check the requested job IDs against live vault evidence and existing credits."""
+    async with pool.acquire() as conn:
+        async with conn.transaction(readonly=True, isolation="repeatable_read"):
+            versions = await conn.fetch("""
+                SELECT h.provider, h.provider_job_id, h.provider_account_id, h.source_kind,
+                       h.evidence, l.discord_user_id AS linked_driver_id,
+                       c.provider_job_id IS NOT NULL AS already_credited
+                FROM pending_provider_job_history_v2 h
+                LEFT JOIN unified_provider_links l
+                  ON l.provider=h.provider AND l.provider_account_id=h.provider_account_id
+                LEFT JOIN unified_v2_production_credit_ledger c
+                  ON c.provider=h.provider AND c.provider_job_id=h.provider_job_id
+                WHERE h.provider='trucky' AND h.source_kind='authenticated_api'
+                  AND h.provider_job_id=ANY($1::text[])
+            """, sorted(set(job_ids)))
+    by_job = defaultdict(list)
+    for row in versions:
+        by_job[row["provider_job_id"]].append(dict(row))
+    results = {}
+    for job_id in sorted(set(job_ids)):
+        rows = by_job[job_id]
+        if not rows:
+            results[job_id] = "missing_authenticated_evidence"
+        elif any(row["already_credited"] for row in rows):
+            results[job_id] = "already_credited"
+        elif {row["linked_driver_id"] for row in rows} != {discord_user_id}:
+            results[job_id] = "driver_link_mismatch"
+        else:
+            candidate = vault_candidate(rows, discord_user_id)
+            results[job_id] = (
+                "matches_reviewed_real_evidence"
+                if candidate and candidate["mileage_type"] == "real"
+                and historical_job_approved(candidate, approvals)
+                else "evidence_mismatch"
+            )
+    return results
+
+
 async def _settle_candidate(conn, candidate, member_ids):
     """One transaction per job. Caller must have checked the runtime boundary."""
     user = candidate['discord_user_id']

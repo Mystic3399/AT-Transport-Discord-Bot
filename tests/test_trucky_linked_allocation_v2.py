@@ -51,6 +51,45 @@ class LinkedAllocationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(one,two)
         self.assertEqual(one['miles'], KM_TO_MILES.quantize(Decimal('.0000000001')))
 
+    def test_historical_approval_is_bound_to_driver_job_and_exact_miles(self):
+        from trucky_linked_allocation_v2 import historical_job_approved
+
+        candidate = vault_candidate([observation()], 789)
+        reference = f"789:701:{candidate['miles']:.10f}"
+        self.assertTrue(historical_job_approved(candidate, reference))
+        self.assertFalse(historical_job_approved({**candidate, 'discord_user_id': 790}, reference))
+        self.assertFalse(historical_job_approved({**candidate, 'provider_job_id': '702'}, reference))
+        self.assertFalse(historical_job_approved({**candidate, 'miles': Decimal(2)}, reference))
+        self.assertFalse(historical_job_approved(candidate, ""))
+
+    async def test_historical_preview_checks_vault_and_never_writes(self):
+        from unittest.mock import MagicMock
+        from trucky_linked_allocation_v2 import preview_historical_real_batch
+
+        conn = MagicMock()
+        conn.fetch = AsyncMock(return_value=[
+            dict(observation(job='701'), linked_driver_id=789, already_credited=False),
+            dict(observation(job='702'), linked_driver_id=789, already_credited=True),
+            dict(observation(job='703'), linked_driver_id=790, already_credited=False),
+            dict(observation(job='704', km='2'), linked_driver_id=789, already_credited=False),
+        ])
+        pool = MagicMock()
+        pool.acquire.return_value.__aenter__.return_value = conn
+        miles = vault_candidate([observation()], 789)['miles']
+        approvals = f"789:701:{miles:.10f},789:704:{miles:.10f}"
+        result = await preview_historical_real_batch(
+            pool, 789, ['701', '702', '703', '704', '705'], approvals,
+        )
+        self.assertEqual(result, {
+            '701': 'matches_reviewed_real_evidence',
+            '702': 'already_credited',
+            '703': 'driver_link_mismatch',
+            '704': 'evidence_mismatch',
+            '705': 'missing_authenticated_evidence',
+        })
+        conn.transaction.assert_called_once_with(readonly=True, isolation="repeatable_read")
+        conn.execute.assert_not_called()
+
     def test_export_and_account_conflicts_cannot_be_credited(self):
         self.assertIsNone(vault_candidate([{**observation(),'source_kind':'owner_export'}],789))
         self.assertIsNone(vault_candidate([observation(),observation(account='999')],789))

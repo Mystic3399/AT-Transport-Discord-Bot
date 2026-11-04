@@ -3968,6 +3968,52 @@ async def send_mileage_reconciliation(ctx, source_jobs, metadata):
     )
 
 
+@bot.command(name="truckybatchpreview")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+@commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
+async def trucky_batch_preview(ctx, driver: discord.Member):
+    """Validate an attached historical mileage preview without applying credits."""
+    import io
+    import json
+    from collections import Counter
+    from trucky_linked_allocation_v2 import preview_historical_real_batch
+
+    if ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    attachments = ctx.message.attachments
+    if len(attachments) != 1 or attachments[0].size > 65536:
+        await ctx.reply("Attach one historical credit preview JSON file (up to 64 KB).")
+        return
+    try:
+        batch = json.loads(await attachments[0].read())
+        candidates = batch["candidates"]
+        if not isinstance(candidates, list) or not 1 <= len(candidates) <= 200:
+            raise ValueError("Invalid batch size")
+        approvals = {}
+        for row in candidates:
+            job_id, miles = row["provider_job_id"], row["miles"]
+            if (row["discord_user_id"] != driver.id
+                    or not re.fullmatch(r"[1-9][0-9]{0,19}", job_id)
+                    or not re.fullmatch(r"[0-9]{1,6}\.[0-9]{10}", miles)
+                    or job_id in approvals):
+                raise ValueError("Invalid or duplicate job")
+            approvals[job_id] = f"{driver.id}:{job_id}:{miles}"
+    except (ValueError, TypeError, KeyError, discord.HTTPException):
+        await ctx.reply("Invalid preview file. Check that every job belongs to the selected driver.")
+        return
+    results = await preview_historical_real_batch(
+        db_pool, driver.id, approvals, ",".join(approvals.values()),
+    )
+    summary = "\n".join(f"{status}: {count}" for status, count in sorted(Counter(results.values()).items()))
+    report = io.BytesIO(json.dumps(results, indent=2).encode())
+    await ctx.reply(
+        f"Read-only Trucky batch preview ({len(results)} jobs)\n{summary}",
+        file=discord.File(report, filename="trucky-batch-results.json"),
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 @bot.command(name="truckylogbookaudit")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
