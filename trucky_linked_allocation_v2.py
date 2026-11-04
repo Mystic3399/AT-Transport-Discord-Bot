@@ -72,6 +72,51 @@ def vault_candidate(versions, driver_id):
     return candidate
 
 
+def vault_webhook_overlap_leads(rows):
+    """Find review leads using the Discord post time, never award from it."""
+    from datetime import datetime
+    from decimal import InvalidOperation
+    from unified_job_matching_v2 import is_candidate_duplicate
+    from unified_production_ledger_adapter_v2 import comparison_metadata_from_history
+
+    versions = defaultdict(list)
+    comparisons = defaultdict(dict)
+    for row in rows:
+        key = (row["discord_user_id"], row["provider_job_id"])
+        version = {field: row[field] for field in (
+            "provider", "provider_job_id", "provider_account_id", "source_kind", "evidence",
+        )}
+        if version not in versions[key]:
+            versions[key].append(version)
+        comparisons[key][(row["trucksbook_job_id"], row["trucksbook_evidence"])] = row["trucksbook_credited_miles"]
+
+    leads = set()
+    for (driver_id, job_id), observations in versions.items():
+        candidate = vault_candidate(observations, driver_id)
+        if not candidate or candidate["mileage_type"] != "real":
+            continue
+        metadata = comparison_metadata_from_history(
+            candidate, {"mileage_type": "real", "canonical_miles": str(candidate["miles"])},
+            observations,
+        )
+        if metadata is None:
+            continue
+        incoming = dict(candidate, metadata=metadata)
+        for (trucksbook_id, payload), miles in comparisons[(driver_id, job_id)].items():
+            try:
+                evidence = json.loads(payload)
+                other = {
+                    "provider": "trucksbook", "discord_user_id": driver_id,
+                    "mileage_type": "real", "metadata": evidence, "miles": miles,
+                    "delivered_at": datetime.fromisoformat(evidence["source_message_at"]),
+                }
+                if is_candidate_duplicate(incoming, other):
+                    leads.add((job_id, trucksbook_id))
+            except (KeyError, ValueError, TypeError, InvalidOperation):
+                continue
+    return {trucky_id for trucky_id, _ in leads}
+
+
 def historical_job_approved(candidate, approvals):
     """Accept only explicitly reviewed driver, provider-job and exact-mile tuples."""
     reference = (

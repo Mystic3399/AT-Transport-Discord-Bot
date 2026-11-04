@@ -98,23 +98,24 @@ def credited_route_overlaps(rows):
                 credited = Decimal(str(row["trucksbook_credited_miles"]))
                 if credited.is_finite() and credited > 0:
                     trucky_miles = Decimal(str(jobs[0]["miles"]))
-                    matches.setdefault(row["trucky_job_id"], {})[row["trucksbook_job_id"]] = max(
-                        Decimal(0), trucky_miles - credited
+                    matches.setdefault(row["trucky_job_id"], {})[row["trucksbook_job_id"]] = (
+                        ("trucky", trucky_miles) if trucky_miles > credited
+                        else ("trucksbook", credited)
                     )
         except (ValueError, TypeError, KeyError, InvalidOperation):
             continue
     return matches
 
 
-def unique_overlap_topups(matches):
-    """Preview only one-to-one pairs, using actual stored credit as the baseline."""
+def unique_overlap_winners(matches):
+    """Select one full mileage record per unambiguous pair; keep TrucksBook on ties."""
     from collections import Counter
 
     trucksbook_matches = Counter(job_id for options in matches.values() for job_id in options)
     return {
-        trucky_id: difference
+        trucky_id: winner
         for trucky_id, options in matches.items()
         if len(options) == 1
-        for trucksbook_id, difference in options.items()
+        for trucksbook_id, winner in options.items()
         if trucksbook_matches[trucksbook_id] == 1
     }

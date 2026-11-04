@@ -90,6 +90,22 @@ class LinkedAllocationTests(unittest.IsolatedAsyncioTestCase):
         conn.transaction.assert_called_once_with(readonly=True, isolation="repeatable_read")
         conn.execute.assert_not_called()
 
+    def test_webhook_overlap_uses_vault_route_without_changing_credit_digest(self):
+        import json
+        from trucky_linked_allocation_v2 import vault_webhook_overlap_leads
+
+        route = dict(game="ETS2", origin="Paris", destination="Lille", cargo="Pet Food")
+        original = observation(km="284")
+        enriched = observation(km="284", **route)
+        self.assertEqual(vault_candidate([original], 789)["source_sha256"],
+                         vault_candidate([enriched], 789)["source_sha256"])
+        row = dict(enriched, discord_user_id=789, trucksbook_job_id="123",
+                   trucksbook_credited_miles=176,
+                   trucksbook_evidence=json.dumps(dict(route, source_message_at="2026-10-01T12:03:00Z")))
+        self.assertEqual(vault_webhook_overlap_leads([row]), {"701"})
+        conflict = dict(row, evidence=dict(enriched["evidence"], destination="Berlin"))
+        self.assertEqual(vault_webhook_overlap_leads([row, conflict]), set())
+
     def test_export_and_account_conflicts_cannot_be_credited(self):
         self.assertIsNone(vault_candidate([{**observation(),'source_kind':'owner_export'}],789))
         self.assertIsNone(vault_candidate([observation(),observation(account='999')],789))

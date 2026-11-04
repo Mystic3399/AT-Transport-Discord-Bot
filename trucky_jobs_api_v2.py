@@ -267,11 +267,17 @@ async def _ingest_authenticated_job_records(pool, records):
     import unified_driver_profiles as profiles
     from trucky_verified_job_candidate_v2 import normalize_verified_trucky_job
     counts = Counter()
+    from world_of_trucks_policy_v2 import exceeds_mileage_speed_limit
+
     for job in records:
         counts['observed'] += 1
         if (not isinstance(job, dict) or type(job.get('user_id')) is not int
                 or type(job.get('id')) is not int or job['user_id']<=0 or job['id']<=0):
             counts['invalid_record'] += 1
+            continue
+        if (job.get("status") in ("cancelled", "canceled", "unlisted")
+                or job.get("stats_type") in ("cancelled", "canceled", "unlisted")
+                or exceeds_mileage_speed_limit(job.get("max_speed_kmh"), "km/h")):
             continue
         if os.getenv('AT_V2_PENDING_HISTORY_ENABLED') == 'YES':
             # Retain authenticated completed jobs even if their driver has not

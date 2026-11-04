@@ -1932,6 +1932,7 @@ async def fetch_period_rankings(connection, guild, period_start, period_end):
     if not member_ids:
         return []
     trucky_jobs = ""
+    exclude_superseded = ""
     if await connection.fetchval("""
         SELECT EXISTS(SELECT 1 FROM information_schema.columns
                       WHERE table_schema='public'
@@ -1947,14 +1948,27 @@ async def fetch_period_rankings(connection, guild, period_start, period_end):
               AND c.delivered_at >= $1 AND c.delivered_at < $2
               AND c.discord_user_id = ANY($3::BIGINT[])
         """
+    if trucky_jobs and await connection.fetchval(
+        "SELECT to_regclass('public.unified_v2_production_mileage_decisions') IS NOT NULL"
+    ):
+        exclude_superseded = """
+            AND NOT EXISTS (
+                SELECT 1 FROM unified_v2_production_mileage_decisions d
+                WHERE d.provider='trucksbook' AND d.provider_job_id=p.job_id
+                  AND d.discord_user_id=p.discord_user_id
+                  AND d.decision='duplicate_provider_job'
+                  AND d.reason_code='superseded_by_higher_real_credit'
+            )
+        """
     return await connection.fetch(
         f"""
         WITH eligible_jobs AS (
             SELECT discord_user_id, trucksbook_name, accepted_distance, processed_at
-            FROM processed_jobs
+            FROM processed_jobs p
             WHERE LOWER(statistics) = 'real' AND accepted_distance > 0
               AND processed_at >= $1 AND processed_at < $2
               AND discord_user_id = ANY($3::BIGINT[])
+            {exclude_superseded}
             {trucky_jobs}
         )
         SELECT jobs.discord_user_id,
@@ -2149,15 +2163,32 @@ async def refresh_driver_leaderboard(guild=None):
         monthly_rows = await fetch_period_rankings(
             connection, guild, monthly_start, monthly_end
         )
-        all_time_rows = await connection.fetch(
-            """
-            SELECT discord_user_id, trucksbook_name, real_miles
-            FROM driver_progress
-            WHERE real_miles > 0
-            ORDER BY real_miles DESC, updated_at ASC, discord_user_id ASC
-            LIMIT 10;
-            """
-        )
+        if os.getenv("AT_V2_PROGRESSION_ENABLED") == "YES":
+            all_time_rows = await connection.fetch("""
+                SELECT b.discord_user_id,
+                       COALESCE(p.trucksbook_name, l.provider_display_name, 'A&T Driver') AS trucksbook_name,
+                       FLOOR(b.trucksbook_real_miles + COALESCE(t.combined_real_miles, 0))::BIGINT AS real_miles
+                FROM unified_v2_production_mileage_baselines b
+                LEFT JOIN unified_v2_production_mileage_totals t USING (discord_user_id)
+                LEFT JOIN driver_progress p USING (discord_user_id)
+                LEFT JOIN unified_provider_links l ON l.discord_user_id=b.discord_user_id
+                    AND l.provider='trucky'
+                WHERE b.trucksbook_real_miles + COALESCE(t.combined_real_miles, 0) >= 1
+                ORDER BY real_miles DESC,
+                         COALESCE(t.updated_at, p.updated_at, b.snapshotted_at) ASC,
+                         b.discord_user_id ASC
+                LIMIT 10
+            """)
+        else:
+            all_time_rows = await connection.fetch(
+                """
+                SELECT discord_user_id, trucksbook_name, real_miles
+                FROM driver_progress
+                WHERE real_miles > 0
+                ORDER BY real_miles DESC, updated_at ASC, discord_user_id ASC
+                LIMIT 10;
+                """
+            )
     next_week = int(uk_midnight_utc(weekly_end).timestamp())
     next_month = int(uk_midnight_utc(monthly_end).timestamp())
     embed = discord.Embed(
@@ -3335,6 +3366,8 @@ async def on_message(message):
                     configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
                     configured_webhook_ids=os.getenv("TRUCKSBOOK_HISTORY_WEBHOOK_IDS", "").strip(),
                     parsed_job=extract_trucksbook_job_from_embed(history_embed),
+                    observed_account_id=trucksbook_author_user_id(history_data),
+                    source_message_at=getattr(message, "created_at", None),
                     driver_label=(history_data.get("author") or {}).get("name"))
             except Exception:
                 # Evidence capture must not interrupt the established processor.
@@ -3505,7 +3538,7 @@ async def on_message(message):
         # ------------------------------------------
 
         if (
-            not is_real_statistics(statistics)
+            not is_real_statistics(statistics) or extract_trucksbook_job_from_embed(embed) is None
         ):
             print(
                 "ACTION: Job ignored. "
@@ -3791,22 +3824,43 @@ def extract_trucksbook_job_from_embed(embed):
             details = field.get("value") or ""
             break
 
+    comparison = {}
+    comparison_labels = {"from": "origin", "to": "destination", "cargo": "cargo", "game": "game"}
+    from world_of_trucks_policy_v2 import exceeds_mileage_speed_limit
+
     statistics = None
     accepted_distance = None
     for line in details.splitlines():
         clean_line = line.replace("**", "").strip()
         lower_line = clean_line.lower()
+        label, separator, value = clean_line.partition(":")
+        if separator and label.lower() in comparison_labels and value.strip():
+            comparison[comparison_labels[label.lower()]] = value.strip()
+        if label.strip().lower() in ("status", "statistics") and any(
+            part.strip().casefold() in ("cancelled", "canceled", "unlisted")
+            for part in value.split(",")
+        ):
+            return None
+        if label.strip().lower() in ("maximal reached speed", "maximum speed", "max speed"):
+            speed = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(mph|km/h|kph)\s*", value, re.I)
+            if speed and exceeds_mileage_speed_limit(speed[1], speed[2].lower()):
+                return None
         if lower_line.startswith("statistics:"):
             statistics = clean_line.split(":", 1)[1].strip()
         elif lower_line.startswith("accepted distance:"):
-            accepted_distance = extract_integer(
-                clean_line.split(":", 1)[1].strip()
+            distance_text = value.strip()
+            accepted_distance = extract_integer(distance_text)
+            explicit = re.fullmatch(
+                r"[0-9]+(?:[ ,][0-9]{3})*\s*(mi|mil|miles|km)", distance_text, re.I,
             )
+            if explicit:
+                comparison["unit"] = "km" if explicit[1].lower() == "km" else "mi"
 
     return {
         "job_id": job_match.group(1),
         "statistics": statistics,
         "accepted_distance": accepted_distance,
+        **comparison,
     }
 
 
@@ -4095,9 +4149,39 @@ async def trucky_logbook_audit(ctx):
                   AND LOWER(p.statistics)='real' AND p.accepted_distance>0
                 WHERE t.provider='trucky' AND t.provider_job_id=ANY($1::text[])
             """, sorted(vault_ids - credited_ids))
-    from unified_job_matching_v2 import credited_route_overlaps, unique_overlap_topups
+            webhook_pairs = await conn.fetch("""
+                SELECT t.provider, t.provider_job_id, t.provider_account_id,
+                       t.source_kind, t.evidence, l.discord_user_id,
+                       b.provider_job_id AS trucksbook_job_id,
+                       b.evidence::text AS trucksbook_evidence,
+                       p.accepted_distance AS trucksbook_credited_miles
+                FROM pending_provider_job_history_v2 t
+                JOIN unified_provider_links l ON l.provider='trucky'
+                  AND l.provider_account_id=t.provider_account_id
+                JOIN driver_links d ON d.discord_user_id=l.discord_user_id
+                JOIN pending_provider_job_history_v2 b ON b.provider='trucksbook'
+                  AND b.source_kind='verified_webhook_source'
+                  AND b.provider_account_id=d.trucksbook_user_id::text
+                  AND b.evidence->>'unit'='mi'
+                  AND b.evidence ? 'source_message_at'
+                JOIN processed_jobs p ON p.job_id=b.provider_job_id
+                  AND p.discord_user_id=l.discord_user_id
+                  AND LOWER(p.statistics)='real' AND p.accepted_distance>0
+                WHERE t.provider='trucky' AND t.source_kind='authenticated_api'
+                  AND t.provider_job_id=ANY($1::text[])
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pending_provider_job_history_v2 other
+                      WHERE other.provider=t.provider AND other.provider_job_id=t.provider_job_id
+                        AND other.source_kind=t.source_kind
+                        AND other.provider_account_id IS DISTINCT FROM t.provider_account_id
+                  )
+            """, sorted(vault_ids - credited_ids))
+    from trucky_linked_allocation_v2 import vault_webhook_overlap_leads
+    from unified_job_matching_v2 import credited_route_overlaps, unique_overlap_winners
     overlaps = credited_route_overlaps(route_pairs)
-    topups = unique_overlap_topups(overlaps)
+    webhook_leads = vault_webhook_overlap_leads(webhook_pairs)
+    winners = unique_overlap_winners(overlaps)
+    trucky_winners = sum(provider == "trucky" for provider, _ in winners.values())
     jobs_with_timed_pairs = {row["trucky_job_id"] for row in route_pairs}
     from collections import Counter
     pending_counts = Counter(row["status"] for row in vault_status)
@@ -4114,7 +4198,9 @@ async def trucky_logbook_audit(ctx):
         f"Pending jobs with a credited TrucksBook record in the delivery window: {len(jobs_with_timed_pairs)}\n"
         f"Possible overlap with a credited TrucksBook trip: {len(overlaps)}\n"
         f"Jobs outside the available comparison records remain unresolved.\n"
-        f"One-to-one matches: {len(topups)}. Unconfirmed top-up preview: {sum(topups.values()):,.2f} mi.\n"
+        f"Additional review leads using webhook message time: {len(webhook_leads - overlaps.keys())}\n"
+        f"One-to-one review leads: {len(winners)}. Higher eligible mileage preview: "
+        f"{trucky_winners} Trucky, {len(winners) - trucky_winners} TrucksBook (including ties).\n"
         f"No authenticated vault or credit record: {len(audited_ids - vault_ids - credited_ids)}",
         allowed_mentions=discord.AllowedMentions.none(),
     )
