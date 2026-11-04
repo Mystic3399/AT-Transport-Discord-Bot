@@ -3906,6 +3906,96 @@ async def send_mileage_reconciliation(ctx, source_jobs, metadata):
     )
 
 
+@bot.command(name="truckylogbookaudit")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+@commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
+async def trucky_logbook_audit(ctx):
+    """Compare trusted-source logbook IDs with authenticated vault and credit records."""
+    if ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    from trucky_discord_tracker_v2 import TRACKER_CHANNEL_ID, inspect_trucky_message
+
+    source = os.getenv("TRUCKY_TRACKER_WEBHOOK_ID", "").strip()
+    channel = ctx.guild.get_channel(TRACKER_CHANNEL_ID)
+    if channel is None or not re.fullmatch(r"[1-9][0-9]{0,19}", source):
+        await ctx.reply("Trucky logbook audit needs the channel and configured webhook sender ID.")
+        return
+    job_ids = set()
+    try:
+        async for message in channel.history(limit=500):
+            observation = inspect_trucky_message(message, expected_webhook_id=int(source))
+            if observation:
+                job_ids.add(observation["provider_job_id"])
+    except discord.HTTPException:
+        await ctx.reply("Could not read Trucky logbook history. Check the bot’s channel permissions.")
+        return
+    async with db_pool.acquire() as conn:
+        async with conn.transaction(readonly=True):
+            vault_ids = set(await conn.fetchval("""
+                SELECT ARRAY(SELECT DISTINCT provider_job_id
+                FROM pending_provider_job_history_v2
+                WHERE provider='trucky' AND source_kind='authenticated_api'
+                  AND provider_job_id=ANY($1::text[]))
+            """, sorted(job_ids)))
+            credited_ids = set(await conn.fetchval("""
+                SELECT ARRAY(SELECT provider_job_id
+                FROM unified_v2_production_credit_ledger
+                WHERE provider='trucky' AND provider_job_id=ANY($1::text[]))
+            """, sorted(job_ids)))
+            vault_status = await conn.fetch("""
+                SELECT CASE WHEN COUNT(DISTINCT h.provider_account_id) <> 1 THEN 'conflicting account'
+                            WHEN COUNT(DISTINCT l.discord_user_id) = 0 THEN 'waiting for profile link'
+                            WHEN COUNT(DISTINCT l.discord_user_id) = 1 THEN 'linked, pending allocation review'
+                            ELSE 'conflicting profile link' END AS status,
+                       h.provider_job_id
+                FROM pending_provider_job_history_v2 h
+                LEFT JOIN unified_provider_links l
+                  ON l.provider=h.provider AND l.provider_account_id=h.provider_account_id
+                WHERE h.provider='trucky' AND h.source_kind='authenticated_api'
+                  AND h.provider_job_id=ANY($1::text[])
+                GROUP BY h.provider_job_id
+            """, sorted(vault_ids - credited_ids))
+            route_pairs = await conn.fetch("""
+                SELECT t.provider_job_id AS trucky_job_id, t.discord_user_id,
+                       t.delivered_at AS trucky_delivered_at,
+                       t.source_payload::text AS trucky_payload,
+                       b.provider_job_id AS trucksbook_job_id,
+                       b.delivered_at AS trucksbook_delivered_at,
+                       b.source_payload::text AS trucksbook_payload,
+                       p.accepted_distance AS trucksbook_credited_miles
+                FROM unified_provider_job_events t
+                JOIN unified_provider_links l ON l.provider='trucky'
+                  AND l.provider_account_id=t.provider_account_id
+                  AND l.discord_user_id=t.discord_user_id
+                JOIN unified_provider_job_events b ON b.provider='trucksbook'
+                  AND b.discord_user_id=t.discord_user_id
+                  AND b.delivered_at BETWEEN t.delivered_at - INTERVAL '30 minutes'
+                                         AND t.delivered_at + INTERVAL '30 minutes'
+                JOIN processed_jobs p ON p.job_id=b.provider_job_id
+                  AND p.discord_user_id=b.discord_user_id
+                  AND LOWER(p.statistics)='real' AND p.accepted_distance>0
+                WHERE t.provider='trucky' AND t.provider_job_id=ANY($1::text[])
+            """, sorted(vault_ids - credited_ids))
+    from unified_job_matching_v2 import credited_route_overlaps, unique_overlap_topups
+    overlaps = credited_route_overlaps(route_pairs)
+    topups = unique_overlap_topups(overlaps)
+    from collections import Counter
+    pending_counts = Counter(row["status"] for row in vault_status)
+    pending_lines = "".join(f"\n{status.capitalize()}: {count}" for status, count in sorted(pending_counts.items()))
+    await ctx.reply(
+        f"Trucky logbook audit (latest 500 messages)\n"
+        f"Distinct completed jobs: {len(job_ids)}\n"
+        f"Already credited: {len(credited_ids)}\n"
+        f"In authenticated vault, awaiting credit review: {len(vault_ids - credited_ids)}"
+        f"{pending_lines}\n"
+        f"Possible overlap with a credited TrucksBook trip: {len(overlaps)}\n"
+        f"One-to-one matches: {len(topups)}. Unconfirmed top-up preview: {sum(topups.values()):,.2f} mi.\n"
+        f"No authenticated vault or credit record: {len(job_ids - vault_ids - credited_ids)}",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
 @bot.command(name="mileageaudit")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)

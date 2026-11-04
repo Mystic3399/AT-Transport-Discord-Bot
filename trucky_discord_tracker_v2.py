@@ -8,7 +8,7 @@ from decimal import Decimal
 
 TRACKER_CHANNEL_ID = 1541473951899852800
 JOB_RE = re.compile(r"Job Completed\s*-\s*#(\d+)", re.I)
-DISTANCE_RE = re.compile(r"(?<![\d.])(\d+(?:\.\d+)?)\s*(kilomet(?:er|re)s?|miles?|km|mi)(?=\b|\.)", re.I)
+DISTANCE_RE = re.compile(r"(?<![\d.,])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(kilomet(?:er|re)s?|miles?|km|mi)(?=\b|\.)", re.I)
 
 
 def parse_trucky_embed(embed):
@@ -33,11 +33,20 @@ def parse_trucky_embed(embed):
     ]
     if len(distance_fields) > 1:
         return None
-    distance_source = distance_fields[0] if distance_fields else description
+    route_distances = [
+        str(field.get("value") or "").splitlines()[-1]
+        for field in fields if isinstance(field, dict)
+        and str(field.get("name") or "").startswith("🗺")
+        and field.get("value")
+    ]
+    if not distance_fields and len(route_distances) > 1:
+        return None
+    distance_source = next(iter(distance_fields or route_distances), description)
     distance_matches = DISTANCE_RE.findall(distance_source)
     if len(distance_matches) != 1:
         return None
     distance, unit = distance_matches[0]
+    distance = distance.replace(",", "")
     if Decimal(distance) <= 0:
         return None
     stat_fields = [

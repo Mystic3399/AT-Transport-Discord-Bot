@@ -73,3 +73,48 @@ def is_candidate_duplicate(first, second, *, max_minutes=30, max_miles_delta="5.
         raise ValueError("Invalid mileage")
     return abs(a - b) <= Decimal(str(max_miles_delta))
 
+
+
+def credited_route_overlaps(rows):
+    """Return possible matches from same-driver pairs backed by a stored credit."""
+    import json
+    from decimal import InvalidOperation
+
+    matches = {}
+    for row in rows:
+        jobs = []
+        try:
+            for provider in ("trucky", "trucksbook"):
+                payload = json.loads(row[f"{provider}_payload"])
+                jobs.append({
+                    "provider": provider,
+                    "discord_user_id": row["discord_user_id"],
+                    "mileage_type": payload["mileage_type"],
+                    "metadata": payload["job_metadata"],
+                    "delivered_at": row[f"{provider}_delivered_at"],
+                    "miles": payload["canonical_miles"],
+                })
+            if jobs[0]["mileage_type"] == "real" and is_candidate_duplicate(*jobs):
+                credited = Decimal(str(row["trucksbook_credited_miles"]))
+                if credited.is_finite() and credited > 0:
+                    trucky_miles = Decimal(str(jobs[0]["miles"]))
+                    matches.setdefault(row["trucky_job_id"], {})[row["trucksbook_job_id"]] = max(
+                        Decimal(0), trucky_miles - credited
+                    )
+        except (ValueError, TypeError, KeyError, InvalidOperation):
+            continue
+    return matches
+
+
+def unique_overlap_topups(matches):
+    """Preview only one-to-one pairs, using actual stored credit as the baseline."""
+    from collections import Counter
+
+    trucksbook_matches = Counter(job_id for options in matches.values() for job_id in options)
+    return {
+        trucky_id: difference
+        for trucky_id, options in matches.items()
+        if len(options) == 1
+        for trucksbook_id, difference in options.items()
+        if trucksbook_matches[trucksbook_id] == 1
+    }
