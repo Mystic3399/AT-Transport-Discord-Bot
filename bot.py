@@ -3435,6 +3435,11 @@ async def on_message(message):
             )
             continue
 
+        from world_of_trucks_policy_v2 import excluded_trucksbook_details
+
+        if excluded_trucksbook_details(details):
+            continue
+
         statistics = None
         accepted_distance = None
 
@@ -3790,6 +3795,11 @@ def extract_trucksbook_job_from_embed(embed):
         if (field.get("name") or "").strip().lower() == "details":
             details = field.get("value") or ""
             break
+
+    from world_of_trucks_policy_v2 import excluded_trucksbook_details
+
+    if excluded_trucksbook_details(details):
+        return None
 
     statistics = None
     accepted_distance = None

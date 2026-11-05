@@ -36,6 +36,39 @@ def classify_event_mileage(provider: str, statistics: str):
 
 
 
+def exceeds_mileage_speed_limit(speed, unit):
+    """Compare against the 112 mph ceiling without rounding."""
+    from decimal import Decimal, InvalidOperation
+
+    if isinstance(speed, bool) or unit not in ("mph", "km/h", "kph"):
+        return False
+    try:
+        value = Decimal(str(speed))
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    ceiling = Decimal("112") if unit == "mph" else Decimal("112") * Decimal("1.609344")
+    return value.is_finite() and value > ceiling
+
+
+def excluded_trucksbook_details(details):
+    """Reject explicit excluded statuses and reported speeds above the ceiling."""
+    import re
+
+    for line in details.splitlines():
+        label, _, value = line.replace("**", "").partition(":")
+        label = label.strip().casefold()
+        if label in ("status", "statistics") and any(
+            part.strip().casefold() in ("cancelled", "canceled", "unlisted")
+            for part in value.split(",")
+        ):
+            return True
+        if label in ("maximal reached speed", "maximum speed", "max speed"):
+            speed = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(mph|km/h|kph)\s*", value, re.I)
+            if speed and exceeds_mileage_speed_limit(speed[1], speed[2].lower()):
+                return True
+    return False
+
+
 def classify_job_mileage(provider, statistics, *, game, max_speed=None, speed_unit=None):
     """Apply the owner's ATS-only maximum-speed policy without guessing units.
 
@@ -46,6 +79,8 @@ def classify_job_mileage(provider, statistics, *, game, max_speed=None, speed_un
     """
     from decimal import Decimal, InvalidOperation
     if provider not in ('trucky', 'trucksbook') or game not in ('ATS','ETS2'):
+        return None
+    if exceeds_mileage_speed_limit(max_speed, speed_unit):
         return None
     if game == 'ETS2':
         return classify_event_mileage(provider, statistics)

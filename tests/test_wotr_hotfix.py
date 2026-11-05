@@ -43,6 +43,21 @@ class ClassificationTests(unittest.TestCase):
         for job_id, miles in [('68007306', 103), ('68007834', 153)]:
             parsed = NS['extract_trucksbook_job_from_embed'](Embed(job_id, distance=miles))
             self.assertEqual(parsed, {'job_id': job_id, 'statistics': 'Real, WoTr', 'accepted_distance': miles})
+    def test_excluded_jobs_do_not_enter_trucksbook_history(self):
+        for details, eligible in (
+            ("Status: Cancelled", False),
+            ("Status: Unlisted", False),
+            ("Max Speed: 112 mph", True),
+            ("Max Speed: 112.001 mph", False),
+            ("Max Speed: 180.246528 km/h", True),
+            ("Max Speed: 180.246529 km/h", False),
+        ):
+            with self.subTest(details=details):
+                embed = Embed()
+                embed.data["fields"][0]["value"] += "\n" + details
+                parsed = NS["extract_trucksbook_job_from_embed"](embed)
+                self.assertEqual(parsed is not None, eligible)
+
     def test_live_forwarding_and_duplicate_path(self):
         async def run():
             calls = []
