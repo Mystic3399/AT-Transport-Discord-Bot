@@ -3468,6 +3468,11 @@ async def on_message(message):
             )
             continue
 
+        from world_of_trucks_policy_v2 import excluded_trucksbook_details
+
+        if excluded_trucksbook_details(details):
+            continue
+
         statistics = None
         accepted_distance = None
 

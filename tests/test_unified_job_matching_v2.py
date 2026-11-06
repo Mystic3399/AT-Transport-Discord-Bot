@@ -15,6 +15,29 @@ BASE = {
 
 
 class MatchingTests(unittest.TestCase):
+    def test_overlap_credits_one_full_winner_in_either_direction(self):
+        from unified_job_matching_v2 import unique_overlap_winners
+
+        for provider, miles in (("trucky", "210"), ("trucksbook", "220")):
+            with self.subTest(provider=provider):
+                winner = (provider, miles)
+                self.assertEqual(
+                    unique_overlap_winners({"trucky-1": {"tb-1": winner}}),
+                    {"trucky-1": winner},
+                )
+
+    def test_ambiguous_overlaps_have_no_automatic_winner(self):
+        from unified_job_matching_v2 import unique_overlap_winners
+
+        winner = ("trucksbook", "220")
+        self.assertEqual(unique_overlap_winners({
+            "trucky-1": {"tb-1": winner},
+            "trucky-2": {"tb-1": winner},
+        }), {})
+        self.assertEqual(unique_overlap_winners({
+            "trucky-1": {"tb-1": winner, "tb-2": winner},
+        }), {})
+
     def test_cross_provider_candidate(self):
         self.assertTrue(is_candidate_duplicate(BASE, {**BASE, "provider": "trucksbook",
             "delivered_at": BASE["delivered_at"] + timedelta(minutes=15),
