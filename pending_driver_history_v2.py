@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS pending_history_capture_cursor_v2 (
 
 FIELDS={'game','game_id','status','stats_type','driven_distance_km','distance_unit','max_speed','max_speed_kmh',
         'completed_at','origin','destination','cargo','distance','unit','max_speed_unit',
-        'source_completion_local','candidate_driver_label','company_policy_classification'}
+        'source_completion_local','source_message_at','candidate_driver_label','company_policy_classification'}
 
 async def install_schema(pool):
     async with pool.acquire() as conn:await conn.execute(SCHEMA)
@@ -141,11 +141,12 @@ def saved_history_caption(history):
 
 async def retain_trucksbook_source_observation(pool, *, webhook_id, guild_id,
                                               expected_guild_id, configured_webhook_id,
-                                              parsed_job, driver_label, configured_webhook_ids=""):
+                                              parsed_job, driver_label, configured_webhook_ids="",
+                                              observed_account_id=None, source_message_at=None):
     """Keep genuine-source unlinked deliveries, without authenticating their owner.
 
-    The legacy embed parser does not establish units or account ownership. Keep
-    the observed number but leave its unit unknown; never turn it into a credit.
+    Keep explicitly labelled units and the observed account ID as evidence.
+    A webhook observation does not establish ownership or award a credit.
     """
     from trucksbook_webhook_auth_v2 import is_authorized_trucksbook_webhook
     # Use the helper's strict configured-ID comparison in every environment.
@@ -169,5 +170,15 @@ async def retain_trucksbook_source_observation(pool, *, webhook_id, guild_id,
     evidence={'candidate_driver_label':driver_label if isinstance(driver_label,str) else None,
               'stats_type':parsed_job.get('statistics'),
               'distance':parsed_job.get('accepted_distance'),'unit':None}
-    return await record_pending_history(pool,'trucksbook',parsed_job['job_id'],None,evidence,
+    if parsed_job.get('unit') in ('mi', 'km'):
+        evidence['unit'] = parsed_job['unit']
+    for field in ("game", "origin", "destination", "cargo"):
+        value = parsed_job.get(field)
+        if isinstance(value, str) and value.strip():
+            evidence[field] = value.strip()
+    if source_message_at is not None and source_message_at.utcoffset() is not None:
+        evidence["source_message_at"] = source_message_at.isoformat()
+    account_id = (str(observed_account_id)
+                  if type(observed_account_id) is int and observed_account_id > 0 else None)
+    return await record_pending_history(pool,'trucksbook',parsed_job['job_id'],account_id,evidence,
                                         source_kind='verified_webhook_source')

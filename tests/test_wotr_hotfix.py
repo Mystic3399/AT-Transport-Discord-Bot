@@ -42,7 +42,7 @@ class ClassificationTests(unittest.TestCase):
     def test_screenshot_deliveries(self):
         for job_id, miles in [('68007306', 103), ('68007834', 153)]:
             parsed = NS['extract_trucksbook_job_from_embed'](Embed(job_id, distance=miles))
-            self.assertEqual(parsed, {'job_id': job_id, 'statistics': 'Real, WoTr', 'accepted_distance': miles})
+            self.assertEqual(parsed, {'job_id': job_id, 'statistics': 'Real, WoTr', 'accepted_distance': miles, 'cargo': 'Halloween Crafts', 'unit': 'mi'})
     def test_excluded_jobs_do_not_enter_trucksbook_history(self):
         for details, eligible in (
             ("Status: Cancelled", False),
