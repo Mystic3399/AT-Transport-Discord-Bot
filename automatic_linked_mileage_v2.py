@@ -1,6 +1,6 @@
 """Per-job reconciliation within the existing per-driver credit transaction."""
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 import json
 
@@ -24,10 +24,14 @@ ALTER TABLE automatic_linked_journey_pairs_v2
 
 def trucksbook_comparison(job_id, user, evidence, miles):
     value = json.loads(evidence) if isinstance(evidence, str) else evidence
+    if not isinstance(value, dict):
+        raise ValueError("Invalid stored delivery")
     from world_of_trucks_policy_v2 import classify_event_mileage, exceeds_mileage_speed_limit
     if (classify_event_mileage("trucksbook", value.get("stats_type")) is None
             or exceeds_mileage_speed_limit(value.get("max_speed"), value.get("max_speed_unit"))):
         raise ValueError("Ineligible TrucksBook delivery")
+    if Decimal(str(value.get("distance"))) != Decimal(str(miles)):
+        raise ValueError("Stored source mileage differs from the credit")
     if value.get("unit") != "mi":
         raise ValueError("Explicit miles required")
     record = dict(provider="trucksbook", provider_job_id=job_id, discord_user_id=user,
@@ -93,7 +97,7 @@ async def reconcile_trucky(conn, candidate):
             try:
                 comparisons.append(trucksbook_comparison(
                     job_id, user, version["evidence"], version["accepted_distance"]))
-            except (ValueError, TypeError, KeyError):
+            except (ValueError, TypeError, KeyError, InvalidOperation):
                 comparisons = []
                 break
         if comparisons:
@@ -203,7 +207,7 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
     try:
         for row in rows:
             incoming_versions.append(trucksbook_comparison(job_id, user, row["evidence"], miles))
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, InvalidOperation):
         return None, "route_evidence_pending"
     if not incoming_versions:
         return None, "route_evidence_pending"
