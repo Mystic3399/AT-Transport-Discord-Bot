@@ -1362,6 +1362,15 @@ async def record_real_job(
             )
             if automatic and ledger_exists:
                 await connection.execute("""
+                    UPDATE processed_jobs SET processed_at=COALESCE((
+                        SELECT MIN((h.evidence->>'source_message_at')::timestamptz)
+                        FROM pending_provider_job_history_v2 h
+                        WHERE h.provider='trucksbook' AND h.provider_job_id=$1
+                          AND h.source_kind='verified_webhook_source'
+                          AND h.evidence ? 'source_message_at'),processed_at)
+                    WHERE job_id=$1
+                    """, job_id)
+                await connection.execute("""
                     UPDATE unified_v2_production_mileage_baselines b
                     SET trucksbook_real_miles=p.real_miles-FLOOR(COALESCE((
                         SELECT SUM(c.miles) FROM unified_v2_production_credit_ledger c
@@ -2945,6 +2954,50 @@ async def reconcile_linked_trucky_career_records(guild):
         trucky_hall_refresh_pending = not await refresh_hall_of_fame_display()
 
 
+async def deliver_automatic_linked_progression(guild):
+    """Retry Discord updates only after the mileage transaction has committed."""
+    if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES' or guild is None:
+        return
+    async with db_pool.acquire() as connection:
+        rows = await connection.fetch("""
+            SELECT p.discord_user_id,p.real_miles,
+                ARRAY(SELECT d.decision_id FROM unified_v2_production_mileage_decisions d
+                    WHERE d.discord_user_id=p.discord_user_id AND d.decision='credited'
+                      AND d.reason_code='steam_registered_company_member_link_v1'
+                      AND d.progression_delivered_at IS NULL) AS decision_ids,
+                ARRAY(SELECT j.trucky_job_id FROM automatic_linked_journey_pairs_v2 j
+                    WHERE j.discord_user_id=p.discord_user_id
+                      AND j.progression_delivered_at IS NULL) AS pair_ids
+            FROM driver_progress p
+            WHERE EXISTS(SELECT 1 FROM automatic_linked_journey_pairs_v2 j
+                    WHERE j.discord_user_id=p.discord_user_id AND j.progression_delivered_at IS NULL)
+               OR EXISTS(SELECT 1 FROM unified_v2_production_mileage_decisions d
+                    WHERE d.discord_user_id=p.discord_user_id AND d.decision='credited'
+                      AND d.reason_code='steam_registered_company_member_link_v1'
+                      AND d.progression_delivered_at IS NULL)
+            LIMIT 100
+            """)
+    delivered = False
+    for row in rows:
+        result = await apply_verified_v2_progression(row['discord_user_id'], row['real_miles'], False)
+        if result.get('status') not in ('updated', 'correct'):
+            continue
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("""
+                    UPDATE unified_v2_production_mileage_decisions SET progression_delivered_at=NOW()
+                    WHERE decision_id=ANY($1::bigint[]) AND progression_delivered_at IS NULL
+                    """, row['decision_ids'])
+                await connection.execute("""
+                    UPDATE automatic_linked_journey_pairs_v2 SET progression_delivered_at=NOW()
+                    WHERE trucky_job_id=ANY($1::text[]) AND progression_delivered_at IS NULL
+                    """, row['pair_ids'])
+        delivered = True
+    if delivered:
+        await refresh_driver_leaderboard(guild)
+        await refresh_hall_of_fame_display()
+
+
 async def replay_saved_trucksbook_jobs():
     """Retry stored notices through the same credit function as live delivery."""
     if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
@@ -2999,6 +3052,7 @@ async def ingest_trucky_company_jobs():
             guild = bot.get_guild(GUILD_ID)
             if guild is not None and linked_credits['status'] == 'linked_history_processed':
                 await reconcile_linked_trucky_career_records(guild)
+                await deliver_automatic_linked_progression(guild)
         except Exception as error:
             print(f'TRUCKY LINKED ALLOCATION RETRY PENDING: {type(error).__name__}',flush=True)
         try:

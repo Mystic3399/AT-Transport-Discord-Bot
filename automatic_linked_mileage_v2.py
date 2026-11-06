@@ -14,8 +14,11 @@ CREATE TABLE IF NOT EXISTS automatic_linked_journey_pairs_v2 (
  winner TEXT NOT NULL CHECK(winner IN ('trucky','trucksbook')),
  trucky_miles NUMERIC(24,10) NOT NULL CHECK(trucky_miles>0),
  trucksbook_miles NUMERIC(24,10) NOT NULL CHECK(trucksbook_miles>0),
- created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+ created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+ progression_delivered_at TIMESTAMPTZ
 );
+ALTER TABLE automatic_linked_journey_pairs_v2
+ ADD COLUMN IF NOT EXISTS progression_delivered_at TIMESTAMPTZ;
 """
 
 

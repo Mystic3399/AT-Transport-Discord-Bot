@@ -23,7 +23,8 @@ class AutomaticDatabaseTests(unittest.IsolatedAsyncioTestCase):
             await c.execute(AUTOMATIC_SCHEMA)
             await c.execute("""
                 ALTER TABLE processed_jobs ADD COLUMN accepted_distance integer DEFAULT 0,
-                    ADD COLUMN statistics text DEFAULT 'Real', ADD COLUMN trucksbook_name text DEFAULT '';
+                    ADD COLUMN statistics text DEFAULT 'Real', ADD COLUMN trucksbook_name text DEFAULT '',
+                    ADD COLUMN processed_at timestamptz DEFAULT NOW();
                 """)
         node = next(n for n in ast.parse(Path("bot.py").read_text()).body
                     if isinstance(n, ast.AsyncFunctionDef) and n.name == "record_real_job")
