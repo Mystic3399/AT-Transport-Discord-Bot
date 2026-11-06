@@ -124,3 +124,29 @@ class AutomaticDatabaseTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await c.fetchval("SELECT COUNT(*) FROM automatic_linked_journey_pairs_v2"), 0)
             self.assertEqual(await c.fetchval(
                 "SELECT COUNT(*) FROM unified_v2_production_mileage_decisions WHERE decision='duplicate_provider_job'"), 0)
+
+    async def test_different_cargo_on_same_route_is_held(self):
+        await self.prepare("418.42944", 200)
+        await self.tb()
+        async with self.pool.acquire() as c:
+            await c.execute("""
+                UPDATE pending_provider_job_history_v2
+                SET evidence=jsonb_set(evidence,'{cargo}','"Other cargo"')
+                WHERE provider='trucksbook'
+                """)
+        self.assertEqual(await self.trucky(), "ambiguous_journey")
+        async with self.pool.acquire() as c:
+            self.assertEqual(await c.fetchval("SELECT real_miles FROM driver_progress"), 200)
+
+    async def test_known_independent_trucky_delivery_is_credited(self):
+        await self.prepare("418.42944", 200)
+        await self.tb()
+        async with self.pool.acquire() as c:
+            await c.execute("""
+                UPDATE pending_provider_job_history_v2
+                SET evidence=jsonb_set(evidence,'{destination}','"Paris"')
+                WHERE provider='trucksbook'
+                """)
+        self.assertEqual(await self.trucky(), "credited_real")
+        async with self.pool.acquire() as c:
+            self.assertEqual(await c.fetchval("SELECT real_miles FROM driver_progress"), 460)

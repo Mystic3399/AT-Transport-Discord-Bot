@@ -24,6 +24,10 @@ ALTER TABLE automatic_linked_journey_pairs_v2
 
 def trucksbook_comparison(job_id, user, evidence, miles):
     value = json.loads(evidence) if isinstance(evidence, str) else evidence
+    from world_of_trucks_policy_v2 import classify_event_mileage, exceeds_mileage_speed_limit
+    if (classify_event_mileage("trucksbook", value.get("stats_type")) is None
+            or exceeds_mileage_speed_limit(value.get("max_speed"), value.get("max_speed_unit"))):
+        raise ValueError("Ineligible TrucksBook delivery")
     if value.get("unit") != "mi":
         raise ValueError("Explicit miles required")
     record = dict(provider="trucksbook", provider_job_id=job_id, discord_user_id=user,
@@ -37,6 +41,13 @@ def trucksbook_comparison(job_id, user, evidence, miles):
 
 def matches(first, second):
     return is_candidate_duplicate(first, second, max_miles_delta=None)
+
+
+def same_route_window(first, second):
+    first_route = _normalized_metadata(first["metadata"])
+    second_route = _normalized_metadata(second["metadata"])
+    return (all(first_route[key] == second_route[key] for key in ("game", "origin", "destination"))
+            and abs(first["delivered_at"]-second["delivered_at"]) <= timedelta(minutes=30))
 
 
 async def mark_suppressed(conn, provider, job_id, user, reason):
@@ -75,6 +86,7 @@ async def reconcile_trucky(conn, candidate):
         by_job.setdefault(row["job_id"], []).append(row)
     found = []
     comparable_jobs = set()
+    uncertain_route = False
     for job_id, versions in by_job.items():
         comparisons = []
         for version in versions:
@@ -86,11 +98,14 @@ async def reconcile_trucky(conn, candidate):
                 break
         if comparisons:
             comparable_jobs.add(job_id)
+            uncertain_route = uncertain_route or any(
+                same_route_window(incoming, item) and not matches(incoming, item)
+                for item in comparisons)
         if comparisons and any(matches(incoming, item) for item in comparisons):
             if not all(matches(incoming, item) for item in comparisons):
                 return None, "conflicting_route_evidence"
             found.append(comparisons[0])
-    if len(found) > 1:
+    if len(found) > 1 or uncertain_route:
         return None, "ambiguous_journey"
     if found:
         other = found[0]
@@ -204,7 +219,10 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
         return None, "route_evidence_pending"
     found = [candidate for candidate in candidates
              if candidate.get("metadata") and any(matches(candidate, item) for item in incoming_versions)]
-    if len(found) > 1:
+    uncertain_route = any(candidate.get("metadata")
+        and same_route_window(candidate, incoming_versions[0])
+        and not matches(candidate, incoming_versions[0]) for candidate in candidates)
+    if len(found) > 1 or uncertain_route:
         return None, "ambiguous_journey"
     if not found:
         # Every existing credit needs comparison metadata before absence can
