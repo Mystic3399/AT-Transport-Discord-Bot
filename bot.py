@@ -1262,12 +1262,26 @@ async def record_real_job(
             await connection.execute('SELECT pg_advisory_xact_lock($1)', discord_user_id)
             ledger_exists = await connection.fetchval(
                 "SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL")
-            if ledger_exists and await connection.fetchval("""SELECT EXISTS(
+            credit_distance = accepted_distance
+            automatic = os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') == 'YES'
+            has_trucky_credit = ledger_exists and await connection.fetchval("""SELECT EXISTS(
                 SELECT 1 FROM unified_v2_production_credit_ledger
                 WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real')""",
-                discord_user_id):
-                return {'status':'pending_cross_provider_reconciliation',
-                        'real_miles':None,'crossed_milestones':[]}
+                discord_user_id)
+            if has_trucky_credit:
+                if not automatic:
+                    return {'status':'pending_cross_provider_reconciliation',
+                            'real_miles':None,'crossed_milestones':[]}
+                if await connection.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM processed_jobs WHERE job_id=$1)", job_id):
+                    return {'status':'duplicate','real_miles':None,'crossed_milestones':[]}
+                from automatic_linked_mileage_v2 import reconcile_trucksbook, SCHEMA as AUTOMATIC_SCHEMA
+                await connection.execute(AUTOMATIC_SCHEMA)
+                credit_distance, hold = await reconcile_trucksbook(
+                    connection, job_id, discord_user_id, accepted_distance)
+                if hold:
+                    return {'status':hold,'real_miles':None,'crossed_milestones':[]}
+                credit_distance = int(credit_distance)
 
             previous_real_miles = await connection.fetchval(
                 """
@@ -1344,8 +1358,18 @@ async def record_real_job(
                 """,
                 discord_user_id,
                 trucksbook_name,
-                accepted_distance,
+                credit_distance,
             )
+            if automatic and ledger_exists:
+                await connection.execute("""
+                    UPDATE unified_v2_production_mileage_baselines b
+                    SET trucksbook_real_miles=p.real_miles-FLOOR(COALESCE((
+                        SELECT SUM(c.miles) FROM unified_v2_production_credit_ledger c
+                        WHERE c.discord_user_id=b.discord_user_id AND c.provider='trucky'
+                          AND c.mileage_type='real'),0))::bigint
+                    FROM driver_progress p
+                    WHERE b.discord_user_id=$1 AND p.discord_user_id=b.discord_user_id
+                    """, discord_user_id)
 
             real_miles = (
                 await connection.fetchval(
@@ -2921,6 +2945,37 @@ async def reconcile_linked_trucky_career_records(guild):
         trucky_hall_refresh_pending = not await refresh_hall_of_fame_display()
 
 
+async def replay_saved_trucksbook_jobs():
+    """Retry stored notices through the same credit function as live delivery."""
+    if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
+        return
+    import json
+    async with db_pool.acquire() as connection:
+        rows = await connection.fetch("""
+            SELECT h.provider_job_id,h.provider_account_id,h.evidence
+            FROM pending_provider_job_history_v2 h
+            WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
+              AND NOT EXISTS(SELECT 1 FROM processed_jobs p WHERE p.job_id=h.provider_job_id)
+            ORDER BY h.first_received_at,h.provider_job_id
+            """)
+    processed = 0
+    for row in rows:
+        evidence = json.loads(row['evidence']) if isinstance(row['evidence'],str) else row['evidence']
+        if (evidence.get('unit') != 'mi' or not is_real_statistics(evidence.get('stats_type'))
+                or type(evidence.get('distance')) is not int or evidence['distance'] <= 0):
+            continue
+        name = evidence.get('candidate_driver_label') or ''
+        account = row['provider_account_id']
+        driver = await find_driver_link(name, int(account) if account else None)
+        if driver is None:
+            continue
+        result = await record_real_job(row['provider_job_id'], name, driver, evidence['distance'])
+        if result and result.get('status') == 'added':
+            processed += 1
+            if processed >= 100:
+                break
+
+
 @tasks.loop(seconds=60)
 async def ingest_trucky_company_jobs():
     """Poll the existing authenticated API; never awards from tracker messages."""
@@ -2937,6 +2992,7 @@ async def ingest_trucky_company_jobs():
             print('TRUCKY_HISTORY_SWEEP ' + json.dumps(sweep,sort_keys=True),flush=True)
         try:
             from trucky_linked_allocation_v2 import allocate_saved_linked_history
+            await replay_saved_trucksbook_jobs()
             linked_credits = await allocate_saved_linked_history(db_pool)
             if linked_credits['status'] != 'disabled':
                 print('TRUCKY LINKED ALLOCATION ' + json.dumps(linked_credits,sort_keys=True),flush=True)
