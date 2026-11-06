@@ -100,3 +100,26 @@ class AutomaticDatabaseTests(unittest.IsolatedAsyncioTestCase):
         await self.tb()
         self.assertEqual(await self.trucky(), "duplicate_provider_job")
         await self.assert_total(200, "trucksbook")
+
+    async def test_simultaneous_arrivals_credit_one_winner(self):
+        await self.prepare("418.42944", 200)
+        await asyncio.gather(self.trucky(), self.tb())
+        await self.assert_total(260, "trucky")
+
+    async def test_replacement_failure_rolls_back_pair_and_mileage(self):
+        await self.prepare("418.42944", 200)
+        await self.tb()
+        async with self.pool.acquire() as c:
+            await c.execute("""
+                CREATE FUNCTION reject_pair_credit() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN RAISE EXCEPTION 'replacement failure'; END; $$;
+                CREATE TRIGGER reject_pair_credit BEFORE INSERT ON unified_v2_production_credit_ledger
+                FOR EACH ROW EXECUTE FUNCTION reject_pair_credit();
+                """)
+        with self.assertRaises(Exception):
+            await self.trucky()
+        async with self.pool.acquire() as c:
+            self.assertEqual(await c.fetchval("SELECT real_miles FROM driver_progress"), 200)
+            self.assertEqual(await c.fetchval("SELECT COUNT(*) FROM automatic_linked_journey_pairs_v2"), 0)
+            self.assertEqual(await c.fetchval(
+                "SELECT COUNT(*) FROM unified_v2_production_mileage_decisions WHERE decision='duplicate_provider_job'"), 0)

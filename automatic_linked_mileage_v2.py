@@ -71,6 +71,7 @@ async def reconcile_trucky(conn, candidate):
     for row in rows:
         by_job.setdefault(row["job_id"], []).append(row)
     found = []
+    comparable_jobs = set()
     for job_id, versions in by_job.items():
         comparisons = []
         for version in versions:
@@ -80,6 +81,8 @@ async def reconcile_trucky(conn, candidate):
             except (ValueError, TypeError, KeyError):
                 comparisons = []
                 break
+        if comparisons:
+            comparable_jobs.add(job_id)
         if comparisons and any(matches(incoming, item) for item in comparisons):
             if not all(matches(incoming, item) for item in comparisons):
                 return None, "conflicting_route_evidence"
@@ -89,7 +92,10 @@ async def reconcile_trucky(conn, candidate):
     if found:
         other = found[0]
         peers = await linked_trucky_comparisons(conn, user)
-        if sum(matches(peer, other) for peer in peers) != 1:
+        if any(not peer.get("metadata") and abs(peer["delivered_at"]-other["delivered_at"]) <= timedelta(minutes=30)
+               for peer in peers):
+            return None, "route_evidence_pending"
+        if sum(matches(peer, other) for peer in peers if peer.get("metadata")) != 1:
             return None, "ambiguous_journey"
         # A TrucksBook job already paired to a different Trucky delivery cannot
         # be reused even when the route happens to repeat.
@@ -130,7 +136,7 @@ async def reconcile_trucky(conn, candidate):
     processed_count = await conn.fetchval(
         "SELECT COUNT(*) FROM processed_jobs WHERE discord_user_id=$1 AND LOWER(statistics)='real' AND accepted_distance>0",
         user)
-    if processed_count != len(by_job) and (
+    if processed_count != len(comparable_jobs) and (
             baseline["snapshotted_at"] is None or candidate["delivered_at"] <= baseline["snapshotted_at"]):
         return None, "historical_route_coverage_pending"
     accounted = Decimal(baseline["tb_jobs"]) + Decimal(baseline["tr_jobs"]).to_integral_value(rounding="ROUND_FLOOR")
@@ -163,8 +169,7 @@ async def linked_trucky_comparisons(conn, user):
         if candidate and candidate["mileage_type"] == "real":
             metadata = comparison_metadata_from_history(
                 candidate, dict(mileage_type="real", canonical_miles=str(candidate["miles"])), versions)
-            if metadata:
-                result.append(dict(candidate, metadata=metadata))
+            result.append(dict(candidate, metadata=metadata))
     return result
 
 
@@ -190,14 +195,18 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
         """, user)
     credited = {row["provider_job_id"]: row["miles"] for row in credits}
     candidates = await linked_trucky_comparisons(conn, user)
+    if any(not candidate.get("metadata")
+           and abs(candidate["delivered_at"]-incoming_versions[0]["delivered_at"]) <= timedelta(minutes=30)
+           for candidate in candidates):
+        return None, "route_evidence_pending"
     found = [candidate for candidate in candidates
-             if any(matches(candidate, item) for item in incoming_versions)]
+             if candidate.get("metadata") and any(matches(candidate, item) for item in incoming_versions)]
     if len(found) > 1:
         return None, "ambiguous_journey"
     if not found:
         # Every existing credit needs comparison metadata before absence can
         # be established. A missing old route must never become a second award.
-        if not set(credited).issubset({candidate["provider_job_id"] for candidate in candidates}):
+        if not set(credited).issubset({candidate["provider_job_id"] for candidate in candidates if candidate.get("metadata")}):
             return None, "route_evidence_pending"
         return Decimal(miles), None
     candidate = found[0]
