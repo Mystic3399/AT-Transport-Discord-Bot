@@ -38,6 +38,26 @@ class MatchingTests(unittest.TestCase):
             "trucky-1": {"tb-1": winner, "tb-2": winner},
         }), {})
 
+    def test_credited_overlap_selects_higher_distance_without_five_mile_limit(self):
+        import json
+        from unified_job_matching_v2 import credited_route_overlaps, unique_overlap_winners
+
+        row = {
+            "discord_user_id": BASE["discord_user_id"],
+            "trucky_job_id": "t1", "trucksbook_job_id": "b1",
+            "trucky_delivered_at": BASE["delivered_at"],
+            "trucksbook_delivered_at": BASE["delivered_at"],
+            "trucksbook_credited_miles": "200",
+        }
+        for provider, miles in (("trucky", "260"), ("trucksbook", "200")):
+            row[provider + "_payload"] = json.dumps({
+                "mileage_type": "real", "job_metadata": BASE["metadata"],
+                "canonical_miles": miles,
+            })
+        from decimal import Decimal
+        self.assertEqual(unique_overlap_winners(credited_route_overlaps([row])),
+                         {"t1": ("trucky", Decimal("260"))})
+
     def test_cross_provider_candidate(self):
         self.assertTrue(is_candidate_duplicate(BASE, {**BASE, "provider": "trucksbook",
             "delivered_at": BASE["delivered_at"] + timedelta(minutes=15),

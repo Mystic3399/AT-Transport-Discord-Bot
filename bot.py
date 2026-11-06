@@ -6337,7 +6337,7 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
         profile_text(draw, (centre_x, 1094), label, fit_profile_text(draw, label, 142, 10, True), ice, anchor="ma", shadow=0)
         if ribbon:
             profile_text(draw, (centre_x, 1115), ribbon, fit_profile_text(draw, ribbon, 140, 9, True), muted, anchor="ma", shadow=0)
-    profile_text(draw, (69, 1152), "JOB STATS: TRUCKSBOOK REAL JOBS", load_profile_font(11, True), muted, shadow=0)
+    profile_text(draw, (69, 1152), "JOB STATS: CREDITED REAL JOBS", load_profile_font(11, True), muted, shadow=0)
 
     if profile.get("is_preview"):
         draw.rounded_rectangle((504, 1162, 1096, 1192), 10, fill=(1, 8, 17, 225), outline=(*gold[:3], 205), width=1)
@@ -6510,6 +6510,34 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
                        WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real'""",
                     discord_user_id,
                 )
+    if linked_real is not None:
+        career = await connection.fetchrow(
+            """
+            WITH credited_jobs AS (
+                SELECT p.accepted_distance::numeric AS miles
+                FROM processed_jobs p
+                WHERE p.discord_user_id=$1 AND LOWER(p.statistics)='real'
+                  AND p.accepted_distance>0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM unified_v2_production_mileage_decisions d
+                      WHERE d.provider='trucksbook' AND d.provider_job_id=p.job_id
+                        AND d.discord_user_id=p.discord_user_id
+                        AND d.decision='duplicate_provider_job'
+                        AND d.reason_code='superseded_by_higher_real_credit'
+                  )
+                UNION ALL
+                SELECT c.miles FROM unified_v2_production_credit_ledger c
+                WHERE c.discord_user_id=$1 AND c.provider='trucky'
+                  AND c.mileage_type='real'
+            )
+            SELECT COUNT(*)::bigint AS jobs_completed,
+                   COALESCE(ROUND(AVG(miles)),0)::bigint AS average_job_distance,
+                   COALESCE(ROUND(MAX(miles)),0)::bigint AS longest_job_distance
+            FROM credited_jobs
+            """, discord_user_id,
+        )
+        row = dict(row)
+        row.update(dict(career))
     credited = None
     if os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
         from unified_production_ledger_adapter_v2 import read_credited_progression_totals

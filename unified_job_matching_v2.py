@@ -71,7 +71,7 @@ def is_candidate_duplicate(first, second, *, max_minutes=30, max_miles_delta="5.
     b = Decimal(str(second["miles"]))
     if not a.is_finite() or not b.is_finite() or a < 0 or b < 0:
         raise ValueError("Invalid mileage")
-    return abs(a - b) <= Decimal(str(max_miles_delta))
+    return max_miles_delta is None or abs(a - b) <= Decimal(str(max_miles_delta))
 
 
 
@@ -94,7 +94,7 @@ def credited_route_overlaps(rows):
                     "delivered_at": row[f"{provider}_delivered_at"],
                     "miles": payload["canonical_miles"],
                 })
-            if jobs[0]["mileage_type"] == "real" and is_candidate_duplicate(*jobs):
+            if jobs[0]["mileage_type"] == "real" and is_candidate_duplicate(*jobs, max_miles_delta=None):
                 credited = Decimal(str(row["trucksbook_credited_miles"]))
                 if credited.is_finite() and credited > 0:
                     trucky_miles = Decimal(str(jobs[0]["miles"]))
