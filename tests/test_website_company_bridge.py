@@ -26,6 +26,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             return None if user==5 else dict(real_miles=100,trucky_race_miles='20.5',jobs_completed=3)
         result=await collect_snapshot(Pool(),guild,profile,{3:dict(company='Former company driver')})
         self.assertEqual(seen,[1,2,5])
+        self.assertEqual(result['profiles'],[dict(discordUserId=str(i),realMiles=100,raceMiles=20.5,completedJobs=5) for i in (1,2)])
         self.assertEqual(result['totals'],dict(activeDrivers=2,discordMembers=4,realMiles=200,raceMiles=41,completedJobs=10))
     async def test_invalid_totals_fail_closed(self):
         async def profile(*args): return dict(real_miles=10,trucky_race_miles='NaN',jobs_completed=1)

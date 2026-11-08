@@ -16,6 +16,7 @@ async def collect_snapshot(pool, guild, read_profile, membership):
     if not guild.chunked:
         await guild.chunk(cache=True)
     real = race = jobs = drivers = 0
+    profiles = []
     async with pool.acquire() as connection:
         async with connection.transaction(isolation='repeatable_read', readonly=True):
             for member in guild.members:
@@ -30,15 +31,23 @@ async def collect_snapshot(pool, guild, read_profile, membership):
                 jobs += int(profile['jobs_completed'])
                 # The established profile count covers Real deliveries; include
                 # separately credited Trucky Race deliveries once, from its ledger.
-                jobs += int(await connection.fetchval("""SELECT COUNT(*) FROM unified_v2_production_credit_ledger
+                race_jobs = int(await connection.fetchval("""SELECT COUNT(*) FROM unified_v2_production_credit_ledger
                     WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='race'""", member.id) or 0)
+                personal = dict(discordUserId=str(member.id),realMiles=int(profile['real_miles']),
+                                raceMiles=float(profile.get('trucky_race_miles') or 0),
+                                completedJobs=int(profile['jobs_completed'])+race_jobs)
+                if not all(math.isfinite(personal[key]) and 0 <= personal[key] <= 9007199254740991
+                           for key in ('realMiles','raceMiles','completedJobs')):
+                    raise RuntimeError('Invalid driver profile totals; previous snapshot preserved')
+                profiles.append(personal)
+                jobs += race_jobs
     totals = dict(activeDrivers=drivers, discordMembers=sum(not m.bot for m in guild.members),
                   realMiles=real, raceMiles=race, completedJobs=jobs)
     if not all(math.isfinite(value) and 0 <= value <= 9007199254740991 for value in totals.values()):
         raise RuntimeError('Invalid company totals; previous snapshot preserved')
     return dict(version=1,source='at-command',eventId=uuid.uuid4().hex,
                 generatedAt=datetime.now(timezone.utc).isoformat(),
-                mileagePolicy='higher-provider-mileage',totals=totals)
+                mileagePolicy='higher-provider-mileage',totals=totals,profiles=profiles)
 
 def signed_payload(snapshot, secret, timestamp=None):
     body = json.dumps(snapshot,separators=(',',':'))
@@ -58,4 +67,4 @@ async def publish(pool, guild, read_profile, membership):
                                 data=body.encode(),headers=headers,allow_redirects=False) as response:
             if response.status not in (200,202):
                 raise RuntimeError(f'Website bridge HTTP {response.status}')
-    print('WEBSITE COMPANY TOTALS PUBLISHED ' + json.dumps(snapshot['totals']),flush=True)
+    print('WEBSITE COMPANY TOTALS PUBLISHED ' + json.dumps(snapshot['totals']) + f" profiles={len(snapshot['profiles'])}",flush=True)
