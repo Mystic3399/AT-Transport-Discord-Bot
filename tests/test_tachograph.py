@@ -103,15 +103,15 @@ def test_driver_country_input(country, code):
     assert tachograph.resolve_country(country) == code
 
 
-def test_change_flag_is_a_registered_slash_subcommand():
+def test_change_country_is_a_registered_slash_subcommand():
     from discord.ext import commands
     tree = ast.parse((Path(__file__).resolve().parents[1]/"bot.py").read_text())
-    names = {"save_card_country","card_country","card_change","change_flag","country_autocomplete"}
+    names = {"save_card_country","card_country","card_change","change_country","country_autocomplete"}
     nodes = [node for node in tree.body if getattr(node,"name",None) in names]
     bot = commands.Bot(command_prefix="!",intents=discord.Intents.none())
     ns = dict(bot=bot,discord=discord)
     exec(compile(ast.Module(body=nodes,type_ignores=[]),"bot.py","exec"),ns)
     group = bot.tree.get_command("change")
-    flag = group.get_command("flag")
+    flag = group.get_command("country")
     assert flag.parameters[0].name == "country"
     assert flag.parameters[0].autocomplete

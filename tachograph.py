@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, ImageChops
 
 ROOT = Path(__file__).resolve().parent
 ART = ROOT / "assets/tachograph"
@@ -70,7 +70,12 @@ def badge(miles, locked):
     path = f"{'locked' if locked else 'unlocked'}/{threshold_key(miles)}.webp"
     with ZipFile(SHIELDS) as archive:
         with Image.open(BytesIO(archive.read(path))) as source:
-            return source.convert("RGBA")
+            layer = source.convert("RGBA")
+            # Remove residual black matte without changing the shield colours.
+            red, green, blue, alpha = layer.split()
+            brightness = ImageChops.lighter(ImageChops.lighter(red,green),blue)
+            layer.putalpha(ImageChops.multiply(alpha,brightness.point(lambda value: min(255,value*12))))
+            return layer
 
 
 def render(name, profile, prefs, side="front", role="DRIVER"):
@@ -152,10 +157,37 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             image(source.convert("RGBA"),box)
 
     def detail(key,box):
+        if key in {"uk-map-watermark", "wolf-seal"}:
+            x,y,w,h=box
+            with Image.open(ART/f"design-details/{key}.webp") as source:
+                layer=ImageOps.contain(source.convert("RGBA"),(w,h),Image.Resampling.LANCZOS)
+            x+=(w-layer.width)//2
+            y+=(h-layer.height)//2
+            mask=Image.new("L",layer.size)
+            md=ImageDraw.Draw(mask)
+            inset=max(5,min(layer.size)//12)
+            md.ellipse((inset,inset,layer.width-inset,layer.height-inset),fill=210 if key=="wolf-seal" else 155)
+            mask=mask.filter(ImageFilter.GaussianBlur(inset))
+            mask=ImageChops.multiply(mask,layer.getchannel("A"))
+            region=canvas.crop((x,y,x+layer.width,y+layer.height))
+            blended=ImageChops.screen(region.convert("RGB"),layer.convert("RGB")).convert("RGBA")
+            canvas.paste(Image.composite(blended,region,mask),(x,y))
+            return
         asset(ART/f"design-details/{key}.webp",box)
 
     def shield(miles,box):
-        image(badge(miles,real < miles),box)
+        layer=badge(miles,real < miles)
+        if miles == current:
+            x,y,w,h=box
+            fitted=ImageOps.contain(layer,(w,h),Image.Resampling.LANCZOS)
+            glow=Image.new("RGBA",canvas.size)
+            mask=Image.new("L",canvas.size)
+            mask.paste(fitted.getchannel("A"),(x+(w-fitted.width)//2,y+(h-fitted.height)//2))
+            mask=mask.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(5))
+            glow.paste((36,205,255,255),(0,0,canvas.width,canvas.height))
+            glow.putalpha(mask.point(lambda value: int(value*0.8)))
+            canvas.alpha_composite(glow)
+        image(layer,box)
 
     def progress(x,y,w,compact=False):
         label = "MAXIMUM RANK ACHIEVED" if next_rank is None else f"{remaining:,} MILES TO NEXT RANK"
@@ -326,18 +358,24 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             x=43+i*74
             clear((x,514,x+71,578))
             earned=miles in profile.get("permanent_achievements",())
-            if miles==40000 and earned:
-                detail("mileage-club-medallion",(x,515,70,63))
+            insignia={40000:"mileage-club-40k",100000:"centurion",250000:"veteran",
+                      500000:"elite",750000:"horizon-elite",1000000:"immortal"}[miles]
+            insignia_path = ART/"design-details/mileage-club-medallion.webp" if miles==40000 else ART/f"insignias/{insignia}.webp"
+            with Image.open(insignia_path) as source:
+                medal=source.convert("RGBA")
+                if medal.getbbox():
+                    medal=medal.crop(medal.getbbox())
+            if not earned:
+                alpha=medal.getchannel("A")
+                medal=ImageOps.grayscale(medal).convert("RGBA")
+                medal.putalpha(alpha)
             else:
-                with Image.open(ART/"insignias/achievement.webp") as source:
-                    medal=source.convert("RGBA")
-                if not earned:
-                    alpha=medal.getchannel("A")
-                    medal=ImageOps.grayscale(medal).convert("RGBA")
-                    medal.putalpha(alpha)
-                image(medal,(x+4,518,61,57))
-                if not earned:
-                    detail("small-lock",(x+26,537,18,22))
+                glow=Image.new("RGBA",canvas.size)
+                ImageDraw.Draw(glow).ellipse((x+6,521,x+65,574),fill=(29,199,255,110))
+                canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(5)))
+            image(medal,(x+2,515,67,63))
+            if not earned:
+                detail("small-lock",(x+26,537,18,22))
         tier=profile.get("hall_of_fame_tier")
         clear((161,606,451,634))
         text(164,613,"HALL OF FAME",13,width=116)
@@ -362,3 +400,33 @@ def resolve_country(value):
         if query in {key.casefold(), entry["name"].casefold()}:
             return key
     return ""
+
+
+def company_role(member, guild_id=None):
+    """Select an actual company job title instead of a decorative divider."""
+    import re
+    import unicodedata
+    if getattr(getattr(member,"guild",None),"owner_id",None) == member.id:
+        return "OWNER / DRIVER"
+    priorities = (
+        (("co owner", "chief operator", "chief operating"), "CO-OWNER / DRIVER"),
+        (("owner", "chief executive", "founder"), "OWNER / DRIVER"),
+        (("lead it support", "it support"), "IT SUPPORT / DRIVER"),
+        (("recruitment manager",), "RECRUITMENT MANAGER / DRIVER"),
+        (("event manager",), "EVENT MANAGER / DRIVER"),
+        (("server manager",), "SERVER MANAGER / DRIVER"),
+        (("management", "manager"), "MANAGEMENT / DRIVER"),
+        (("dispatcher",), "DISPATCHER / DRIVER"),
+        (("moderator", "admin"), "STAFF / DRIVER"),
+    )
+    names=[]
+    for role in member.roles:
+        name=unicodedata.normalize("NFKC",role.name).casefold()
+        name=" ".join(re.sub(r"[^a-z0-9]+"," ",name).split())
+        if any(word in name for word in ("leadership staff","ranks badges","partners community","interests access","bots integrations")):
+            continue
+        names.append(" "+name+" ")
+    for aliases,label in priorities:
+        if any(" "+alias+" " in name for alias in aliases for name in names):
+            return label
+    return "DRIVER"

@@ -138,12 +138,12 @@ async def inspect_member_identity_fields(account_id):
 
 
 
-async def fetch_current_member_ids():
+async def fetch_current_member_names():
     """One complete validated roster, or an error; never partial absence evidence."""
     token = os.getenv("TRUCKY_API_TOKEN", "").strip()
     if not token:
         raise MembershipUnavailable("Trucky API token not configured")
-    ids, last_page = set(), None
+    ids, last_page = {}, None
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
             for page in range(1, MAX_PAGES + 1):
@@ -160,9 +160,14 @@ async def fetch_current_member_ids():
                     key = str(member["id"])
                     if key in ids:
                         raise MembershipUnavailable("Duplicate roster account")
-                    ids.add(key)
+                    ids[key] = member["name"].strip()
                 if page == last_page:
                     return ids
     except (aiohttp.ClientError, TimeoutError, ValueError) as error:
         raise MembershipUnavailable("Trucky roster unavailable") from error
     raise MembershipUnavailable("Trucky roster exceeds supported limit")
+
+
+async def fetch_current_member_ids():
+    """One complete validated roster, preserving the existing ID-only API."""
+    return set(await fetch_current_member_names())

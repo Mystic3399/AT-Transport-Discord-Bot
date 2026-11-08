@@ -3177,6 +3177,8 @@ async def on_ready():
 
     if db_pool is not None and not assign_driver_card_trucks.is_running():
         assign_driver_card_trucks.start()
+    if db_pool is not None and not refresh_card_account_names.is_running():
+        refresh_card_account_names.start()
     if db_pool is not None and not sync_race_careers.is_running():
         sync_race_careers.start()
 
@@ -3256,25 +3258,39 @@ async def on_ready():
         except Exception as error:
             print(f"ROLE DIVIDER STARTUP SYNC ERROR: {error}")
 
+    if not retry_application_commands.is_running():
+        retry_application_commands.start()
+
+
+application_commands_synced = False
+
+
+@tasks.loop(minutes=1)
+async def retry_application_commands():
+    global application_commands_synced
+    if application_commands_synced or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
+    commands_to_keep = bot.tree.get_commands()
     try:
-        # Keep the commands server-scoped only to avoid duplicate entries
-        # from simultaneous global and guild registrations.
-        home_guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=home_guild)
-        guild_synced = await bot.tree.sync(guild=home_guild)
-        bot.tree.clear_commands(guild=None)
-        global_synced = await bot.tree.sync()
-
-        print(
-            f"Synced {len(guild_synced)} home-server slash command(s) "
-            f"and {len(global_synced)} global slash command(s)."
-        )
-
+        home = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=home)
+        synced = await bot.tree.sync(guild=home)
+        # Delete global duplicates without losing definitions on reconnect/retry.
+        try:
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
+        finally:
+            for command in commands_to_keep:
+                bot.tree.add_command(command, override=True)
+        application_commands_synced = True
+        print("SLASH COMMANDS READY: " + ", ".join(command.name for command in synced), flush=True)
     except Exception as error:
-        print(
-            "Slash command sync failed: "
-            f"{error}"
-        )
+        print(f"SLASH COMMAND RETRY: {type(error).__name__}: {error}", flush=True)
+
+
+@retry_application_commands.before_loop
+async def before_application_command_retry():
+    await bot.wait_until_ready()
 
 
 @bot.event
@@ -6549,7 +6565,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     row = await connection.fetchrow(
         """
         SELECT
-            COALESCE(links.trucksbook_name,tb.provider_display_name,tr.provider_display_name,'A&T Driver') AS trucksbook_name,
+            COALESCE(tb.provider_display_name,links.trucksbook_name,tr.provider_display_name,'A&T Driver') AS trucksbook_name,
             links.discord_user_id IS NOT NULL AS legacy_linked,
             tr.provider_account_id AS trucky_account_id,
             tr.provider_display_name AS trucky_display_name,
@@ -6696,6 +6712,54 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     }
 
 
+@tasks.loop(minutes=15)
+async def refresh_card_account_names():
+    if db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""SELECT discord_user_id,provider,provider_account_id FROM unified_provider_links
+                UNION SELECT discord_user_id,'trucksbook',trucksbook_user_id::text FROM driver_links
+                WHERE trucksbook_user_id IS NOT NULL""")
+        try:
+            trucky_names = await trucky_membership_adapter.fetch_current_member_names()
+        except Exception as error:
+            trucky_names = {}
+            print(f"CARD NAME REFRESH TRUCKY RETRY: {type(error).__name__}", flush=True)
+        updated = 0
+        for row in rows:
+            account = str(row["provider_account_id"])
+            provider = row["provider"]
+            name = None
+            if provider == "trucky":
+                name = trucky_names.get(account)
+            elif provider == "trucksbook" and account.isdecimal():
+                result = await fetch_trucksbook_profile(int(account))
+                if result.get("success"):
+                    name = result.get("trucksbook_name")
+            if not isinstance(name,str) or not name.strip():
+                continue
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    # Stable account IDs are the guard; names never relink accounts.
+                    await conn.execute("""UPDATE unified_provider_links SET provider_display_name=$4
+                        WHERE discord_user_id=$1 AND provider=$2 AND provider_account_id=$3""",
+                        row["discord_user_id"],provider,account,name.strip())
+                    if provider == "trucksbook":
+                        await conn.execute("""UPDATE driver_links SET trucksbook_name=$3
+                            WHERE discord_user_id=$1 AND trucksbook_user_id=$2""",
+                            row["discord_user_id"],int(account),name.strip())
+            updated += 1
+        print(f"CARD ACCOUNT NAMES REFRESHED: {updated} linked accounts", flush=True)
+    except Exception as error:
+        print(f"CARD NAME REFRESH RETRY: {type(error).__name__}", flush=True)
+
+
+@refresh_card_account_names.before_loop
+async def before_card_account_names():
+    await bot.wait_until_ready()
+
+
 @tasks.loop(minutes=5)
 async def sync_race_careers():
     if (db_pool is None or os.getenv('AT_V2_ISOLATED_STAGING') == 'YES'
@@ -6766,7 +6830,7 @@ async def make_tachograph(member, profile, side):
                 "SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1",
                 member.id,
             )
-    role = member.top_role.name if member.top_role and member.top_role.name != "@everyone" else "DRIVER"
+    role = tachograph.company_role(member, GUILD_ID)
     return await asyncio.to_thread(
         tachograph.render, member.display_name, profile, prefs, side, role
     )
@@ -6851,15 +6915,15 @@ async def card_country(ctx, *, country: str):
 
 @bot.hybrid_group(name="change", invoke_without_command=True, description="Change your driver card settings")
 async def card_change(ctx):
-    await ctx.reply("Use /change flag and enter your country.", mention_author=False)
+    await ctx.reply("Use /change country and enter your country.", mention_author=False)
 
 
-@card_change.command(name="flag", description="Enter the country flag for your driver card")
-async def change_flag(ctx, *, country: str):
+@card_change.command(name="country", description="Choose the country displayed on your driver card")
+async def change_country(ctx, *, country: str):
     await save_card_country(ctx, country)
 
 
-@change_flag.autocomplete("country")
+@change_country.autocomplete("country")
 @card_country.autocomplete("country")
 async def country_autocomplete(interaction, current):
     query = current.casefold()
