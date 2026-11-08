@@ -10,6 +10,8 @@ from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import tachograph
+
 import aiohttp
 import asyncpg
 import discord
@@ -1037,6 +1039,8 @@ async def setup_database():
             """
         )
 
+    async with pool.acquire() as connection:
+        await connection.execute(tachograph.SCHEMA)
     db_pool = pool
 
     print("POSTGRESQL CONNECTED")
@@ -1055,6 +1059,9 @@ intents.members = True
 intents.message_content = True
 
 class ATCommandBot(commands.Bot):
+    async def setup_hook(self):
+        self.add_dynamic_items(TachographFlip)
+
     async def close(self):
         global public_http_runner
         if public_http_runner is not None:
@@ -3164,6 +3171,9 @@ async def on_ready():
     print(f"Logged in as: {bot.user}")
     print(f"Bot ID: {bot.user.id}")
     print("--------------------------------")
+
+    if db_pool is not None and not assign_driver_card_trucks.is_running():
+        assign_driver_card_trucks.start()
 
     guild = bot.get_guild(
         GUILD_ID
@@ -6681,6 +6691,130 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     }
 
 
+@tasks.loop(minutes=5)
+async def assign_driver_card_trucks():
+    if db_pool is None:
+        return
+    try:
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+                drivers = await connection.fetch(
+                    """SELECT discord_user_id FROM driver_links
+                       UNION SELECT discord_user_id FROM unified_provider_links"""
+                )
+                for driver in drivers:
+                    await tachograph.appearance(connection, driver["discord_user_id"])
+    except Exception as error:
+        print(f"CARD TRUCK ASSIGNMENT RETRY: {type(error).__name__}")
+
+
+@assign_driver_card_trucks.before_loop
+async def before_card_truck_assignment():
+    await bot.wait_until_ready()
+
+
+async def make_tachograph(member, profile, side):
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            prefs = await tachograph.appearance(connection, member.id)
+            profile = dict(profile)
+            profile["steam_id64"] = await connection.fetchval(
+                "SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1",
+                member.id,
+            )
+    role = member.top_role.name if member.top_role and member.top_role.name != "@everyone" else "DRIVER"
+    return await asyncio.to_thread(
+        tachograph.render, member.display_name, profile, prefs, side, role
+    )
+
+
+def tachograph_view(user_id, destination):
+    view = discord.ui.View(timeout=None)
+    view.add_item(TachographFlip(user_id, destination))
+    return view
+
+
+class TachographFlip(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"at:tacho:(?P<user_id>[0-9]+):(?P<side>front|back)",
+):
+    def __init__(self, user_id, side):
+        self.user_id, self.side = user_id, side
+        super().__init__(discord.ui.Button(
+            label="View Back" if side == "back" else "View Front",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"at:tacho:{user_id}:{side}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["user_id"]), match["side"])
+
+    async def callback(self, interaction):
+        if interaction.guild_id != GUILD_ID or db_pool is None:
+            await interaction.response.send_message("Driver database unavailable.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            member = interaction.guild.get_member(self.user_id)
+            if member is None:
+                await interaction.followup.send("This driver is no longer in the server.", ephemeral=True)
+                return
+            async with db_pool.acquire() as connection:
+                async with connection.transaction(readonly=True):
+                    profile = await fetch_driver_profile_stats(connection, self.user_id)
+            if profile is None:
+                await interaction.followup.send("Driver profile unavailable.", ephemeral=True)
+                return
+            image = await make_tachograph(member, profile, self.side)
+            await interaction.edit_original_response(
+                attachments=[discord.File(image, filename="at-driver-profile.png")],
+                view=tachograph_view(self.user_id, "front" if self.side == "back" else "back"),
+            )
+        except Exception as error:
+            print(f"TACHOGRAPH FLIP ERROR: {type(error).__name__}")
+            await interaction.followup.send("Unable to load this card. Please try again.", ephemeral=True)
+
+
+@bot.hybrid_command(name="country", description="Choose the country displayed on your driver card")
+async def card_country(ctx, *, country: str):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    choice = country.strip().upper()
+    choices = tachograph.countries()
+    if choice != "CLEAR" and choice not in choices:
+        matches = [key for key, value in choices.items() if value["name"].casefold() == country.strip().casefold()]
+        choice = matches[0] if len(matches) == 1 else ""
+    if not choice:
+        await ctx.reply("Choose a country name or code, for example GB, IE or AU. Use CLEAR to remove it.", mention_author=False)
+        return
+    if ctx.interaction:
+        await ctx.defer(ephemeral=True)
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            if await fetch_driver_profile_stats(connection, ctx.author.id) is None:
+                await ctx.reply("Complete driver registration first.", mention_author=False)
+                return
+            await tachograph.appearance(connection, ctx.author.id)
+            await connection.execute(
+                "UPDATE driver_card_preferences SET country_code=$2 WHERE discord_user_id=$1",
+                ctx.author.id, None if choice == "CLEAR" else choice,
+            )
+    label = "Not set" if choice == "CLEAR" else choices[choice]["name"]
+    await ctx.reply(f"Card country saved: **{label}**. Use !profile to view it.", mention_author=False)
+
+
+@card_country.autocomplete("country")
+async def country_autocomplete(interaction, current):
+    query = current.casefold()
+    choices = [
+        discord.app_commands.Choice(name=value["name"], value=key)
+        for key, value in tachograph.countries().items()
+        if query in value["name"].casefold() or query in key.casefold()
+    ]
+    return choices[:24] + [discord.app_commands.Choice(name="Clear country", value="CLEAR")]
+
+
 @bot.command(
     name="profile"
 )
@@ -6766,18 +6900,10 @@ async def driver_profile(
     )
 
     try:
-        avatar_bytes = await target_member.display_avatar.with_size(256).read()
-        profile_png = await asyncio.to_thread(
-            render_driver_profile_v5_png,
-            avatar_bytes,
-            target_member.display_name,
-            profile,
-        )
+        profile_png = await make_tachograph(target_member, profile, "front")
         await ctx.send(
-            file=discord.File(
-                profile_png,
-                filename="at-driver-profile.png",
-            ),
+            file=discord.File(profile_png, filename="at-driver-profile.png"),
+            view=tachograph_view(target_member.id, "back"),
         )
     except Exception as error:
         print(f"GRAPHICAL PROFILE FALLBACK: {error}")
