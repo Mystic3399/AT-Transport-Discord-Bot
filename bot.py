@@ -725,29 +725,20 @@ async def link_registration_provider(ctx, provider, account_id):
             + ("Example only: **`!trucksbook 123456`**" if provider=="trucksbook" else "Example only: **`!trucky 209123`**")
             + "\nReplace the example number with your own profile ID.","error"),mention_author=False)
         return
-    if int(account_id) == (229356 if provider == "trucksbook" else 49041):
-        await audit_registration_account(ctx, provider, "company_id_entered", account_id)
-        await ctx.reply(embed=onboarding_flow.panel("⚠️ THAT IS A&T’S COMPANY NUMBER",
-            "You entered the **company ID**, not your personal driver ID.\n\n"
-            "Open **your own driver profile** on " + ("TrucksBook" if provider=="trucksbook" else "Trucky")
-            + ", copy the number from its URL, then type:\n"
-            + ("`!trucksbook YOUR_ID`" if provider=="trucksbook" else "`!trucky YOUR_ID`")
-            + "\n\nReplace `YOUR_ID` with **your personal profile number**. Ask Management here if you cannot find it.","error"),mention_author=False)
-        return
     await audit_registration_account(ctx, provider, "attempt", account_id)
     try:
         if provider == "trucksbook":
             profile = await fetch_trucksbook_profile(int(account_id))
             if not profile.get("success") or not profile.get("belongs_to_at"):
                 await audit_registration_account(ctx, provider, "membership_unavailable", account_id)
-                await ctx.reply("This TrucksBook driver profile could not be confirmed as an A&T member. Check your PERSONAL profile ID (not the company ID), and that you have joined A&T on TrucksBook. If both are correct, ask Management here; your saved accounts have not changed.", mention_author=False)
+                await ctx.reply("TrucksBook could not confirm this account's A&T membership. No verified ownership was claimed. Try again later.", mention_author=False)
                 return
             canonical_name = profile["trucksbook_name"]
         else:
             canonical_name = await trucky_membership_adapter.verify_member(account_id)
             if canonical_name is None:
                 await audit_registration_account(ctx, provider, "membership_unavailable", account_id)
-                await ctx.reply("This Trucky driver profile was not found in A&T’s active member list. Check your PERSONAL profile ID (not the company ID), and that you have joined A&T on Trucky. If both are correct, ask Management here; your saved accounts have not changed.", mention_author=False)
+                await ctx.reply("Trucky could not confirm this account's active A&T membership.", mention_author=False)
                 return
         await registration.link_supported_account(db_pool, ctx.author.id, provider, str(int(account_id)), canonical_name)
     except asyncpg.UniqueViolationError:
