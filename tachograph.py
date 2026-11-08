@@ -349,3 +349,16 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
     canvas.convert("RGB").save(output,"PNG",optimize=True)
     output.seek(0)
     return output
+
+
+def resolve_country(value):
+    query = " ".join(value.strip().casefold().split())
+    aliases = {"uk":"GB", "united states":"US", "usa":"US", "holland":"NL", "eire":"IE", "éire":"IE"}
+    if query == "clear":
+        return "CLEAR"
+    if query in aliases:
+        return aliases[query]
+    for key, entry in countries().items():
+        if query in {key.casefold(), entry["name"].casefold()}:
+            return key
+    return ""

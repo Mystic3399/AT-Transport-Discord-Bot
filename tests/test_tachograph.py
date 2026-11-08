@@ -90,5 +90,28 @@ async def test_flip_routes_survive_restart_and_replace_same_message():
     await restored.callback(interaction)
     interaction.edit_original_response.assert_awaited_once()
     kwargs=interaction.edit_original_response.call_args.kwargs
+    assert len(kwargs["view"].children)==1
     assert kwargs["view"].children[0].item.custom_id=="at:tacho:42:front"
+    assert item.template.fullmatch("at:tacho:42:race") is None
     assert len(kwargs["attachments"])==1
+
+
+@pytest.mark.parametrize("country,code", [("England","GB-ENG"),("Ireland","IE"),
+    ("Australia","AU"),("  united   kingdom ","GB"),("Scotland","GB-SCT"),
+    ("Wales","GB-WLS"),("Northern Ireland","GB-NIR"),("usa","US"),("clear","CLEAR"),("unknown","")])
+def test_driver_country_input(country, code):
+    assert tachograph.resolve_country(country) == code
+
+
+def test_change_flag_is_a_registered_slash_subcommand():
+    from discord.ext import commands
+    tree = ast.parse((Path(__file__).resolve().parents[1]/"bot.py").read_text())
+    names = {"save_card_country","card_country","card_change","change_flag","country_autocomplete"}
+    nodes = [node for node in tree.body if getattr(node,"name",None) in names]
+    bot = commands.Bot(command_prefix="!",intents=discord.Intents.none())
+    ns = dict(bot=bot,discord=discord)
+    exec(compile(ast.Module(body=nodes,type_ignores=[]),"bot.py","exec"),ns)
+    group = bot.tree.get_command("change")
+    flag = group.get_command("flag")
+    assert flag.parameters[0].name == "country"
+    assert flag.parameters[0].autocomplete

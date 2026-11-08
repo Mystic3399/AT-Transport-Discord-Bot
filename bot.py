@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import tachograph
+import race_progression
 
 import aiohttp
 import asyncpg
@@ -1041,6 +1042,7 @@ async def setup_database():
 
     async with pool.acquire() as connection:
         await connection.execute(tachograph.SCHEMA)
+        await connection.execute(race_progression.SCHEMA)
     db_pool = pool
 
     print("POSTGRESQL CONNECTED")
@@ -1048,6 +1050,7 @@ async def setup_database():
     print("Driver onboarding tables ready.")
     print("Permanent achievements and Hall of Fame tables ready.")
     print("Automated driver leaderboard tables ready.")
+    print("Tachograph preferences and separate Race career tables ready.", flush=True)
 
 
 # --------------------------------------------------
@@ -3174,6 +3177,8 @@ async def on_ready():
 
     if db_pool is not None and not assign_driver_card_trucks.is_running():
         assign_driver_card_trucks.start()
+    if db_pool is not None and not sync_race_careers.is_running():
+        sync_race_careers.start()
 
     guild = bot.get_guild(
         GUILD_ID
@@ -6692,6 +6697,44 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
 
 
 @tasks.loop(minutes=5)
+async def sync_race_careers():
+    if (db_pool is None or os.getenv('AT_V2_ISOLATED_STAGING') == 'YES'
+            or os.getenv('AT_V2_LINKED_TRUCKY_MILEAGE_ENABLED') != 'YES'):
+        return
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    try:
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+                # One worker owns role creation, including during deploy overlap.
+                if not await connection.fetchval("SELECT pg_try_advisory_xact_lock(746520032)"):
+                    return
+                drivers = await connection.fetch("""
+                    SELECT t.discord_user_id,t.trucky_race_miles
+                    FROM unified_v2_production_mileage_totals t
+                    WHERE EXISTS (
+                        SELECT 1 FROM unified_provider_links p
+                        WHERE p.discord_user_id=t.discord_user_id AND p.provider='trucky'
+                          AND p.verified_at IS NOT NULL)
+                """)
+                mapped = await race_progression.ensure_roles(connection,guild,
+                    PROGRESSION_ROLES,ACHIEVEMENT_ROLES,HALL_OF_FAME_ROLES)
+                count = 0
+                for row in drivers:
+                    count += await race_progression.sync_driver(connection,guild,row['discord_user_id'],
+                        row['trucky_race_miles'],mapped,PROGRESSION_ROLES,ACHIEVEMENT_ROLES,HALL_OF_FAME_ROLES)
+                print(f"RACE CAREER SYNC: {count} drivers; {len(mapped)} separate roles ready", flush=True)
+    except Exception as error:
+        print(f"RACE CAREER RETRY: {type(error).__name__}: {error}", flush=True)
+
+
+@sync_race_careers.before_loop
+async def before_race_careers():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=5)
 async def assign_driver_card_trucks():
     if db_pool is None:
         return
@@ -6704,6 +6747,7 @@ async def assign_driver_card_trucks():
                 )
                 for driver in drivers:
                     await tachograph.appearance(connection, driver["discord_user_id"])
+                print(f"TACHOGRAPH ASSIGNMENTS: {len(drivers)} linked drivers ready", flush=True)
     except Exception as error:
         print(f"CARD TRUCK ASSIGNMENT RETRY: {type(error).__name__}")
 
@@ -6776,15 +6820,11 @@ class TachographFlip(
             await interaction.followup.send("Unable to load this card. Please try again.", ephemeral=True)
 
 
-@bot.hybrid_command(name="country", description="Choose the country displayed on your driver card")
-async def card_country(ctx, *, country: str):
+async def save_card_country(ctx, country: str):
     if ctx.guild is None or ctx.guild.id != GUILD_ID or db_pool is None:
         return
-    choice = country.strip().upper()
     choices = tachograph.countries()
-    if choice != "CLEAR" and choice not in choices:
-        matches = [key for key, value in choices.items() if value["name"].casefold() == country.strip().casefold()]
-        choice = matches[0] if len(matches) == 1 else ""
+    choice = tachograph.resolve_country(country)
     if not choice:
         await ctx.reply("Choose a country name or code, for example GB, IE or AU. Use CLEAR to remove it.", mention_author=False)
         return
@@ -6804,6 +6844,22 @@ async def card_country(ctx, *, country: str):
     await ctx.reply(f"Card country saved: **{label}**. Use !profile to view it.", mention_author=False)
 
 
+@bot.hybrid_command(name="country", description="Choose the country displayed on your driver card")
+async def card_country(ctx, *, country: str):
+    await save_card_country(ctx, country)
+
+
+@bot.hybrid_group(name="change", invoke_without_command=True, description="Change your driver card settings")
+async def card_change(ctx):
+    await ctx.reply("Use /change flag and enter your country.", mention_author=False)
+
+
+@card_change.command(name="flag", description="Enter the country flag for your driver card")
+async def change_flag(ctx, *, country: str):
+    await save_card_country(ctx, country)
+
+
+@change_flag.autocomplete("country")
 @card_country.autocomplete("country")
 async def country_autocomplete(interaction, current):
     query = current.casefold()
