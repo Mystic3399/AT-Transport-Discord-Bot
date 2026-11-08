@@ -67,8 +67,11 @@ def instruction(view):
             '**Choose TrucksBook, Trucky, or both.**\nUse the account you drive with for A&T.\n\n'
             '**TrucksBook:**\n`!trucksbook YOUR_ID`\n'
             '**Trucky:**\n`!trucky YOUR_ID`\n\n'
-            '**Replace `YOUR_ID` with the number from your profile URL.**\n'
-            'Example only: `!trucksbook 123456`\nDo not enter your username or the whole URL.\n\n'
+            '**Use your PERSONAL driver profile number — not the A&T company number.**\n'
+            'Open your own profile on that platform and copy its number.\n'
+            'TrucksBook: `trucksbook.eu/profile/YOUR_ID`\n'
+            'Do **not** use `229356` (TrucksBook company) or `49041` (Trucky company).\n'
+            'Example only: `!trucksbook 123456`\nDo not enter your username.\n\n'
             'The bot will check the account and show the result here.')
     accounts='\n'.join('✅ **'+name.title()+':** '+discord.utils.escape_markdown(a['display_name'] or 'Linked')
         for name,a in view['accounts'].items() if a['status'] in {'Linked','Verified'})

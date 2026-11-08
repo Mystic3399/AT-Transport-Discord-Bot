@@ -305,7 +305,11 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         panel((37,268,321,640))
         truck = ART/"trucks"/f"{prefs['truck_key']}.webp"
         with Image.open(truck) as source:
-            portrait=ImageOps.fit(source.convert("RGBA"),(278,364),Image.Resampling.LANCZOS)
+            original=source.convert("RGBA")
+            portrait=ImageOps.fit(original,(278,364),Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(16))
+            portrait=ImageEnhance.Brightness(portrait).enhance(0.45)
+            fitted=ImageOps.contain(original,(278,364),Image.Resampling.LANCZOS)
+            portrait.alpha_composite(fitted,((278-fitted.width)//2,(364-fitted.height)//2))
         canvas.alpha_composite(portrait,(40,272))
         text(345,183,"DRIVER NAME",15,CYAN)
         metal(345,204,name,36,width=239)
