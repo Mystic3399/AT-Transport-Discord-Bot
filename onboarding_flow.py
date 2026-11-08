@@ -1,5 +1,8 @@
 """A&T's concise, durable onboarding messages. Identity and mileage stay elsewhere."""
 from pathlib import Path
+from io import BytesIO
+from functools import lru_cache
+from PIL import Image, ImageOps
 import discord
 
 LOGO=Path(__file__).resolve().parent/'assets/tachograph/company-logo.webp'
@@ -20,10 +23,29 @@ def panel(title,description,kind='info'):
     return embed
 
 
+@lru_cache(maxsize=1)
+def logo_png():
+    with Image.open(LOGO) as source:
+        image=ImageOps.contain(source.convert("RGBA"),(144,64),Image.Resampling.LANCZOS)
+    output=BytesIO()
+    image.save(output,"PNG")
+    return output.getvalue()
+
+
 async def send(channel,embed,**kwargs):
-    embed.set_thumbnail(url='attachment://at-onboarding.webp')
-    return await channel.send(embed=embed,file=discord.File(LOGO,filename='at-onboarding.webp'),
+    embed.set_thumbnail(url='attachment://at-onboarding.png')
+    return await channel.send(embed=embed,file=discord.File(BytesIO(logo_png()),filename='at-onboarding.png'),
                               allowed_mentions=discord.AllowedMentions.none(),**kwargs)
+
+
+def steam_signin(url):
+    # Steam OpenID URLs exceed Discord's 512-character URL-button limit.
+    return panel("🔐 CONNECT STEAM • Your secure sign-in",
+        f"**[SIGN IN WITH STEAM — CLICK HERE]({url})**\n\n"
+        "**1.** Open the link above.\n"
+        "**2.** Sign in to your own Steam account.\n"
+        "**3.** Return here — the bot will show the result and your next step.\n\n"
+        "This private link expires in **10 minutes**. Do not share it.")
 
 
 def stage(view):
@@ -37,7 +59,7 @@ def instruction(view):
     if step==1:
         return panel('🔐 STEP 1 OF 3 • Connect Steam',
             '**Type this in this room:**\n```\n!linksteam\n```\n'
-            'Then press **Sign in with Steam**, sign in to your own account, and return here.\n\n'
+            'Then click the **Sign in with Steam** link in the bot’s reply, sign in to your own account, and return here.\n\n'
             '✅ The bot will tell you when Steam is verified.\n'
             'Keep your sign-in link private. It expires after 10 minutes.')
     if step==2:

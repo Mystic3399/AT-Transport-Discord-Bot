@@ -3202,6 +3202,8 @@ async def on_ready():
     print(f"Bot ID: {bot.user.id}")
     print("--------------------------------")
 
+    if db_pool is not None and not cleanup_onboarding_logo_previews.is_running():
+        cleanup_onboarding_logo_previews.start()
     if db_pool is not None and not assign_driver_card_trucks.is_running():
         assign_driver_card_trucks.start()
     if db_pool is not None and not refresh_card_account_names.is_running():
@@ -6739,6 +6741,33 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     }
 
 
+@tasks.loop(count=1)
+async def cleanup_onboarding_logo_previews():
+    if db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING")=="YES": return
+    async with db_pool.acquire() as connection:
+        rows=await connection.fetch("SELECT verification_channel_id FROM unified_registration_sessions WHERE verification_channel_id IS NOT NULL AND status<>'cancelled'")
+    cleaned=0
+    for row in rows:
+        channel=bot.get_channel(row["verification_channel_id"])
+        if channel is None or channel.guild.id!=GUILD_ID or channel.category_id!=VERIFICATION_CATEGORY_ID:
+            continue
+        try:
+            async for message in channel.history(limit=30):
+                if message.author.id!=bot.user.id or not any(a.filename=="at-onboarding.webp" for a in message.attachments):
+                    continue
+                embeds=[embed.copy().set_thumbnail(url=None) for embed in message.embeds]
+                await message.edit(embeds=embeds,attachments=[])
+                cleaned+=1
+        except discord.HTTPException as error:
+            print(f"ONBOARDING LOGO CLEANUP RETRY: {type(error).__name__}",flush=True)
+    print(f"ONBOARDING LOGO PREVIEWS CLEANED: {cleaned}",flush=True)
+
+
+@cleanup_onboarding_logo_previews.before_loop
+async def before_onboarding_logo_cleanup():
+    await bot.wait_until_ready()
+
+
 @tasks.loop(minutes=15)
 async def refresh_card_account_names():
     if db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
@@ -7852,13 +7881,7 @@ async def link_steam_for_registration(ctx):
         await ctx.reply("Could not create a secure Steam login. Please try later.", mention_author=False)
         return
     await refresh_unified_registration(ctx.author.id)
-    view=discord.ui.View()
-    view.add_item(discord.ui.Button(label="Sign in with Steam",url=url,style=discord.ButtonStyle.link))
-    await ctx.reply(embed=onboarding_flow.panel("🔐 CONNECT STEAM • Your secure sign-in",
-        "**1.** Press **Sign in with Steam** below.\n"
-        "**2.** Sign in to your own Steam account.\n"
-        "**3.** Return here — the bot will show the result and your next step.\n\n"
-        "This private link expires in **10 minutes**. Do not share it."),view=view,mention_author=False)
+    await ctx.reply(embed=onboarding_flow.steam_signin(url),mention_author=False)
 
 
 
