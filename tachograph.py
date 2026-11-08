@@ -79,6 +79,11 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         raise ValueError("Unknown card side")
     with Image.open(ART / f"backgrounds/{side}.webp") as source:
         canvas = source.convert("RGBA").resize((1117, 700), Image.Resampling.LANCZOS)
+    if side == "back":
+        # The approved artwork supplies the fixed header, frame and section labels.
+        # Every sample driver field and badge state is covered below before output.
+        with Image.open(ART / "design-reference.webp") as reference:
+            canvas = reference.convert("RGBA").crop((0,706,1117,1406))
     draw = ImageDraw.Draw(canvas)
 
     def font(size):
@@ -182,13 +187,14 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
     current = MILES[idx]
     next_rank = MILES[idx+1] if idx+1<len(MILES) else None
     remaining = max(0,(next_rank or real)-real)
-    asset(ART/"company-logo.webp",(30,20,254,110))
-    metal(382 if side=="front" else 335,45,
-          "DRIVER TACHOGRAPH CARD" if side=="front" else "DRIVER CAREER RECORD",
-          38,width=608 if side=="front" else 650)
-    if side=="front":
-        text(435,94,"V I R T U A L   C O M P A N Y   I D",15,WHITE,width=540)
-    detail("tachograph-symbol",(1002,35,70,45))
+    if side == "front":
+        asset(ART/"company-logo.webp",(30,20,254,110))
+        metal(382 if side=="front" else 335,45,
+              "DRIVER TACHOGRAPH CARD" if side=="front" else "DRIVER CAREER RECORD",
+              38,width=608 if side=="front" else 650)
+        if side=="front":
+            text(435,94,"V I R T U A L   C O M P A N Y   I D",15,WHITE,width=540)
+        detail("tachograph-symbol",(1002,35,70,45))
     if side=="front":
         detail("uk-map-watermark",(922,84,157,177))
         detail("smart-chip",(59,160,119,75))
@@ -256,54 +262,89 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         progress(841,557,232)
         # Compact numeric progress fills the remaining lower-right safe area.
     else:
-        metal(335,87,name,23,width=650)
-        panel((36,111,506,646))
-        panel((517,111,1080,646))
-        heading(38,113,466,"CURRENT RANK")
-        text(335,145,"NEXT RANK",15,CYAN)
-        shield(current,(67,150,176,218))
+        def clear(box):
+            draw.rectangle(box,fill="#041c2c")
+
+        # Replace all baked example values, including title, badge cells and totals.
+        clear((798,28,986,69))
+        metal(800,31,name,31,width=184)
+        clear((47,141,275,364))
+        shield(current,(68,144,176,218))
+        clear((310,155,455,338))
         if next_rank is not None:
-            shield(next_rank,(316,157,127,184))
-        progress(289,339,199,compact=True)
-        heading(38,405,466,"CAREER RECORD")
-        for i,(label,key) in enumerate((("REAL JOBS","jobs_completed"),("AVERAGE MI","average_job_distance"),("LONGEST MI","longest_job_distance"),("WEEKLY WINS","weekly_wins"))):
-            x=51+i*110
-            detail(("jobs-icon","road-icon","career-pin","trophy-icon")[i],(x+22,437,29,29))
-            metal(x+5,470,f"{int(profile.get(key) or 0):,}",20,width=100)
-            text(x+3,497,label,11,CYAN,width=103)
-            if i:
-                draw.line((x-13,435,x-13,513),fill="#2c667e",width=1)
-        heading(38,520,466,"PERMANENT ACHIEVEMENTS")
-        for i,miles in enumerate((40000,100000,250000,500000,750000,1000000)):
-            x=70+i*70
-            with Image.open(ART/"insignias/achievement.webp") as source:
-                medal=source.convert("RGBA")
-            if miles not in profile.get("permanent_achievements",()):
-                alpha=medal.getchannel("A")
-                medal=ImageOps.grayscale(medal).convert("RGBA")
-                medal.putalpha(alpha)
-            image(medal,(x-2,546,61,61))
-            if miles not in profile.get("permanent_achievements",()):
-                detail("small-lock",(x+22,568,16,19))
-            metal(x+9,611,threshold_key(miles).upper(),16,width=62)
-        heading(519,113,559,"PATH TO IMMORTAL")
+            shield(next_rank,(316,156,127,184))
+        clear((285,340,494,362))
+        metal(291,343,"MAXIMUM RANK" if next_rank is None else f"{remaining:,} MILES REMAINING",15,width=199)
+        # Keep the original gold progress frame and populate its inset.
+        draw.rectangle((293,365,483,375),fill="#163746")
+        fraction=1 if next_rank is None else min(real/next_rank,1)
+        for y in range(366,375):
+            draw.line((294,y,294+int(188*fraction),y),fill=(54,204-(y-366)*7,251))
+        clear((318,379,482,401))
+        metal(321,381,f"{real:,} / {next_rank:,}" if next_rank is not None else f"{real:,} MI",15,width=171)
+        for x,width,key in (
+            (49,83,"jobs_completed"),(153,100,"average_job_distance"),
+            (274,112,"longest_job_distance"),(403,81,"weekly_wins")
+        ):
+            clear((x,443,x+width,468))
+            value=f"{int(profile.get(key) or 0):,}"
+            if key in {"average_job_distance","longest_job_distance"}:
+                value+=" MI"
+            metal(x+7,445,value,20,width=width-9)
+        ranks = (
+            "NEW DRIVER","ROAD RUNNER","DISTANCE DRIVER","AURORA DRIVER",
+            "WOLF PACK DRIVER","VIKING HAULER","ELITE HAULER","A&T VETERAN",
+            "A&T ROAD LEGEND","BEYOND HORIZONS","HORIZON WOLF","A&T CENTURION",
+            "VIKING PATHFINDER","ROAD GUARDIAN","AURORA PATHFINDER",
+            "VIKING ROADMASTER","HORIZON LEGEND","ALPHA ROADMASTER",
+            "AURORA COMMANDER","GUARDIAN OF THE HORIZON","BEYOND THE HORIZON",
+            "A&T IMMORTAL"
+        )
         for i,miles in enumerate(MILES):
             row,col=divmod(i,6)
-            x=(520+col*92) if row<3 else (544+col*115)
-            y=144+row*114
-            width=91 if row<3 else 114
+            x=520+col*91 if row<3 else 544+col*113
+            y=137+row*114
+            width=91 if row<3 else 113
+            clear((x,y,x+width-1,y+112))
             if miles==current:
-                draw.rounded_rectangle((x,y,x+width-2,y+112),5,fill="#123e65",outline="#46c2fc",width=2)
-            draw.line((x+width-1,y,x+width-1,y+112),fill="#17405b",width=1)
-            draw.line((x,y+112,x+width,y+112),fill="#17405b",width=1)
-            shield(miles,(x+3,y+1,width-6,89))
-            metal(x+width//2-16,y+91,threshold_key(miles).upper(),15,width=60)
+                draw.rounded_rectangle((x,y,x+width-2,y+112),4,fill="#103755",outline="#49beff",width=2)
+            if row<3:
+                draw.line((x+width-1,y,x+width-1,y+112),fill="#124867")
+                draw.line((x,y+112,x+width-1,y+112),fill="#124867")
+            shield(miles,(x+4,y+1,width-8,79))
+            words=ranks[i].split()
+            midpoint=max(1,len(words)//2)
+            lines=[" ".join(words[:midpoint])," ".join(words[midpoint:])]
+            label_size=8
+            for line_index,label in enumerate(lines):
+                label_width=draw.textlength(label,font=font(label_size))
+                text(x+max(1,(width-label_width)//2),y+80+line_index*9,label,label_size,width=width-4)
+            value=threshold_key(miles).upper()
+            value_width=draw.textlength(value,font=font(14))
+            metal(x+(width-value_width)//2,y+98,value,14,width=width-8)
+        for i,miles in enumerate((40000,100000,250000,500000,750000,1000000)):
+            x=43+i*74
+            clear((x,514,x+71,578))
+            earned=miles in profile.get("permanent_achievements",())
+            if miles==40000 and earned:
+                detail("mileage-club-medallion",(x,515,70,63))
+            else:
+                with Image.open(ART/"insignias/achievement.webp") as source:
+                    medal=source.convert("RGBA")
+                if not earned:
+                    alpha=medal.getchannel("A")
+                    medal=ImageOps.grayscale(medal).convert("RGBA")
+                    medal.putalpha(alpha)
+                image(medal,(x+4,518,61,57))
+                if not earned:
+                    detail("small-lock",(x+26,537,18,22))
         tier=profile.get("hall_of_fame_tier")
-        detail("reverse-compass-seal",(20,622,80,77))
-        panel((101,632,506,665))
-        detail("hall-of-fame-trophy",(108,632,36,31))
-        text(154,642,"HALL OF FAME • "+(str(tier).upper() if tier else "NOT YET INDUCTED"),11,width=338)
-    detail("footer-front" if side=="front" else "footer-back",(273,660,566,30))
+        clear((161,606,451,634))
+        text(164,613,"HALL OF FAME",13,width=116)
+        text(301,613,str(tier).upper() if tier else "NOT YET INDUCTED",12,CYAN,width=147)
+        clear((895,659,1084,680))
+    if side == "front":
+        detail("footer-front",(273,660,566,30))
     output=BytesIO()
     canvas.convert("RGB").save(output,"PNG",optimize=True)
     output.seek(0)
