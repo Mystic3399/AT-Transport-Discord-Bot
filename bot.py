@@ -3122,6 +3122,23 @@ async def deliver_v2_progression():
         print(f'V2 PROGRESSION RETRY PENDING: {type(error).__name__}', flush=True)
 
 
+@tasks.loop(minutes=5)
+async def publish_website_totals():
+    if db_pool is None:
+        return
+    try:
+        import website_company_bridge
+        await website_company_bridge.publish(db_pool,bot.get_guild(GUILD_ID),
+            fetch_driver_profile_stats,driver_membership_snapshot_v2)
+    except Exception as error:
+        print(f'WEBSITE COMPANY TOTALS RETRY: {type(error).__name__}: {error}',flush=True)
+
+
+@publish_website_totals.before_loop
+async def before_website_totals():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready():
     global db_pool, unified_schema_ready, staging_trucky_probe_ran
@@ -3160,6 +3177,8 @@ async def on_ready():
 
     if db_pool is not None and unified_schema_ready:
         await start_public_integrations()
+        if not isolated_staging and not publish_website_totals.is_running():
+            publish_website_totals.start()
         if not monitor_driver_memberships_v2.is_running():
             monitor_driver_memberships_v2.start()
         if (not isolated_staging and os.getenv('AT_V2_TRUCKY_API_INGEST_ENABLED') == 'YES'
