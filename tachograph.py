@@ -302,11 +302,12 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             with ZipFile(FLAGS) as archive:
                 with Image.open(BytesIO(archive.read(country["flag"]))) as flag:
                     image(flag.convert("RGBA"),(192,169,99,54))
-        panel((37,235,321,553))
+        # Balance the portrait between the chip and the lower content edge.
+        panel((37,303,321,621))
         truck = ART/"trucks"/f"{prefs['truck_key']}.webp"
         with Image.open(truck) as source:
             portrait=ImageOps.fit(source.convert("RGBA"),(278,310),Image.Resampling.LANCZOS)
-        canvas.alpha_composite(portrait,(40,239))
+        canvas.alpha_composite(portrait,(40,307))
         text(345,183,"DRIVER NAME",15,CYAN)
         metal(345,204,name,36,width=239)
         draw.line((345,249,584,249),fill=CYAN,width=1)
