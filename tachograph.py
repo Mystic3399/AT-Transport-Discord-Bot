@@ -487,10 +487,13 @@ def company_role(member, guild_id=None):
     priorities = (
         (("co owner", "chief operator", "chief operating"), "CO-OWNER / DRIVER"),
         (("owner", "chief executive", "founder"), "OWNER / DRIVER"),
-        (("lead it support", "it support"), "IT SUPPORT / DRIVER"),
-        (("recruitment manager",), "RECRUITMENT MANAGER / DRIVER"),
-        (("event manager",), "EVENT MANAGER / DRIVER"),
+        (("lead it support", "it support lead", "head of it"), "LEAD IT SUPPORT / DRIVER"),
+        (("it support",), "IT SUPPORT / DRIVER"),
+        (("recruitment manager", "recruitment management"), "RECRUITMENT MANAGER / DRIVER"),
+        (("event manager", "events manager"), "EVENT MANAGER / DRIVER"),
         (("server manager",), "SERVER MANAGER / DRIVER"),
+        (("night shift operations manager", "night shift manager"), "NIGHT SHIFT MANAGER / DRIVER"),
+        (("operations manager",), "OPERATIONS MANAGER / DRIVER"),
         (("management", "manager"), "MANAGEMENT / DRIVER"),
         (("dispatcher",), "DISPATCHER / DRIVER"),
         (("moderator", "admin"), "STAFF / DRIVER"),
@@ -498,6 +501,8 @@ def company_role(member, guild_id=None):
     names=[]
     for role in member.roles:
         name=unicodedata.normalize("NFKC",role.name).casefold()
+        # Discord role names often use small-cap letters that NFKC does not fold.
+        name=name.translate(str.maketrans("ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀꜱᴛᴜᴠᴡхʏᴢ", "abcdefghijklmnopqrstuvwxyz"))
         name=" ".join(re.sub(r"[^a-z0-9]+"," ",name).split())
         if any(word in name for word in ("leadership staff","ranks badges","partners community","interests access","bots integrations")):
             continue

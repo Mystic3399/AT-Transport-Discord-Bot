@@ -3375,6 +3375,10 @@ async def on_member_update(before, after):
     if before_role_ids == after_role_ids and not booster_changed:
         return
 
+    if before_role_ids != after_role_ids and after.guild.id == GUILD_ID and db_pool is not None:
+        if tachograph.company_role(before, GUILD_ID) != tachograph.company_role(after, GUILD_ID):
+            await refresh_member_role_cards(after)
+
     try:
         await sync_member_role_category_dividers(after)
     except (discord.Forbidden, discord.HTTPException) as error:
@@ -6878,7 +6882,47 @@ async def before_card_truck_assignment():
     await bot.wait_until_ready()
 
 
+async def refresh_member_role_cards(member):
+    """Refresh recently posted profile cards when a company job title changes."""
+    for message in list(bot.cached_messages):
+        if message.author.id != bot.user.id or getattr(message.guild, "id", None) != GUILD_ID:
+            continue
+        destination = None
+        for row in message.components:
+            for component in row.children:
+                custom_id = getattr(component, "custom_id", "") or ""
+                if custom_id in {f"at:tacho:{member.id}:front", f"at:tacho:{member.id}:back"}:
+                    destination = custom_id.rsplit(":", 1)[1]
+        if destination is None:
+            continue
+        try:
+            async with db_pool.acquire() as connection:
+                profile = await fetch_driver_profile_stats(connection, member.id)
+            if profile is None:
+                continue
+            side = "back" if destination == "front" else "front"
+            image = await make_tachograph(member, profile, side)
+            await message.edit(attachments=[discord.File(image, filename="at-driver-profile.png")],
+                               view=tachograph_view(member.id, destination))
+        except (discord.HTTPException, discord.Forbidden) as error:
+            print(f"CARD ROLE REFRESH SKIPPED: {type(error).__name__}", flush=True)
+        except Exception as error:
+            print(f"CARD ROLE REFRESH ERROR: {type(error).__name__}", flush=True)
+
+
+@bot.event
+async def on_guild_role_update(before, after):
+    if before.name == after.name or after.guild.id != GUILD_ID or db_pool is None:
+        return
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
+    for member in after.members:
+        await refresh_member_role_cards(member)
+
+
 async def make_tachograph(member, profile, side):
+    # Fetch current Discord roles rather than relying on an old command member object.
+    member = await member.guild.fetch_member(member.id)
     async with db_pool.acquire() as connection:
         async with connection.transaction():
             prefs = await tachograph.appearance(connection, member.id)
