@@ -16,6 +16,20 @@ FLAGS = ART / "country-flags/AT-Tachograph-World-Flags.zip"
 MILES = (0,5000,10000,15000,20000,25000,30000,35000,40000,50000,75000,
          100000,150000,200000,300000,400000,500000,600000,700000,800000,900000,1000000)
 WHITE, CYAN, GOLD = "#eef7ff", "#7cdcff", "#f1ce79"
+CLUBS = {
+    40000: ("mileage-club-40k", "MILEAGE CLUB"),
+    100000: ("centurion", "CENTURION CLUB"),
+    250000: ("veteran", "VETERAN CLUB"),
+    500000: ("elite", "ELITE CLUB"),
+    750000: ("horizon-elite", "HORIZON ELITE CLUB"),
+    1000000: ("immortal", "IMMORTAL CLUB"),
+}
+
+
+def current_club(earned):
+    return max((threshold for threshold in earned if threshold in CLUBS), default=None)
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS driver_card_preferences (
     discord_user_id BIGINT PRIMARY KEY,
@@ -284,13 +298,20 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
                 shield(miles,(x,455,111,166))
                 plate(x+4,624,104,threshold_key(miles).upper())
         panel((714,463,907,539))
-        detail("verified-driver-shield",(710,463,78,83))
-        text(795,483,"LINKED",16,width=103)
-        text(795,504,"A&T DRIVER",16,width=103)
-        if 40000 in profile.get("permanent_achievements",()):
-            detail("mileage-club-medallion",(705,547,94,76))
-            metal(735,623,"40K",17,width=60)
-            text(714,641,"MILEAGE CLUB",10,width=96)
+        detail("verified-driver-shield",(722,470,62,62))
+        text(793,480,"LINKED",16,width=104)
+        text(793,502,"A&T DRIVER",16,width=104)
+        club = current_club(profile.get("permanent_achievements",()))
+        if club is not None:
+            insignia,label = CLUBS[club]
+            path = ART/"design-details/mileage-club-medallion.webp" if club==40000 else ART/f"insignias/{insignia}.webp"
+            with Image.open(path) as source:
+                medal=source.convert("RGBA")
+                if medal.getbbox():
+                    medal=medal.crop(medal.getbbox())
+            image(medal,(714,547,88,73))
+            metal(729,623,threshold_key(club).upper(),17,width=74)
+            text(708,641,label,10,width=111)
         progress(841,557,232)
         # Compact numeric progress fills the remaining lower-right safe area.
     else:

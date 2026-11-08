@@ -66,3 +66,11 @@ async def test_account_name_refresh_only_updates_linked_ids_and_retains_failed_n
     assert calls[1].args[1:]==(42,123,'New TB Name')
     assert calls[2].args[1:]==(42,'trucky','456','New Trucky Name')
     assert all('verified_at' not in c.args[0] and 'real_miles' not in c.args[0] for c in calls)
+
+
+def test_front_club_advances_to_highest_earned_milestone():
+    assert tachograph.current_club(()) is None
+    assert tachograph.current_club((40000,)) == 40000
+    assert tachograph.current_club((100000,40000)) == 100000
+    assert tachograph.current_club((40000,100000,250000)) == 250000
+    assert tachograph.current_club(tuple(tachograph.CLUBS)) == 1000000
