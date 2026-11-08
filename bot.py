@@ -13,6 +13,8 @@ from zoneinfo import ZoneInfo
 import tachograph
 import race_progression
 import steam_profile_names
+import onboarding_flow
+import account_unlink
 
 import aiohttp
 import asyncpg
@@ -642,11 +644,8 @@ async def refresh_unified_registration(discord_user_id):
             return
         if channel is None or getattr(getattr(channel, "guild", None), "id", None) != GUILD_ID:
             raise ValueError("Registration channel unavailable in configured guild")
-        embed = discord.Embed(
-            title="A&T — Driver Registration",
-            description=registration.next_steps(view),
-            colour=discord.Colour.blue(),
-        )
+        embed = onboarding_flow.panel("📋 YOUR SETUP • Live account status",
+            "Your progress updates here automatically. Follow the latest numbered step in this room.")
         steam = (f"[Confirmed Steam account](https://steamcommunity.com/profiles/{view['steam_id64']})"
                  if view["steam_id64"] else "Use !linksteam")
         embed.add_field(name="Steam — " + view["steam_status"], value=steam, inline=False)
@@ -665,11 +664,26 @@ async def refresh_unified_registration(discord_user_id):
             except discord.NotFound:
                 pass
         if message is None:
-            message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await onboarding_flow.advance(db_pool,channel,discord_user_id,view)
+            message = await onboarding_flow.send(channel,embed)
             async with db_pool.acquire() as conn:
                 await conn.execute("UPDATE unified_registration_sessions SET verification_message_id=$2 WHERE discord_user_id=$1", discord_user_id, message.id)
         else:
             await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await onboarding_flow.advance(db_pool,channel,discord_user_id,view)
+
+
+async def notify_steam_failure(discord_user_id,reason,event_key):
+    import unified_registration_workflow_v2 as registration
+    if db_pool is None or not registration.enabled():
+        return
+    view=await registration.state(db_pool,discord_user_id)
+    session=view.get("session")
+    if not session or session["status"]=="cancelled" or view["steam_status"]=="Verified":
+        return
+    channel=bot.get_channel(session["verification_channel_id"])
+    if channel and channel.guild.id==GUILD_ID:
+        await onboarding_flow.failure(db_pool,channel,discord_user_id,reason,event_key)
 
 
 async def audit_registration_account(ctx, provider, outcome, account_id=None, display_name=None):
@@ -706,7 +720,10 @@ async def link_registration_provider(ctx, provider, account_id):
         return
     if not account_id or not account_id.isascii() or not account_id.isdecimal() or len(account_id) > 30 or int(account_id) <= 0:
         await audit_registration_account(ctx, provider, "invalid_id")
-        await ctx.reply("Supply your numeric provider profile ID, not a username.", mention_author=False)
+        await ctx.reply(embed=onboarding_flow.panel("⚠️ CHECK YOUR PROFILE NUMBER",
+            "Use the **number** from your provider profile URL. Do not enter your username.\n\n"
+            + ("Example only: **`!trucksbook 123456`**" if provider=="trucksbook" else "Example only: **`!trucky 209123`**")
+            + "\nReplace the example number with your own profile ID.","error"),mention_author=False)
         return
     await audit_registration_account(ctx, provider, "attempt", account_id)
     try:
@@ -724,19 +741,20 @@ async def link_registration_provider(ctx, provider, account_id):
                 await ctx.reply("Trucky could not confirm this account's active A&T membership.", mention_author=False)
                 return
         await registration.link_supported_account(db_pool, ctx.author.id, provider, str(int(account_id)), canonical_name)
-        await refresh_unified_registration(ctx.author.id)
     except asyncpg.UniqueViolationError:
         await audit_registration_account(ctx, provider, "account_conflict", account_id)
         await ctx.reply('This provider account is already recorded for another driver. Contact management if the link is incorrect.', mention_author=False)
         return
     except ValueError as error:
         await audit_registration_account(ctx, provider, "link_rejected", account_id)
-        await ctx.reply(str(error), mention_author=False)
+        await ctx.reply(embed=onboarding_flow.panel("⚠️ ACCOUNT NOT CONNECTED",str(error)+"\n\nCheck your account ID, then follow the latest numbered step in this room.","error"),mention_author=False)
         return
     except Exception as error:
         await audit_registration_account(ctx, provider, "provider_unavailable", account_id)
         print(f"REGISTRATION PROVIDER LINK FAILED: {type(error).__name__}", flush=True)
-        await ctx.reply("Account linking is temporarily unavailable. Existing accounts are unchanged; retry /register to refresh status.", mention_author=False)
+        await ctx.reply(embed=onboarding_flow.panel("⚠️ TRACKER NOT CONNECTED • Try again",
+            "The provider could not be reached. Your saved accounts have not changed.\n\n"
+            + ("Try **`!trucksbook YOUR_ID`** again shortly." if provider=="trucksbook" else "Try **`!trucky YOUR_ID`** again shortly."),"error"),mention_author=False)
         return
     await audit_registration_account(ctx, provider, "linked", account_id, canonical_name)
     label = "TrucksBook" if provider == "trucksbook" else "Trucky"
@@ -752,6 +770,7 @@ async def link_registration_provider(ctx, provider, account_id):
     confirmation.add_field(name="Account status", value="Linked — ownership is not independently verified by this lookup", inline=False)
     confirmation.set_footer(text="Existing driver history retained. No mileage or roles awarded. If this is the wrong account, contact management before confirming.")
     await ctx.reply(embed=confirmation, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+    await refresh_unified_registration(ctx.author.id)
 
 
 async def start_public_integrations():
@@ -772,7 +791,8 @@ async def start_public_integrations():
         runner = web.AppRunner(
             trucky_staging_receiver_v2.create_integrations_app(
                 db_pool, on_trucky_linked=on_trucky_linked,
-                on_steam_verified=refresh_unified_registration
+                on_steam_verified=refresh_unified_registration,
+                on_steam_failed=notify_steam_failure
             ),
             access_log=None,
         )
@@ -1045,6 +1065,8 @@ async def setup_database():
         await connection.execute(tachograph.SCHEMA)
         await connection.execute(race_progression.SCHEMA)
         await connection.execute(steam_profile_names.SCHEMA)
+        await connection.execute(onboarding_flow.SCHEMA)
+        await connection.execute(account_unlink.SCHEMA)
     db_pool = pool
 
     print("POSTGRESQL CONNECTED")
@@ -1053,6 +1075,7 @@ async def setup_database():
     print("Permanent achievements and Hall of Fame tables ready.")
     print("Automated driver leaderboard tables ready.")
     print("Tachograph preferences and separate Race career tables ready.", flush=True)
+    print("STAGED ONBOARDING AND MANAGEMENT UNLINK SCHEMA READY",flush=True)
 
 
 # --------------------------------------------------
@@ -1245,7 +1268,9 @@ async def find_driver_link(
         return None
     for mapped_name, mapped_user_id in DRIVER_MAPPINGS.items():
         if normalise_trucksbook_name(mapped_name).casefold() == normalised_name.casefold():
-            return mapped_user_id
+            async with db_pool.acquire() as connection:
+                detached=await connection.fetchval("SELECT EXISTS(SELECT 1 FROM driver_account_unlink_audit WHERE discord_user_id=$1 AND 'trucksbook'=ANY(providers))",mapped_user_id)
+            return None if detached else mapped_user_id
     return None
 
 
@@ -6568,7 +6593,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         """
         SELECT
             COALESCE(tb.provider_display_name,links.trucksbook_name,tr.provider_display_name,'A&T Driver') AS trucksbook_name,
-            links.discord_user_id IS NOT NULL AS legacy_linked,
+            (links.discord_user_id IS NOT NULL AND links.trucksbook_name<>('__unlinked_driver_'||links.discord_user_id::text||'__')) AS legacy_linked,
             tr.provider_account_id AS trucky_account_id,
             tr.provider_display_name AS trucky_display_name,
             tr.verified_at IS NOT NULL AS trucky_verified,
@@ -6918,6 +6943,96 @@ async def save_card_country(ctx, country: str):
 @bot.hybrid_command(name="country", description="Choose the country displayed on your driver card")
 async def card_country(ctx, *, country: str):
     await save_card_country(ctx, country)
+
+
+class UnlinkConfirmation(discord.ui.View):
+    def __init__(self,actor_id,user_id,scope,fingerprint):
+        super().__init__(timeout=120)
+        self.actor_id,self.user_id,self.scope,self.fingerprint=actor_id,user_id,scope,fingerprint
+
+    async def interaction_check(self,interaction):
+        if interaction.user.id!=self.actor_id or interaction.guild_id!=GUILD_ID or not account_unlink.allowed(interaction.user,VERIFICATION_STAFF_ROLE_IDS):
+            await interaction.response.send_message("Only the requesting A&T manager can confirm this action.",ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm unlink",style=discord.ButtonStyle.danger)
+    async def confirm_unlink(self,interaction,button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await account_unlink.unlink(db_pool,self.user_id,self.actor_id,self.scope,self.fingerprint)
+        except ValueError as error:
+            await interaction.edit_original_response(content=str(error),embed=None,view=None)
+            self.stop()
+            return
+        except Exception as error:
+            print(f"ACCOUNT UNLINK FAILED: {type(error).__name__}",flush=True)
+            await interaction.edit_original_response(content="Unable to unlink the accounts. No partial changes were saved. Try again shortly.",embed=None,view=None)
+            self.stop()
+            return
+        await interaction.edit_original_response(content=f"Accounts unlinked for <@{self.user_id}>. Earned mileage, jobs, badges and truck/flag preferences are retained. The driver can use /register to reconnect.",embed=None,view=None,allowed_mentions=discord.AllowedMentions.none())
+        self.stop()
+        try:
+            await log_verification(interaction.guild,"🔗 Management account unlink",f"Manager: <@{self.actor_id}>\nDriver: <@{self.user_id}>\nAccount selection: **{self.scope}**\nCareer history retained. Audit snapshot saved.")
+            await refresh_unified_registration(self.user_id)
+        except Exception as error:
+            print(f"UNLINK NOTICE PENDING: {type(error).__name__}",flush=True)
+
+    @discord.ui.button(label="Cancel",style=discord.ButtonStyle.secondary)
+    async def cancel_unlink(self,interaction,button):
+        await interaction.response.edit_message(content="Unlink cancelled. Accounts are unchanged.",embed=None,view=None)
+        self.stop()
+
+
+@bot.hybrid_command(name="unlink",description="Management only: unlink a driver's selected accounts while retaining career history")
+@discord.app_commands.default_permissions(manage_guild=True)
+@discord.app_commands.choices(account=[
+    discord.app_commands.Choice(name="TrucksBook",value="trucksbook"),
+    discord.app_commands.Choice(name="Trucky",value="trucky"),
+    discord.app_commands.Choice(name="Steam + tracking accounts",value="steam"),
+    discord.app_commands.Choice(name="All linked accounts",value="all")])
+async def unlink_driver(ctx,driver:str,account:str):
+    if ctx.guild is None or ctx.guild.id!=GUILD_ID or db_pool is None:
+        return
+    if not account_unlink.allowed(ctx.author,VERIFICATION_STAFF_ROLE_IDS):
+        await ctx.reply("This command is restricted to A&T owners and Management.",ephemeral=True,mention_author=False)
+        return
+    if ctx.interaction is None:
+        await ctx.reply("Use the /unlink slash command so the account review stays private.",mention_author=False)
+        return
+    scope=account.casefold()
+    if scope not in account_unlink.SCOPES:
+        await ctx.reply("Choose TrucksBook, Trucky, Steam + tracking accounts, or All linked accounts.",ephemeral=True,mention_author=False)
+        return
+    await ctx.defer(ephemeral=True)
+    try:
+        async with db_pool.acquire() as connection:
+            user_id=await account_unlink.resolve_target(connection,ctx.guild,driver)
+            data,fingerprint,_=await account_unlink.snapshot(connection,user_id)
+    except ValueError as error:
+        await ctx.reply(str(error),ephemeral=True,mention_author=False)
+        return
+    lines=[f"**Driver:** <@{user_id}> (`{user_id}`)",f"**Account selection:** {scope}"]
+    for row in data['links']:
+        lines.append(f"{row['provider'].title()}: {discord.utils.escape_markdown(row.get('provider_display_name') or 'Linked')} (`{row['provider_account_id']}`)")
+    if data['legacy'] and data['legacy']['trucksbook_user_id']:
+        lines.append(f"Legacy TrucksBook: `{data['legacy']['trucksbook_user_id']}`")
+    if data['steam']:
+        lines.append(f"Steam: `{data['steam']['steam_id64']}`")
+    lines.append("\nEarned mileage, jobs, achievements and card preferences stay saved.")
+    if scope in {'steam','all'}:
+        lines.append("Steam unlinking also disconnects both tracking providers. The driver must verify/link again.")
+    await ctx.reply(embed=onboarding_flow.panel("🔗 REVIEW ACCOUNT UNLINK","\n".join(lines)),
+        view=UnlinkConfirmation(ctx.author.id,user_id,scope,fingerprint),ephemeral=True,mention_author=False)
+
+
+@unlink_driver.autocomplete("driver")
+async def unlink_driver_autocomplete(interaction,current):
+    if interaction.guild_id!=GUILD_ID or not account_unlink.allowed(interaction.user,VERIFICATION_STAFF_ROLE_IDS): return []
+    query=current.casefold().strip().lstrip('@')
+    return [discord.app_commands.Choice(name=f"{member.display_name} (@{member.name})"[:100],value=str(member.id))
+            for member in interaction.guild.members if not member.bot
+            and (query in member.display_name.casefold() or query in member.name.casefold() or query in str(member.id))][:25]
 
 
 @bot.hybrid_group(name="change", invoke_without_command=True, description="Change your driver card settings")
@@ -7494,6 +7609,7 @@ async def register_driver(ctx):
                 manage_channels=True,
                 manage_messages=True,
                 embed_links=True,
+                attach_files=True,
             ),
     }
 
@@ -7736,12 +7852,14 @@ async def link_steam_for_registration(ctx):
         await ctx.reply("Could not create a secure Steam login. Please try later.", mention_author=False)
         return
     await refresh_unified_registration(ctx.author.id)
-    await ctx.reply(
-        "🔐 **Verify your Steam account**\n"
-        f"Sign in with Steam using this one-time link (expires in 10 minutes):\n{url}\n"
-        "Never share this link. Linking Steam alone does not approve a tracking provider.",
-        mention_author=False,
-    )
+    view=discord.ui.View()
+    view.add_item(discord.ui.Button(label="Sign in with Steam",url=url,style=discord.ButtonStyle.link))
+    await ctx.reply(embed=onboarding_flow.panel("🔐 CONNECT STEAM • Your secure sign-in",
+        "**1.** Press **Sign in with Steam** below.\n"
+        "**2.** Sign in to your own Steam account.\n"
+        "**3.** Return here — the bot will show the result and your next step.\n\n"
+        "This private link expires in **10 minutes**. Do not share it."),view=view,mention_author=False)
+
 
 
 @bot.command(name="truckyidentitycheck")
@@ -9215,7 +9333,7 @@ async def confirm_verification(
             await ctx.reply(registration.next_steps(view), mention_author=False)
             return
         await audit_registration_account(ctx, "registration", "confirmed")
-        await ctx.reply("✅ Registration complete. Your linked accounts and existing driver history are retained. This private channel closes in **30 seconds**. No mileage or roles were awarded.", mention_author=False)
+        await onboarding_flow.send(ctx.channel,onboarding_flow.completion())
         await asyncio.sleep(30)
         # Recheck after the grace period: cancellation/suspension or a different
         # registration channel must not cause deletion of the wrong channel.
