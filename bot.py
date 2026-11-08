@@ -6922,12 +6922,40 @@ async def card_country(ctx, *, country: str):
 
 @bot.hybrid_group(name="change", invoke_without_command=True, description="Change your driver card settings")
 async def card_change(ctx):
-    await ctx.reply("Use /change country and enter your country.", mention_author=False)
+    await ctx.reply("Use /change country or /change truck to update your driver card.", mention_author=False)
 
 
 @card_change.command(name="country", description="Choose the country displayed on your driver card")
 async def change_country(ctx, *, country: str):
     await save_card_country(ctx, country)
+
+
+@card_change.command(name="truck", description="Choose the fleet truck displayed on your driver card")
+async def change_truck(ctx, *, truck: str):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    key=tachograph.resolve_truck(truck)
+    if not key:
+        await ctx.reply("Choose a truck from the /change truck suggestions. Use its full fleet name.", mention_author=False)
+        return
+    if ctx.interaction:
+        await ctx.defer(ephemeral=True)
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            if await fetch_driver_profile_stats(connection,ctx.author.id) is None:
+                await ctx.reply("Complete driver registration first.",mention_author=False)
+                return
+            await tachograph.appearance(connection,ctx.author.id)
+            await connection.execute("UPDATE driver_card_preferences SET truck_key=$2 WHERE discord_user_id=$1",ctx.author.id,key)
+    await ctx.reply(f"Card truck saved: **{tachograph.available_trucks()[key]}**. Use !profile to view it.",mention_author=False)
+
+
+@change_truck.autocomplete("truck")
+async def truck_autocomplete(interaction,current):
+    query=current.casefold().strip()
+    return [discord.app_commands.Choice(name=label,value=key)
+            for key,label in tachograph.available_trucks().items()
+            if query in label.casefold() or query in key.casefold()][:25]
 
 
 @change_country.autocomplete("country")

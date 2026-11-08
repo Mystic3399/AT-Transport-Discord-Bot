@@ -26,3 +26,8 @@ Slash commands retry every minute until successful. Global duplicate removal res
 
 
 Additional presentation corrections: the front displays the highest permanently earned club (40K Mileage, 100K Centurion, 250K Veteran, 500K Elite, 750K Horizon Elite, 1M Immortal). Its driver shield is contained inside the status panel. Back Career Record values and progress totals are centred. Permanent achievements use six separate 74-pixel slots with fitted insignias, clipped glow and centred labels. All 22 locked shields derive from their complete unlocked silhouettes, with grayscale treatment and a separate padlock; they retain the full outer frame. The Steam display-name cache is additive and matched to the currently verified Steam ID on every read; name refreshes cannot relink or reverify accounts.
+
+
+Driver truck preferences: /change truck (with fleet-name autocomplete) and !change truck Volvo FH6 let registered drivers select one of the 18 installed fleet portraits. The command updates only the invoking driver's truck_key; country, career data and mileage are untouched. Random balanced allocation remains the initial default. A chosen truck is retained across refreshes, restarts and membership changes until the driver explicitly chooses another truck. Invalid names cannot become asset paths.
+
+The front club insignia now has a dedicated dark plaque, cyan halo and brighter fitted artwork. Its mileage and club labels are centred directly beneath the emblem within the same plaque.

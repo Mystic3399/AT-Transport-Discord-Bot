@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, ImageChops
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, ImageChops, ImageEnhance
 
 ROOT = Path(__file__).resolve().parent
 ART = ROOT / "assets/tachograph"
@@ -44,6 +44,42 @@ CREATE TABLE IF NOT EXISTS driver_card_preferences (
 def countries():
     with ZipFile(FLAGS) as archive:
         return json.loads(archive.read("countries.json"))
+
+
+TRUCK_LABELS = {
+    "scania-s-r-next-gen":"Scania S/R Next Gen",
+    "mercedes-actros-mp6":"Mercedes-Benz Actros MP6",
+    "man-euro-6":"MAN Euro 6",
+    "scania-t-cab":"Scania T-Cab",
+    "scania-next-gen-torpedo":"Scania Next Gen Torpedo",
+    "scania-s-longline":"Scania S Longline",
+    "scania-s-wrecker":"Scania S Wrecker",
+    "daf-xf":"DAF XF",
+    "daf-xg-plus":"DAF XG+",
+    "daf-wrecker":"DAF Wrecker",
+    "volvo-fh6":"Volvo FH6",
+    "mercedes-actros-mp5":"Mercedes-Benz Actros MP5",
+    "renault-t":"Renault T",
+    "kenworth-w900-highway-killer":"Kenworth W900 — Jon Ruda Highway Killer",
+    "volvo-vnl-2025":"Volvo VNL 2025",
+    "western-star-57x":"Western Star 57X",
+    "scania-t-cab-longline":"Scania T-Cab Longline",
+    "freightliner-cascadia":"Freightliner Cascadia",
+}
+
+
+def available_trucks():
+    return {key:TRUCK_LABELS.get(key,key.replace("-"," ").title()) for key in truck_keys()}
+
+
+def resolve_truck(value):
+    import re
+    normalise=lambda text: re.sub(r"[^a-z0-9]","",text.casefold())
+    query=normalise(value)
+    for key,label in available_trucks().items():
+        if query in {normalise(key),normalise(label)}:
+            return key
+    return ""
 
 
 def truck_keys():
@@ -321,13 +357,25 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         if club is not None:
             insignia,label = CLUBS[club]
             path = ART/"design-details/mileage-club-medallion.webp" if club==40000 else ART/f"insignias/{insignia}.webp"
+            panel((706,545,822,654))
+            glow=Image.new("RGBA",canvas.size)
+            gd=ImageDraw.Draw(glow)
+            gd.ellipse((716,551,812,626),fill=(24,194,255,110))
+            canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(6)))
+            draw.ellipse((725,552,803,625),fill="#103047",outline="#418ba7",width=1)
             with Image.open(path) as source:
                 medal=source.convert("RGBA")
-                if medal.getbbox():
-                    medal=medal.crop(medal.getbbox())
-            image(medal,(714,547,88,73))
-            metal(729,623,threshold_key(club).upper(),17,width=74)
-            text(708,641,label,10,width=111)
+                bounds=medal.getchannel("A").point(lambda value:255 if value>55 else 0).getbbox()
+                if bounds:
+                    medal=medal.crop(bounds)
+            medal=ImageEnhance.Brightness(medal).enhance(1.2)
+            image(medal,(713,549,102,77))
+            centred_metal(711,625,threshold_key(club).upper(),17,106)
+            label_size=10
+            while label_size>8 and draw.textlength(label,font=font(label_size))>106:
+                label_size-=1
+            label_width=draw.textlength(label,font=font(label_size))
+            text(764-label_width/2,641,label,label_size,width=106)
         progress(841,557,232)
         # Compact numeric progress fills the remaining lower-right safe area.
     else:
