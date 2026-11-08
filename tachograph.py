@@ -308,8 +308,14 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             original=source.convert("RGBA")
             portrait=ImageOps.fit(original,(278,364),Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(16))
             portrait=ImageEnhance.Brightness(portrait).enhance(0.45)
-            fitted=ImageOps.contain(original,(445,364),Image.Resampling.LANCZOS)
-            portrait.alpha_composite(fitted,((278-fitted.width)//2,(364-fitted.height)//2))
+            # Portrait framing: fill most of the height and favour the cab,
+            # while retaining the original aspect ratio and a little headroom.
+            scale=326/original.height
+            fitted=original.resize((round(original.width*scale),326),Image.Resampling.LANCZOS)
+            focal_x=round(fitted.width*0.55)
+            left=max(0,min(fitted.width-278,focal_x-139))
+            fitted=fitted.crop((left,0,min(left+278,fitted.width),326))
+            portrait.alpha_composite(fitted,((278-fitted.width)//2,19))
         canvas.alpha_composite(portrait,(40,272))
         text(345,183,"DRIVER NAME",15,CYAN)
         metal(345,204,name,36,width=239)
