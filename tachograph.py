@@ -308,7 +308,7 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             original=source.convert("RGBA")
             portrait=ImageOps.fit(original,(278,364),Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(16))
             portrait=ImageEnhance.Brightness(portrait).enhance(0.45)
-            fitted=ImageOps.contain(original,(278,364),Image.Resampling.LANCZOS)
+            fitted=ImageOps.contain(original,(445,364),Image.Resampling.LANCZOS)
             portrait.alpha_composite(fitted,((278-fitted.width)//2,(364-fitted.height)//2))
         canvas.alpha_composite(portrait,(40,272))
         text(345,183,"DRIVER NAME",15,CYAN)
