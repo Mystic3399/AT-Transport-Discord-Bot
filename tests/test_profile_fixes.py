@@ -56,6 +56,7 @@ async def test_account_name_refresh_only_updates_linked_ids_and_retains_failed_n
     conn.transaction=lambda:Context()
     ns=dict(tasks=tasks,db_pool=SimpleNamespace(acquire=lambda:Context()),
         os=SimpleNamespace(getenv=lambda k:None),bot=SimpleNamespace(wait_until_ready=AsyncMock()),
+        steam_profile_names=SimpleNamespace(refresh=AsyncMock(return_value=1)),
         trucky_membership_adapter=SimpleNamespace(fetch_current_member_names=AsyncMock(return_value={'456':'New Trucky Name'})),
         fetch_trucksbook_profile=AsyncMock(side_effect=[dict(success=True,trucksbook_name='New TB Name'),dict(success=False)]))
     exec(compile(ast.Module(body=nodes,type_ignores=[]),'bot.py','exec'),ns)
@@ -74,3 +75,11 @@ def test_front_club_advances_to_highest_earned_milestone():
     assert tachograph.current_club((100000,40000)) == 100000
     assert tachograph.current_club((40000,100000,250000)) == 250000
     assert tachograph.current_club(tuple(tachograph.CLUBS)) == 1000000
+
+
+def test_every_locked_badge_retains_its_complete_unlocked_silhouette():
+    from PIL import ImageChops
+    for miles in tachograph.MILES:
+        earned=tachograph.badge(miles,False).getchannel('A')
+        locked=tachograph.badge(miles,True).getchannel('A')
+        assert ImageChops.subtract(earned,locked).getbbox() is None, miles

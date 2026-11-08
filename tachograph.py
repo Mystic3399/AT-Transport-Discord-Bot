@@ -81,7 +81,7 @@ def threshold_key(miles):
 
 @lru_cache(maxsize=100)
 def badge(miles, locked):
-    path = f"{'locked' if locked else 'unlocked'}/{threshold_key(miles)}.webp"
+    path = f"unlocked/{threshold_key(miles)}.webp"
     with ZipFile(SHIELDS) as archive:
         with Image.open(BytesIO(archive.read(path))) as source:
             layer = source.convert("RGBA")
@@ -89,6 +89,15 @@ def badge(miles, locked):
             red, green, blue, alpha = layer.split()
             brightness = ImageChops.lighter(ImageChops.lighter(red,green),blue)
             layer.putalpha(ImageChops.multiply(alpha,brightness.point(lambda value: min(255,value*12))))
+            if locked:
+                # Derive the locked state from the complete unlocked silhouette.
+                # The separate lock overlay must never replace its shield frame.
+                alpha=layer.getchannel("A")
+                layer=ImageOps.grayscale(layer).point(lambda value:min(255,int(value*1.08)+8)).convert("RGBA")
+                layer.putalpha(alpha)
+                with Image.open(ART/"design-details/small-lock.webp") as source:
+                    lock=ImageOps.contain(source.convert("RGBA"),(30,36),Image.Resampling.LANCZOS)
+                layer.alpha_composite(lock,(layer.width-lock.width-2,layer.height-lock.height-2))
             return layer
 
 
@@ -142,6 +151,13 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
                 gd.line((bounds[0],line,bounds[2],line),fill=(shade,min(255,shade+12),min(255,shade+22),255))
             gradient.putalpha(mask)
             canvas.alpha_composite(gradient)
+
+    def centred_metal(x,y,value,size,width):
+        value=str(value).upper()
+        while size>11 and draw.textlength(value,font=font(size))>width:
+            size-=1
+        left=x+max(0,(width-draw.textlength(value,font=font(size)))/2)
+        metal(left,y,value,size,width=width)
 
     def panel(box):
         overlay=Image.new("RGBA",canvas.size)
@@ -269,7 +285,7 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         accounts={item["provider"]:item for item in profile.get("linked_accounts",[])}
         accounts["Discord"]={"name":name,"status":"Linked"}
         if profile.get("steam_id64"):
-            accounts["Steam"]={"name":profile["steam_id64"],"status":"Verified"}
+            accounts["Steam"]={"name":profile.get("steam_display_name") or "Name unavailable","status":"Verified"}
         for i,(service,icon) in enumerate((("Steam","steam"),("Discord","discord"),("TrucksBook","trucksbook"),("Trucky","trucky"),("Drivers Hub","drivers-hub"))):
             y=205+i*33
             if i:
@@ -333,17 +349,17 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         fraction=1 if next_rank is None else min(real/next_rank,1)
         for y in range(366,375):
             draw.line((294,y,294+int(188*fraction),y),fill=(54,204-(y-366)*7,251))
-        clear((318,379,482,401))
-        metal(321,381,f"{real:,} / {next_rank:,}" if next_rank is not None else f"{real:,} MI",15,width=171)
-        for x,width,key in (
-            (49,83,"jobs_completed"),(153,100,"average_job_distance"),
-            (274,112,"longest_job_distance"),(403,81,"weekly_wins")
+        clear((285,379,494,401))
+        centred_metal(290,381,f"{real:,} / {next_rank:,}" if next_rank is not None else f"{real:,} MI",15,198)
+        for x,width,key,centre in (
+            (49,83,"jobs_completed",91),(153,100,"average_job_distance",199),
+            (274,112,"longest_job_distance",320),(403,81,"weekly_wins",438)
         ):
             clear((x,443,x+width,468))
             value=f"{int(profile.get(key) or 0):,}"
             if key in {"average_job_distance","longest_job_distance"}:
                 value+=" MI"
-            metal(x+7,445,value,20,width=width-9)
+            centred_metal(centre-width/2,445,value,20,width)
         ranks = (
             "NEW DRIVER","ROAD RUNNER","DISTANCE DRIVER","AURORA DRIVER",
             "WOLF PACK DRIVER","VIKING HAULER","ELITE HAULER","A&T VETERAN",
@@ -375,28 +391,30 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             value=threshold_key(miles).upper()
             value_width=draw.textlength(value,font=font(14))
             metal(x+(width-value_width)//2,y+98,value,14,width=width-8)
+        clear((42,514,494,601))
         for i,miles in enumerate((40000,100000,250000,500000,750000,1000000)):
-            x=43+i*74
-            clear((x,514,x+71,578))
+            x=44+i*75
             earned=miles in profile.get("permanent_achievements",())
             insignia={40000:"mileage-club-40k",100000:"centurion",250000:"veteran",
                       500000:"elite",750000:"horizon-elite",1000000:"immortal"}[miles]
             insignia_path = ART/"design-details/mileage-club-medallion.webp" if miles==40000 else ART/f"insignias/{insignia}.webp"
             with Image.open(insignia_path) as source:
                 medal=source.convert("RGBA")
-                if medal.getbbox():
-                    medal=medal.crop(medal.getbbox())
+                bounds=medal.getchannel("A").point(lambda value:255 if value>40 else 0).getbbox()
+                if bounds:
+                    medal=medal.crop(bounds)
             if not earned:
                 alpha=medal.getchannel("A")
                 medal=ImageOps.grayscale(medal).convert("RGBA")
                 medal.putalpha(alpha)
             else:
-                glow=Image.new("RGBA",canvas.size)
-                ImageDraw.Draw(glow).ellipse((x+6,521,x+65,574),fill=(29,199,255,110))
-                canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(5)))
-            image(medal,(x+2,515,67,63))
+                glow=Image.new("RGBA",(74,87))
+                ImageDraw.Draw(glow).ellipse((12,5,62,63),fill=(29,199,255,105))
+                canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(4)),(x,514))
+            image(medal,(x+9,519,56,60))
             if not earned:
-                detail("small-lock",(x+26,537,18,22))
+                detail("small-lock",(x+28,539,18,22))
+            centred_metal(x,582,threshold_key(miles).upper(),15,74)
         tier=profile.get("hall_of_fame_tier")
         clear((161,606,451,634))
         text(164,613,"HALL OF FAME",13,width=116)

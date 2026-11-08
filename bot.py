@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 import tachograph
 import race_progression
+import steam_profile_names
 
 import aiohttp
 import asyncpg
@@ -1043,6 +1044,7 @@ async def setup_database():
     async with pool.acquire() as connection:
         await connection.execute(tachograph.SCHEMA)
         await connection.execute(race_progression.SCHEMA)
+        await connection.execute(steam_profile_names.SCHEMA)
     db_pool = pool
 
     print("POSTGRESQL CONNECTED")
@@ -6717,6 +6719,7 @@ async def refresh_card_account_names():
     if db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
         return
     try:
+        steam_count = await steam_profile_names.refresh(db_pool)
         async with db_pool.acquire() as conn:
             rows = await conn.fetch("""SELECT discord_user_id,provider,provider_account_id FROM unified_provider_links
                 UNION SELECT discord_user_id,'trucksbook',trucksbook_user_id::text FROM driver_links
@@ -6750,7 +6753,7 @@ async def refresh_card_account_names():
                             WHERE discord_user_id=$1 AND trucksbook_user_id=$2""",
                             row["discord_user_id"],int(account),name.strip())
             updated += 1
-        print(f"CARD ACCOUNT NAMES REFRESHED: {updated} linked accounts", flush=True)
+        print(f"CARD ACCOUNT NAMES REFRESHED: {updated} tracking accounts; {steam_count} Steam names", flush=True)
     except Exception as error:
         print(f"CARD NAME REFRESH RETRY: {type(error).__name__}", flush=True)
 
@@ -6829,6 +6832,10 @@ async def make_tachograph(member, profile, side):
             profile["steam_id64"] = await connection.fetchval(
                 "SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1",
                 member.id,
+            )
+            profile["steam_display_name"] = await connection.fetchval(
+                "SELECT display_name FROM driver_card_steam_names WHERE discord_user_id=$1 AND steam_id64=$2",
+                member.id, profile["steam_id64"],
             )
     role = tachograph.company_role(member, GUILD_ID)
     return await asyncio.to_thread(
