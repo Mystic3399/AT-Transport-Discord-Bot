@@ -487,10 +487,11 @@ def company_role(member, guild_id=None):
     priorities = (
         (("co owner", "chief operator", "chief operating"), "CO-OWNER / DRIVER"),
         (("owner", "chief executive", "founder"), "OWNER / DRIVER"),
+        (("lead it server support",), "LEAD IT SERVER SUPPORT / DRIVER"),
         (("lead it support", "it support lead", "head of it"), "LEAD IT SUPPORT / DRIVER"),
         (("it support",), "IT SUPPORT / DRIVER"),
         (("recruitment manager", "recruitment management"), "RECRUITMENT MANAGER / DRIVER"),
-        (("event manager", "events manager"), "EVENT MANAGER / DRIVER"),
+        (("event manager", "events manager"), "EVENTS MANAGER / DRIVER"),
         (("server manager",), "SERVER MANAGER / DRIVER"),
         (("night shift operations manager", "night shift manager"), "NIGHT SHIFT MANAGER / DRIVER"),
         (("operations manager",), "OPERATIONS MANAGER / DRIVER"),
