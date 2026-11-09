@@ -17,6 +17,8 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
                  v2_real=0, race_miles=0, hall_real=None, hall_tier=None),
             dict(discord_user_id=4, legacy_real=101, baseline_real=100,
                  v2_real=Decimal("1.75"), race_miles=0, hall_real=None, hall_tier=None),
+            dict(discord_user_id=5, legacy_real=None, baseline_real=0,
+                 v2_real=Decimal("5"), race_miles=0, hall_real=None, hall_tier=None),
         ])
         rows = await inspect_driver_statistics(conn)
         self.assertEqual(rows[0]["issues"], [])
@@ -27,6 +29,8 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[2]["issues"], ["baseline_missing"])
         self.assertEqual(rows[3]["expected_real"], 101)
         self.assertEqual(rows[3]["issues"], [])
+        self.assertEqual(rows[4]["issues"], ["legacy_driver_progress_missing"])
+        self.assertIsNone(rows[4]["legacy_real"])
         conn.transaction.assert_called_once_with(
             readonly=True, isolation="repeatable_read")
         conn.execute.assert_not_called()
