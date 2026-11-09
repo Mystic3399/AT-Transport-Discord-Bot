@@ -3080,8 +3080,14 @@ async def replay_saved_trucksbook_jobs():
             # Historical replay must not assign money-like mileage using a
             # mutable display name or an unmapped provider account.
             try:
-                numeric_account = int(account)
-                if numeric_account <= 0:
+                # Reject floats, booleans, signs and whitespace rather than
+                # coercing them into a different driver's numeric account.
+                account_text = str(account)
+                if (not account_text.isascii() or not account_text.isdecimal()
+                        or len(account_text) > 19):
+                    raise ValueError('Invalid provider account')
+                numeric_account = int(account_text)
+                if numeric_account <= 0 or numeric_account > 9223372036854775807:
                     raise ValueError('Invalid provider account')
             except (TypeError, ValueError, OverflowError):
                 held += 1
