@@ -7,6 +7,25 @@ writes balances, achievements, roles or historical evidence.
 from decimal import Decimal
 
 
+def summarize_driver_statistics(audit):
+    """Summarize audit findings without hiding individual driver exceptions."""
+    if audit["status"] != "audited":
+        return {"status": audit["status"], "driver_count": 0,
+                "affected_drivers": 0, "issue_counts": {},
+                "missing_tables": audit.get("missing_tables", [])}
+    counts = {}
+    affected = 0
+    for driver in audit["drivers"]:
+        issues = set(driver["issues"])
+        if issues:
+            affected += 1
+        for issue in issues:
+            counts[issue] = counts.get(issue, 0) + 1
+    return {"status": "audited", "driver_count": len(audit["drivers"]),
+            "affected_drivers": affected, "issue_counts": counts,
+            "missing_tables": []}
+
+
 async def inspect_driver_statistics(conn):
     async with conn.transaction(readonly=True, isolation="repeatable_read"):
         required_tables = (
