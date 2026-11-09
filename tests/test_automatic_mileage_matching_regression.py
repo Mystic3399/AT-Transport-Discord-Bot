@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
 
-from automatic_linked_mileage_v2 import matches, same_route_window
+from automatic_linked_mileage_v2 import matches, same_route_window, trucksbook_comparison
 from unified_job_matching_v2 import is_candidate_duplicate
 
 
@@ -54,6 +54,24 @@ class AutomaticMileageMatchingTests(unittest.TestCase):
         tb = delivery("trucksbook", cargo="Machinery")
         self.assertTrue(same_route_window(tr, tb))
         self.assertFalse(is_candidate_duplicate(tr, tb, max_miles_delta=None))
+
+    def test_cancelled_and_unlisted_trucksbook_jobs_are_not_comparable(self):
+        for status in ("cancelled", "canceled", "unlisted"):
+            with self.subTest(status=status):
+                evidence = dict(delivery("trucksbook")["metadata"],
+                                stats_type="Real", unit="mi", distance=100,
+                                status=status,
+                                source_message_at="2026-11-01T12:00:00+00:00")
+                with self.assertRaises(ValueError):
+                    trucksbook_comparison("tb-1", 789, evidence, 100)
+
+    def test_completed_trucksbook_job_remains_comparable(self):
+        evidence = dict(delivery("trucksbook")["metadata"],
+                        stats_type="Real", unit="mi", distance=100,
+                        status="completed",
+                        source_message_at="2026-11-01T12:00:00+00:00")
+        result = trucksbook_comparison("tb-1", 789, evidence, 100)
+        self.assertEqual(result["miles"], Decimal("100"))
 
     def test_missing_route_evidence_fails_closed(self):
         tr = delivery("trucky")
