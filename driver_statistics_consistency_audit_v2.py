@@ -9,6 +9,21 @@ from decimal import Decimal
 
 async def inspect_driver_statistics(conn):
     async with conn.transaction(readonly=True, isolation="repeatable_read"):
+        required_tables = (
+            "driver_progress",
+            "unified_v2_production_mileage_baselines",
+            "unified_v2_production_mileage_totals",
+            "hall_of_fame",
+        )
+        missing = await conn.fetch("""
+            SELECT name FROM unnest($1::text[]) AS required(name)
+            WHERE to_regclass('public.' || name) IS NULL
+            ORDER BY name
+        """, list(required_tables))
+        if missing:
+            return {"status": "schema_missing",
+                    "missing_tables": [row["name"] for row in missing],
+                    "drivers": []}
         rows = await conn.fetch("""
             WITH driver_ids AS (
                 SELECT discord_user_id FROM driver_progress
@@ -56,4 +71,4 @@ async def inspect_driver_statistics(conn):
                 "hall_real": int(row["hall_real"]) if row["hall_real"] is not None else None,
                 "issues": issues,
             })
-        return results
+        return {"status": "audited", "missing_tables": [], "drivers": results}
