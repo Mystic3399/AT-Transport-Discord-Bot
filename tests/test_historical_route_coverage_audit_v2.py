@@ -48,6 +48,24 @@ class CoverageAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["conflicting_verified_versions"], 0)
         conn.execute.assert_not_called()
 
+    async def test_ineligible_and_mixed_versions_are_held(self):
+        conn = MagicMock()
+        cancelled = dict(evidence(), status="cancelled")
+        unlisted = dict(evidence(), status="unlisted")
+        too_fast = dict(evidence(), max_speed="112.01", max_speed_unit="mph")
+        conn.fetch = AsyncMock(return_value=[
+            dict(job_id="cancelled", accepted_distance=100, evidence=cancelled),
+            dict(job_id="unlisted", accepted_distance=100, evidence=unlisted),
+            dict(job_id="too-fast", accepted_distance=100, evidence=too_fast),
+            dict(job_id="mixed", accepted_distance=100, evidence=evidence()),
+            dict(job_id="mixed", accepted_distance=100, evidence=cancelled),
+        ])
+        result = await inspect_historical_route_coverage(conn, 789)
+        self.assertEqual(result["processed_real_jobs"], 4)
+        self.assertEqual(result["invalid_or_incomplete_evidence"], 4)
+        self.assertEqual(result["comparable_verified_jobs"], 0)
+        conn.execute.assert_not_called()
+
     async def test_empty_history_does_not_imply_credit_permission(self):
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=[])
