@@ -112,6 +112,19 @@ class ConflictingWebhookVersionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reason, "conflicting_route_evidence")
         conn.execute.assert_not_called()
 
+    async def test_overflow_in_webhook_evidence_is_held(self):
+        conn = MagicMock()
+        base = dict(delivery("trucksbook")["metadata"], stats_type="Real",
+                    unit="mi", distance=100, status="completed",
+                    source_message_at="2026-11-01T12:00:00+00:00")
+        conn.fetch = AsyncMock(return_value=[{"evidence": base}])
+        with patch("automatic_linked_mileage_v2.trucksbook_comparison",
+                   side_effect=OverflowError("unrepresentable timestamp")):
+            credit, reason = await reconcile_trucksbook(conn, "tb-1", 789, 100)
+        self.assertIsNone(credit)
+        self.assertEqual(reason, "route_evidence_pending")
+        conn.execute.assert_not_called()
+
     async def test_equivalent_versions_can_credit_unmatched_job(self):
         conn = MagicMock()
         base = dict(delivery("trucksbook")["metadata"], stats_type="Real",
