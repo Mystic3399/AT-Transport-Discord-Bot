@@ -35,3 +35,16 @@ If the result is `schema_missing`, stop and review the schema. If
 controlled access and reconcile evidence before release. This audit does not
 approve any mileage credit or replace a verified backup. Do not run it using
 the Railway production writer credential.
+
+
+### Verification evidence to retain before deployment
+
+Record the approved commit SHA, three green CI workflow run URLs,
+timestamped read-only audit summary (including zero affected drivers),
+database backup identifier and restoration check, production database
+fingerprint, and owner approval reference in the private release record.
+Keep database credentials and per-driver records out of GitHub Actions logs.
+A passing disposable PostgreSQL test is **not** proof that production
+data has been reconciled. If the production audit returns any findings,
+hold deployment and investigate the specific driver evidence; never
+automatically credit, zero, or overwrite mileage to satisfy the gate.
