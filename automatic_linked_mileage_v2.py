@@ -100,7 +100,9 @@ async def reconcile_trucky(conn, candidate):
             try:
                 comparisons.append(trucksbook_comparison(
                     job_id, user, version["evidence"], version["accepted_distance"]))
-            except (ValueError, TypeError, KeyError, InvalidOperation):
+            except (ValueError, TypeError, KeyError, InvalidOperation, OverflowError):
+                # Bad historical evidence cannot authorize an automatic match.
+                # Continue inspecting other jobs instead of aborting the sweep.
                 comparisons = []
                 break
         if comparisons:
