@@ -4,6 +4,8 @@ Requires a database connection supplied by the operator. Never repairs or
 writes balances, achievements, roles or historical evidence.
 """
 
+from decimal import Decimal
+
 
 async def inspect_driver_statistics(conn):
     async with conn.transaction(readonly=True, isolation="repeatable_read"):
@@ -24,7 +26,7 @@ async def inspect_driver_statistics(conn):
         results = []
         for row in rows:
             row = dict(row)
-            expected = (int(row["baseline_real"]) + int(row["v2_real"])
+            expected = (int(Decimal(str(row["baseline_real"])) + Decimal(str(row["v2_real"])))
                         if row["baseline_real"] is not None else None)
             issues = []
             if expected is None:
