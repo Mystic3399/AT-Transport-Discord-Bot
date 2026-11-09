@@ -8,7 +8,7 @@ from driver_statistics_consistency_audit_v2 import inspect_driver_statistics
 class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
     async def test_detects_mismatch_without_writing(self):
         conn = MagicMock()
-        conn.fetch = AsyncMock(return_value=[
+        conn.fetch = AsyncMock(side_effect=[[], [
             dict(discord_user_id=1, legacy_real=130, baseline_real=100,
                  v2_real=30, race_miles=50, hall_real=100, hall_tier="Veteran"),
             dict(discord_user_id=2, legacy_real=120, baseline_real=100,
@@ -19,8 +19,10 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
                  v2_real=Decimal("1.75"), race_miles=0, hall_real=None, hall_tier=None),
             dict(discord_user_id=5, legacy_real=None, baseline_real=0,
                  v2_real=Decimal("5"), race_miles=0, hall_real=None, hall_tier=None),
-        ])
-        rows = await inspect_driver_statistics(conn)
+        ]])
+        audit = await inspect_driver_statistics(conn)
+        self.assertEqual(audit["status"], "audited")
+        rows = audit["drivers"]
         self.assertEqual(rows[0]["issues"], [])
         self.assertEqual(rows[1]["issues"], [
             "legacy_vs_unified_real_mismatch",
@@ -33,6 +35,15 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(rows[4]["legacy_real"])
         conn.transaction.assert_called_once_with(
             readonly=True, isolation="repeatable_read")
+        conn.execute.assert_not_called()
+
+    async def test_missing_schema_stops_before_balance_query(self):
+        conn = MagicMock()
+        conn.fetch = AsyncMock(return_value=[{"name": "unified_v2_production_mileage_totals"}])
+        audit = await inspect_driver_statistics(conn)
+        self.assertEqual(audit["status"], "schema_missing")
+        self.assertEqual(audit["missing_tables"], ["unified_v2_production_mileage_totals"])
+        conn.fetch.assert_awaited_once()
         conn.execute.assert_not_called()
 
 
