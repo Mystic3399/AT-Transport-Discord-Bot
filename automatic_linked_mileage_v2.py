@@ -219,7 +219,7 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
     try:
         for row in rows:
             incoming_versions.append(trucksbook_comparison(job_id, user, row["evidence"], miles))
-    except (ValueError, TypeError, KeyError, InvalidOperation):
+    except (ValueError, TypeError, KeyError, InvalidOperation, OverflowError):
         return None, "route_evidence_pending"
     if not incoming_versions:
         return None, "route_evidence_pending"
