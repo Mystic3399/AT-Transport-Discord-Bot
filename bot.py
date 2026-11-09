@@ -3047,23 +3047,40 @@ async def replay_saved_trucksbook_jobs():
             WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
               AND NOT EXISTS(SELECT 1 FROM processed_jobs p WHERE p.job_id=h.provider_job_id)
             ORDER BY h.first_received_at,h.provider_job_id
+            LIMIT 250
             """)
     processed = 0
+    held = 0
+    failed = 0
     for row in rows:
-        evidence = json.loads(row['evidence']) if isinstance(row['evidence'],str) else row['evidence']
-        if (evidence.get('unit') != 'mi' or not is_real_statistics(evidence.get('stats_type'))
-                or type(evidence.get('distance')) is not int or evidence['distance'] <= 0):
-            continue
-        name = evidence.get('candidate_driver_label') or ''
-        account = row['provider_account_id']
-        driver = await find_driver_link(name, int(account) if account else None)
-        if driver is None:
-            continue
-        result = await record_real_job(row['provider_job_id'], name, driver, evidence['distance'])
-        if result and result.get('status') == 'added':
-            processed += 1
-            if processed >= 100:
-                break
+        try:
+            evidence = json.loads(row['evidence']) if isinstance(row['evidence'], str) else row['evidence']
+            if not isinstance(evidence, dict):
+                held += 1
+                continue
+            if (evidence.get('unit') != 'mi' or not is_real_statistics(evidence.get('stats_type'))
+                    or type(evidence.get('distance')) is not int or evidence['distance'] <= 0):
+                held += 1
+                continue
+            name = evidence.get('candidate_driver_label') or ''
+            account = row['provider_account_id']
+            driver = await find_driver_link(name, int(account) if account else None)
+            if driver is None:
+                held += 1
+                continue
+            result = await record_real_job(row['provider_job_id'], name, driver, evidence['distance'])
+            if result and result.get('status') == 'added':
+                processed += 1
+                if processed >= 100:
+                    break
+            elif result and result.get('status') not in ('duplicate',):
+                held += 1
+        except Exception as error:
+            # A malformed historical notice must not block every later driver.
+            failed += 1
+            print(f"TRUCKSBOOK REPLAY JOB ERROR: {type(error).__name__}", flush=True)
+    if processed or held or failed:
+        print(f"TRUCKSBOOK REPLAY processed={processed} held={held} failed={failed}", flush=True)
 
 
 @tasks.loop(seconds=60)
