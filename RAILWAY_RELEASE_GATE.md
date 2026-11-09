@@ -7,8 +7,8 @@ Candidate source: `fix/production-mileage-audit-automation`.
 
 ## Release gate — all required
 
-1. Both GitHub Actions workflows must pass on the **final** candidate commit.
-2. Run the disposable PostgreSQL integration suite against a local `/v2_test` database with `AT_V2_TEST_DATABASE_DISPOSABLE=YES`. GitHub's standard CI skips database tests.
+1. All three GitHub Actions workflows (mileage regression, Unified Driver V2 safety, disposable PostgreSQL integration) must pass on the **final** candidate commit.
+2. Confirm the disposable PostgreSQL integration workflow actually ran (not skipped) against its ephemeral `/v2_test` service with `AT_V2_TEST_DATABASE_DISPOSABLE=YES`. Run additional integration cases locally if production-specific behaviours are not covered.
 3. Inspect read-only historical coverage per driver. The 219 held jobs must remain held unless supported by verified route, ownership and balance evidence. No blanket approval.
 4. Snapshot production database, confirm restore capability and compare driver totals and ledger counts before deployment.
 5. Verify every driver-profile, leaderboard, Hall of Fame and milestone reader uses the intended unified totals; reconcile a known Real/Race example.
@@ -17,4 +17,4 @@ Candidate source: `fix/production-mileage-audit-automation`.
 8. Stage Railway source and variable changes together, with a documented rollback to the previous pinned source commit and prior approval value.
 9. Deploy one replica; watch for activation, errors, new credit decisions, and idempotent replays. Compare mileage before and after; halt and roll back on unexpected credits or registration/role changes.
 
-**Do not merge or deploy solely because unit CI passes.** CI deliberately does not connect to production or execute the disposable database integration tests.
+**Do not merge or deploy solely because CI passes.** The disposable PostgreSQL workflow tests isolated allocation behaviour, not production database contents, snapshots, profile readers or the Railway approval fingerprint.
