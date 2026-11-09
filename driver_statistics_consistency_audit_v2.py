@@ -91,3 +91,29 @@ async def inspect_driver_statistics(conn):
                 "issues": issues,
             })
         return {"status": "audited", "missing_tables": [], "drivers": results}
+
+
+async def main():
+    """Run the audit with a read-only database account; print counts only."""
+    import asyncio
+    import json
+    import os
+    import asyncpg
+
+    database_url = os.environ.get("AT_AUDIT_READONLY_DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("AT_AUDIT_READONLY_DATABASE_URL is required")
+    conn = await asyncpg.connect(database_url, server_settings={
+        "default_transaction_read_only": "on",
+        "statement_timeout": "30000",
+    })
+    try:
+        result = await inspect_driver_statistics(conn)
+        print(json.dumps(summarize_driver_statistics(result), sort_keys=True))
+    finally:
+        await conn.close()
+
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(main())
