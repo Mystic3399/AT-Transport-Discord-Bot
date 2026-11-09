@@ -240,6 +240,14 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
         and not matches(candidate, incoming_versions[0]) for candidate in candidates)
     if len(found) > 1 or uncertain_route:
         return None, "ambiguous_journey"
+    # Multiple verified versions of one TrucksBook job must agree before
+    # absence of a Trucky counterpart can authorize a new Real credit.
+    first_incoming = incoming_versions[0]
+    if any(_normalized_metadata(item["metadata"]) != _normalized_metadata(first_incoming["metadata"])
+           or item["delivered_at"] != first_incoming["delivered_at"]
+           or item["miles"] != first_incoming["miles"]
+           for item in incoming_versions[1:]):
+        return None, "conflicting_route_evidence"
     if not found:
         # Every existing credit needs comparison metadata before absence can
         # be established. A missing old route must never become a second award.
