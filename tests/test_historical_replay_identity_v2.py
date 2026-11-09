@@ -19,7 +19,9 @@ class HistoricalReplayIdentityTests(unittest.TestCase):
 
     def test_replay_uses_exact_provider_id(self):
         self.assertIn("WHERE trucksbook_user_id=$1", self.source)
-        self.assertIn("numeric_account = int(account)", self.source)
+        self.assertIn("numeric_account = int(account_text)", self.source)
+        self.assertIn("account_text.isdecimal()", self.source)
+        self.assertIn("9223372036854775807", self.source)
         self.assertNotIn("find_driver_link(", self.source)
 
     def test_replay_keeps_unlinked_accounts_pending(self):
