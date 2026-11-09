@@ -1,4 +1,5 @@
 import unittest
+from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 from driver_statistics_consistency_audit_v2 import inspect_driver_statistics
@@ -14,6 +15,8 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
                  v2_real=30, race_miles=0, hall_real=140, hall_tier="Veteran"),
             dict(discord_user_id=3, legacy_real=0, baseline_real=None,
                  v2_real=0, race_miles=0, hall_real=None, hall_tier=None),
+            dict(discord_user_id=4, legacy_real=101, baseline_real=100,
+                 v2_real=Decimal("1.75"), race_miles=0, hall_real=None, hall_tier=None),
         ])
         rows = await inspect_driver_statistics(conn)
         self.assertEqual(rows[0]["issues"], [])
@@ -22,6 +25,8 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
             "hall_record_exceeds_current_real",
         ])
         self.assertEqual(rows[2]["issues"], ["baseline_missing"])
+        self.assertEqual(rows[3]["expected_real"], 101)
+        self.assertEqual(rows[3]["issues"], [])
         conn.transaction.assert_called_once_with(
             readonly=True, isolation="repeatable_read")
         conn.execute.assert_not_called()
