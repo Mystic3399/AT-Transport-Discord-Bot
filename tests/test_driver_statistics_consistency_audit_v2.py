@@ -2,7 +2,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
-from driver_statistics_consistency_audit_v2 import inspect_driver_statistics
+from driver_statistics_consistency_audit_v2 import inspect_driver_statistics, summarize_driver_statistics
 
 
 class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
@@ -33,6 +33,11 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[3]["issues"], [])
         self.assertEqual(rows[4]["issues"], ["legacy_driver_progress_missing"])
         self.assertIsNone(rows[4]["legacy_real"])
+        summary = summarize_driver_statistics(audit)
+        self.assertEqual(summary["driver_count"], 5)
+        self.assertEqual(summary["affected_drivers"], 3)
+        self.assertEqual(summary["issue_counts"]["baseline_missing"], 1)
+        self.assertEqual(summary["issue_counts"]["legacy_driver_progress_missing"], 1)
         conn.transaction.assert_called_once_with(
             readonly=True, isolation="repeatable_read")
         conn.execute.assert_not_called()
@@ -43,6 +48,8 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
         audit = await inspect_driver_statistics(conn)
         self.assertEqual(audit["status"], "schema_missing")
         self.assertEqual(audit["missing_tables"], ["unified_v2_production_mileage_totals"])
+        self.assertEqual(summarize_driver_statistics(audit)["missing_tables"],
+                         ["unified_v2_production_mileage_totals"])
         conn.fetch.assert_awaited_once()
         conn.execute.assert_not_called()
 
