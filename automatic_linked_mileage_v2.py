@@ -33,7 +33,14 @@ def trucksbook_comparison(job_id, user, evidence, miles):
             or status in ("cancelled", "canceled", "unlisted")
             or exceeds_mileage_speed_limit(value.get("max_speed"), value.get("max_speed_unit"))):
         raise ValueError("Ineligible TrucksBook delivery")
-    if Decimal(str(value.get("distance"))) != Decimal(str(miles)):
+    try:
+        source_miles = Decimal(str(value.get("distance")))
+        credited_miles = Decimal(str(miles))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError("Invalid stored mileage") from exc
+    if (not source_miles.is_finite() or not credited_miles.is_finite()
+            or source_miles <= 0 or credited_miles <= 0
+            or source_miles != credited_miles):
         raise ValueError("Stored source mileage differs from the credit")
     if value.get("unit") != "mi":
         raise ValueError("Explicit miles required")
