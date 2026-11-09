@@ -13,8 +13,8 @@ class DisposableStatisticsAuditTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_sql_readonly_audit(self):
         if os.getenv("AT_V2_TEST_DATABASE_DISPOSABLE") != "YES":
             self.skipTest("Disposable database not explicitly enabled")
-        url = os.environ.get("TEST_DATABASE_URL")
-        if not url or "127.0.0.1" not in url:
+        url = os.environ.get("TEST_AUDIT_DATABASE_URL")
+        if not url or "127.0.0.1" not in url or not url.endswith("/v2_audit_test"):
             self.skipTest("Requires local disposable PostgreSQL")
         import asyncpg
         conn = await asyncpg.connect(url)
