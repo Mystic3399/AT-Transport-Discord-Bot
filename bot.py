@@ -3047,7 +3047,6 @@ async def replay_saved_trucksbook_jobs():
             WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
               AND NOT EXISTS(SELECT 1 FROM processed_jobs p WHERE p.job_id=h.provider_job_id)
             ORDER BY h.first_received_at,h.provider_job_id
-            LIMIT 250
             """)
     processed = 0
     held = 0
