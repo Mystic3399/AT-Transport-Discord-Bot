@@ -8,6 +8,7 @@ from decimal import Decimal
 import json
 
 from automatic_linked_mileage_v2 import trucksbook_comparison
+from unified_job_matching_v2 import _normalized_metadata
 
 
 async def inspect_historical_route_coverage(conn, discord_user_id):
@@ -45,7 +46,9 @@ async def inspect_historical_route_coverage(conn, discord_user_id):
             counts["invalid_or_incomplete_evidence"] += 1
             continue
         first = comparable[0]
-        if any(item["metadata"] != first["metadata"]
+        # Provider retries may add harmless extra fields or change formatting.
+        # Compare the same canonical route fields used by reconciliation.
+        if any(_normalized_metadata(item["metadata"]) != _normalized_metadata(first["metadata"])
                or item["delivered_at"] != first["delivered_at"]
                or Decimal(item["miles"]) != Decimal(first["miles"])
                for item in comparable[1:]):
