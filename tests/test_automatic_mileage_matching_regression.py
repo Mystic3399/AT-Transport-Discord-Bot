@@ -2,8 +2,9 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from automatic_linked_mileage_v2 import matches, same_route_window, trucksbook_comparison
+from automatic_linked_mileage_v2 import matches, same_route_window, trucksbook_comparison, reconcile_trucksbook
 from unified_job_matching_v2 import is_candidate_duplicate
 
 
@@ -92,6 +93,39 @@ class AutomaticMileageMatchingTests(unittest.TestCase):
         del tb["metadata"]["origin"]
         with self.assertRaises(ValueError):
             matches(tr, tb)
+
+
+class ConflictingWebhookVersionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_conflicting_versions_cannot_credit_unmatched_job(self):
+        conn = MagicMock()
+        base = dict(delivery("trucksbook")["metadata"], stats_type="Real",
+                    unit="mi", distance=100, status="completed",
+                    source_message_at="2026-11-01T12:00:00+00:00")
+        conn.fetch = AsyncMock(side_effect=[
+            [{"evidence": base}, {"evidence": dict(base, cargo="Machinery")}],
+            [],
+        ])
+        with patch("automatic_linked_mileage_v2.linked_trucky_comparisons",
+                   new_callable=AsyncMock, return_value=[]):
+            credit, reason = await reconcile_trucksbook(conn, "tb-1", 789, 100)
+        self.assertIsNone(credit)
+        self.assertEqual(reason, "conflicting_route_evidence")
+        conn.execute.assert_not_called()
+
+    async def test_equivalent_versions_can_credit_unmatched_job(self):
+        conn = MagicMock()
+        base = dict(delivery("trucksbook")["metadata"], stats_type="Real",
+                    unit="mi", distance=100, status="completed",
+                    source_message_at="2026-11-01T12:00:00+00:00")
+        conn.fetch = AsyncMock(side_effect=[
+            [{"evidence": base}, {"evidence": dict(base, origin="  PARIS  ")}],
+            [],
+        ])
+        with patch("automatic_linked_mileage_v2.linked_trucky_comparisons",
+                   new_callable=AsyncMock, return_value=[]):
+            credit, reason = await reconcile_trucksbook(conn, "tb-1", 789, 100)
+        self.assertEqual(credit, Decimal(100))
+        self.assertIsNone(reason)
 
 
 if __name__ == "__main__":
