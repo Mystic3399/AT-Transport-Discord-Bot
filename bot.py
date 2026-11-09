@@ -3040,12 +3040,21 @@ async def replay_saved_trucksbook_jobs():
     if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
         return
     import json
+    from world_of_trucks_policy_v2 import classify_event_mileage, exceeds_mileage_speed_limit
     async with db_pool.acquire() as connection:
         rows = await connection.fetch("""
             SELECT h.provider_job_id,h.provider_account_id,h.evidence
             FROM pending_provider_job_history_v2 h
             WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
               AND NOT EXISTS(SELECT 1 FROM processed_jobs p WHERE p.job_id=h.provider_job_id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM pending_provider_job_history_v2 conflicting
+                  WHERE conflicting.provider='trucksbook'
+                    AND conflicting.provider_job_id=h.provider_job_id
+                    AND conflicting.source_kind='verified_webhook_source'
+                    AND (conflicting.provider_account_id IS DISTINCT FROM h.provider_account_id
+                         OR conflicting.evidence::text IS DISTINCT FROM h.evidence::text)
+              )
             ORDER BY h.first_received_at,h.provider_job_id
             """)
     processed = 0
@@ -3057,7 +3066,12 @@ async def replay_saved_trucksbook_jobs():
             if not isinstance(evidence, dict):
                 held += 1
                 continue
-            if (evidence.get('unit') != 'mi' or not is_real_statistics(evidence.get('stats_type'))
+            classification = classify_event_mileage('trucksbook', evidence.get('stats_type'))
+            status = str(evidence.get('status') or '').strip().casefold()
+            if (evidence.get('unit') != 'mi' or classification is None
+                    or classification.mileage_type != 'real'
+                    or status in ('cancelled', 'canceled', 'unlisted')
+                    or exceeds_mileage_speed_limit(evidence.get('max_speed'), evidence.get('max_speed_unit'))
                     or type(evidence.get('distance')) is not int or evidence['distance'] <= 0):
                 held += 1
                 continue
