@@ -73,6 +73,19 @@ class AutomaticMileageMatchingTests(unittest.TestCase):
         result = trucksbook_comparison("tb-1", 789, evidence, 100)
         self.assertEqual(result["miles"], Decimal("100"))
 
+    def test_nonfinite_and_invalid_source_mileage_is_rejected(self):
+        evidence = dict(delivery("trucksbook")["metadata"],
+                        stats_type="Real", unit="mi", status="completed",
+                        source_message_at="2026-11-01T12:00:00+00:00")
+        for bad in ("NaN", "Infinity", "-Infinity", "-1", "0", "abc", None):
+            with self.subTest(distance=bad):
+                with self.assertRaises(ValueError):
+                    trucksbook_comparison("tb-1", 789, dict(evidence, distance=bad), 100)
+        for bad in ("NaN", "Infinity", "-Infinity", "-1", "0", None):
+            with self.subTest(credit=bad):
+                with self.assertRaises(ValueError):
+                    trucksbook_comparison("tb-1", 789, dict(evidence, distance=100), bad)
+
     def test_missing_route_evidence_fails_closed(self):
         tr = delivery("trucky")
         tb = delivery("trucksbook")
