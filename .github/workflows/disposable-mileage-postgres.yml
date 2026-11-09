@@ -40,5 +40,13 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      - name: Create isolated statistics audit database
+        env:
+          PGPASSWORD: disposable_test_only
+        run: psql -h 127.0.0.1 -U v2_test -d v2_test -c "CREATE DATABASE v2_audit_test"
+      - name: Run read-only statistics audit integration test
+        env:
+          TEST_AUDIT_DATABASE_URL: postgresql://v2_test:disposable_test_only@127.0.0.1:5432/v2_audit_test
+        run: python -m unittest discover -s tests -p 'test_driver_statistics_postgres_integration_v2.py' -v
       - name: Run real PostgreSQL allocation tests
         run: python -m unittest discover -s tests -p 'test_trucky_linked_allocation_v2.py' -v
