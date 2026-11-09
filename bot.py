@@ -3077,11 +3077,23 @@ async def replay_saved_trucksbook_jobs():
                 continue
             name = evidence.get('candidate_driver_label') or ''
             account = row['provider_account_id']
-            driver = await find_driver_link(name, int(account) if account else None)
+            # Historical replay must not assign money-like mileage using a
+            # mutable display name or an unmapped provider account.
+            try:
+                numeric_account = int(account)
+                if numeric_account <= 0:
+                    raise ValueError('Invalid provider account')
+            except (TypeError, ValueError, OverflowError):
+                held += 1
+                continue
+            async with db_pool.acquire() as link_connection:
+                driver = await link_connection.fetchval(
+                    'SELECT discord_user_id FROM driver_links WHERE trucksbook_user_id=$1',
+                    numeric_account)
             if driver is None:
                 held += 1
                 continue
-            result = await record_real_job(row['provider_job_id'], name, driver, evidence['distance'])
+            result = await record_real_job(row['provider_job_id'], name, int(driver), evidence['distance'])
             if result and result.get('status') == 'added':
                 processed += 1
                 if processed >= 100:
