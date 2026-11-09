@@ -28,7 +28,7 @@ the four audit tables. Supply its connection string as
 then run `python driver_statistics_consistency_audit_v2.py` from the checked-out
 repair branch in a trusted operator environment. The runner sets PostgreSQL
 `default_transaction_read_only=on` and a 30-second statement timeout and
-prints aggregate counts only; it does not print driver IDs or connection secrets.
+prints aggregate counts only; it does not print driver IDs or connection secrets. Exit status 0 means no findings, 1 means at least one affected driver, and 2 means the audit could not run because the schema is missing. A zero exit status is necessary but not sufficient for release approval.
 
 If the result is `schema_missing`, stop and review the schema. If
 `affected_drivers` is nonzero, inspect the driver-level report under
