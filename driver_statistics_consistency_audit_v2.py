@@ -7,6 +7,13 @@ writes balances, achievements, roles or historical evidence.
 from decimal import Decimal
 
 
+def audit_exit_code(summary):
+    """Nonzero means the release gate needs review; never imply approval."""
+    if summary["status"] != "audited":
+        return 2
+    return 1 if summary["affected_drivers"] else 0
+
+
 def summarize_driver_statistics(audit):
     """Summarize audit findings without hiding individual driver exceptions."""
     if audit["status"] != "audited":
@@ -95,7 +102,6 @@ async def inspect_driver_statistics(conn):
 
 async def main():
     """Run the audit with a read-only database account; print counts only."""
-    import asyncio
     import json
     import os
     import asyncpg
@@ -109,11 +115,13 @@ async def main():
     })
     try:
         result = await inspect_driver_statistics(conn)
-        print(json.dumps(summarize_driver_statistics(result), sort_keys=True))
+        summary = summarize_driver_statistics(result)
+        print(json.dumps(summary, sort_keys=True))
+        return audit_exit_code(summary)
     finally:
         await conn.close()
 
 
 if __name__ == "__main__":
     import asyncio
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))
