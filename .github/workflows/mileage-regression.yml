@@ -27,4 +27,4 @@ jobs:
       - name: Run isolated matching and allocation tests
         env:
           AT_V2_TEST_DATABASE_DISPOSABLE: 'NO'
-        run: python -m unittest -v tests.test_automatic_mileage_matching_regression tests.test_trucky_linked_allocation_v2
+        run: python -m unittest discover -s tests -p 'test_automatic_mileage_matching_regression.py' -v && python -m unittest discover -s tests -p 'test_trucky_linked_allocation_v2.py' -v
