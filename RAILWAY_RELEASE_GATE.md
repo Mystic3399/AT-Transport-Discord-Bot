@@ -18,3 +18,20 @@ Candidate source: `fix/production-mileage-audit-automation`.
 9. Deploy one replica; watch for activation, errors, new credit decisions, and idempotent replays. Compare mileage before and after; halt and roll back on unexpected credits or registration/role changes.
 
 **Do not merge or deploy solely because CI passes.** The disposable PostgreSQL workflow tests isolated allocation behaviour, not production database contents, snapshots, profile readers or the Railway approval fingerprint.
+
+
+### Read-only driver statistics verification
+
+Use a separately provisioned PostgreSQL account with **SELECT-only** permissions on
+the four audit tables. Supply its connection string as
+`AT_AUDIT_READONLY_DATABASE_URL` (never the production bot writer credential),
+then run `python driver_statistics_consistency_audit_v2.py` from the checked-out
+repair branch in a trusted operator environment. The runner sets PostgreSQL
+`default_transaction_read_only=on` and a 30-second statement timeout and
+prints aggregate counts only; it does not print driver IDs or connection secrets.
+
+If the result is `schema_missing`, stop and review the schema. If
+`affected_drivers` is nonzero, inspect the driver-level report under
+controlled access and reconcile evidence before release. This audit does not
+approve any mileage credit or replace a verified backup. Do not run it using
+the Railway production writer credential.
