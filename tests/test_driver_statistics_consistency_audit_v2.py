@@ -2,7 +2,7 @@ import unittest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
-from driver_statistics_consistency_audit_v2 import inspect_driver_statistics, summarize_driver_statistics
+from driver_statistics_consistency_audit_v2 import audit_exit_code, inspect_driver_statistics, summarize_driver_statistics
 
 
 class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
@@ -34,6 +34,7 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[4]["issues"], ["legacy_driver_progress_missing"])
         self.assertIsNone(rows[4]["legacy_real"])
         summary = summarize_driver_statistics(audit)
+        self.assertEqual(audit_exit_code(summary), 1)
         self.assertEqual(summary["driver_count"], 5)
         self.assertEqual(summary["affected_drivers"], 3)
         self.assertEqual(summary["issue_counts"]["baseline_missing"], 1)
@@ -42,12 +43,18 @@ class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
             readonly=True, isolation="repeatable_read")
         conn.execute.assert_not_called()
 
+    def test_clean_audit_exits_successfully(self):
+        self.assertEqual(audit_exit_code(summarize_driver_statistics({
+            "status": "audited", "drivers": [{"issues": []}], "missing_tables": []
+        })), 0)
+
     async def test_missing_schema_stops_before_balance_query(self):
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=[{"name": "unified_v2_production_mileage_totals"}])
         audit = await inspect_driver_statistics(conn)
         self.assertEqual(audit["status"], "schema_missing")
         self.assertEqual(audit["missing_tables"], ["unified_v2_production_mileage_totals"])
+        self.assertEqual(audit_exit_code(summarize_driver_statistics(audit)), 2)
         self.assertEqual(summarize_driver_statistics(audit)["missing_tables"],
                          ["unified_v2_production_mileage_totals"])
         conn.fetch.assert_awaited_once()
