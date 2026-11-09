@@ -27,7 +27,10 @@ def trucksbook_comparison(job_id, user, evidence, miles):
     if not isinstance(value, dict):
         raise ValueError("Invalid stored delivery")
     from world_of_trucks_policy_v2 import classify_event_mileage, exceeds_mileage_speed_limit
-    if (classify_event_mileage("trucksbook", value.get("stats_type")) is None
+    classification = classify_event_mileage("trucksbook", value.get("stats_type"))
+    status = str(value.get("status") or "").strip().casefold()
+    if (classification is None or classification.mileage_type != "real"
+            or status in ("cancelled", "canceled", "unlisted")
             or exceeds_mileage_speed_limit(value.get("max_speed"), value.get("max_speed_unit"))):
         raise ValueError("Ineligible TrucksBook delivery")
     if Decimal(str(value.get("distance"))) != Decimal(str(miles)):
