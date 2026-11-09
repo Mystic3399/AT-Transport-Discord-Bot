@@ -1,8 +1,6 @@
 """Disposable PostgreSQL integration test; never point at a production database."""
-import asyncio
 import os
 import unittest
-from decimal import Decimal
 
 from driver_statistics_consistency_audit_v2 import (
     inspect_driver_statistics, summarize_driver_statistics, audit_exit_code,
@@ -55,6 +53,8 @@ class DisposableStatisticsAuditTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["status"], "audited")
             self.assertEqual(summary["issue_counts"]["legacy_driver_progress_missing"], 1)
             self.assertEqual(audit_exit_code(summary), 1)
+            self.assertEqual(summary["driver_count"], 2)
+            self.assertEqual(summary["affected_drivers"], 1)
             self.assertEqual(next(r for r in result["drivers"]
                                   if r["discord_user_id"] == 910000001)["expected_real"], 101)
         finally:
