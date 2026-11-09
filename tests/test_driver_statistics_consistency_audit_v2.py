@@ -1,0 +1,65 @@
+import unittest
+from decimal import Decimal
+from unittest.mock import AsyncMock, MagicMock
+
+from driver_statistics_consistency_audit_v2 import audit_exit_code, inspect_driver_statistics, summarize_driver_statistics
+
+
+class StatisticsConsistencyAuditTests(unittest.IsolatedAsyncioTestCase):
+    async def test_detects_mismatch_without_writing(self):
+        conn = MagicMock()
+        conn.fetch = AsyncMock(side_effect=[[], [
+            dict(discord_user_id=1, legacy_real=130, baseline_real=100,
+                 v2_real=30, race_miles=50, hall_real=100, hall_tier="Veteran"),
+            dict(discord_user_id=2, legacy_real=120, baseline_real=100,
+                 v2_real=30, race_miles=0, hall_real=140, hall_tier="Veteran"),
+            dict(discord_user_id=3, legacy_real=0, baseline_real=None,
+                 v2_real=0, race_miles=0, hall_real=None, hall_tier=None),
+            dict(discord_user_id=4, legacy_real=101, baseline_real=100,
+                 v2_real=Decimal("1.75"), race_miles=0, hall_real=None, hall_tier=None),
+            dict(discord_user_id=5, legacy_real=None, baseline_real=0,
+                 v2_real=Decimal("5"), race_miles=0, hall_real=None, hall_tier=None),
+        ]])
+        audit = await inspect_driver_statistics(conn)
+        self.assertEqual(audit["status"], "audited")
+        rows = audit["drivers"]
+        self.assertEqual(rows[0]["issues"], [])
+        self.assertEqual(rows[1]["issues"], [
+            "legacy_vs_unified_real_mismatch",
+            "hall_record_exceeds_current_real",
+        ])
+        self.assertEqual(rows[2]["issues"], ["baseline_missing"])
+        self.assertEqual(rows[3]["expected_real"], 101)
+        self.assertEqual(rows[3]["issues"], [])
+        self.assertEqual(rows[4]["issues"], ["legacy_driver_progress_missing"])
+        self.assertIsNone(rows[4]["legacy_real"])
+        summary = summarize_driver_statistics(audit)
+        self.assertEqual(audit_exit_code(summary), 1)
+        self.assertEqual(summary["driver_count"], 5)
+        self.assertEqual(summary["affected_drivers"], 3)
+        self.assertEqual(summary["issue_counts"]["baseline_missing"], 1)
+        self.assertEqual(summary["issue_counts"]["legacy_driver_progress_missing"], 1)
+        conn.transaction.assert_called_once_with(
+            readonly=True, isolation="repeatable_read")
+        conn.execute.assert_not_called()
+
+    def test_clean_audit_exits_successfully(self):
+        self.assertEqual(audit_exit_code(summarize_driver_statistics({
+            "status": "audited", "drivers": [{"issues": []}], "missing_tables": []
+        })), 0)
+
+    async def test_missing_schema_stops_before_balance_query(self):
+        conn = MagicMock()
+        conn.fetch = AsyncMock(return_value=[{"name": "unified_v2_production_mileage_totals"}])
+        audit = await inspect_driver_statistics(conn)
+        self.assertEqual(audit["status"], "schema_missing")
+        self.assertEqual(audit["missing_tables"], ["unified_v2_production_mileage_totals"])
+        self.assertEqual(audit_exit_code(summarize_driver_statistics(audit)), 2)
+        self.assertEqual(summarize_driver_statistics(audit)["missing_tables"],
+                         ["unified_v2_production_mileage_totals"])
+        conn.fetch.assert_awaited_once()
+        conn.execute.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

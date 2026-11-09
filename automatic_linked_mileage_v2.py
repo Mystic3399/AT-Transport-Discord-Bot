@@ -27,10 +27,20 @@ def trucksbook_comparison(job_id, user, evidence, miles):
     if not isinstance(value, dict):
         raise ValueError("Invalid stored delivery")
     from world_of_trucks_policy_v2 import classify_event_mileage, exceeds_mileage_speed_limit
-    if (classify_event_mileage("trucksbook", value.get("stats_type")) is None
+    classification = classify_event_mileage("trucksbook", value.get("stats_type"))
+    status = str(value.get("status") or "").strip().casefold()
+    if (classification is None or classification.mileage_type != "real"
+            or status in ("cancelled", "canceled", "unlisted")
             or exceeds_mileage_speed_limit(value.get("max_speed"), value.get("max_speed_unit"))):
         raise ValueError("Ineligible TrucksBook delivery")
-    if Decimal(str(value.get("distance"))) != Decimal(str(miles)):
+    try:
+        source_miles = Decimal(str(value.get("distance")))
+        credited_miles = Decimal(str(miles))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise ValueError("Invalid stored mileage") from exc
+    if (not source_miles.is_finite() or not credited_miles.is_finite()
+            or source_miles <= 0 or credited_miles <= 0
+            or source_miles != credited_miles):
         raise ValueError("Stored source mileage differs from the credit")
     if value.get("unit") != "mi":
         raise ValueError("Explicit miles required")
@@ -97,7 +107,9 @@ async def reconcile_trucky(conn, candidate):
             try:
                 comparisons.append(trucksbook_comparison(
                     job_id, user, version["evidence"], version["accepted_distance"]))
-            except (ValueError, TypeError, KeyError, InvalidOperation):
+            except (ValueError, TypeError, KeyError, InvalidOperation, OverflowError):
+                # Bad historical evidence cannot authorize an automatic match.
+                # Continue inspecting other jobs instead of aborting the sweep.
                 comparisons = []
                 break
         if comparisons:
@@ -207,7 +219,7 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
     try:
         for row in rows:
             incoming_versions.append(trucksbook_comparison(job_id, user, row["evidence"], miles))
-    except (ValueError, TypeError, KeyError, InvalidOperation):
+    except (ValueError, TypeError, KeyError, InvalidOperation, OverflowError):
         return None, "route_evidence_pending"
     if not incoming_versions:
         return None, "route_evidence_pending"
@@ -228,6 +240,14 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
         and not matches(candidate, incoming_versions[0]) for candidate in candidates)
     if len(found) > 1 or uncertain_route:
         return None, "ambiguous_journey"
+    # Multiple verified versions of one TrucksBook job must agree before
+    # absence of a Trucky counterpart can authorize a new Real credit.
+    first_incoming = incoming_versions[0]
+    if any(_normalized_metadata(item["metadata"]) != _normalized_metadata(first_incoming["metadata"])
+           or item["delivered_at"] != first_incoming["delivered_at"]
+           or item["miles"] != first_incoming["miles"]
+           for item in incoming_versions[1:]):
+        return None, "conflicting_route_evidence"
     if not found:
         # Every existing credit needs comparison metadata before absence can
         # be established. A missing old route must never become a second award.
