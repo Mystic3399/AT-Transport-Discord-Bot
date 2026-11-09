@@ -34,6 +34,20 @@ class CoverageAuditTests(unittest.IsolatedAsyncioTestCase):
         conn.transaction.assert_called_once_with(readonly=True, isolation="repeatable_read")
         conn.execute.assert_not_called()
 
+    async def test_equivalent_webhook_retries_do_not_count_as_conflict(self):
+        conn = MagicMock()
+        base = evidence()
+        enriched = dict(base, source_provider_message_id="later-retry",
+                        origin="  PARIS  ", destination="lille")
+        conn.fetch = AsyncMock(return_value=[
+            dict(job_id="same", accepted_distance=100, evidence=base),
+            dict(job_id="same", accepted_distance=100, evidence=enriched),
+        ])
+        result = await inspect_historical_route_coverage(conn, 789)
+        self.assertEqual(result["comparable_verified_jobs"], 1)
+        self.assertEqual(result["conflicting_verified_versions"], 0)
+        conn.execute.assert_not_called()
+
     async def test_empty_history_does_not_imply_credit_permission(self):
         conn = MagicMock()
         conn.fetch = AsyncMock(return_value=[])
