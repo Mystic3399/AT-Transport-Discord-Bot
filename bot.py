@@ -2297,9 +2297,69 @@ async def refresh_driver_leaderboard(guild=None):
             "then Discord ID • Automatically updated"
         )
     )
-    return await upsert_controlled_message(
+    posted = await upsert_controlled_message(
         "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, [embed]
     )
+    if posted and guild.id == GUILD_ID:
+        await mirror_driver_leaderboard(
+            guild, embed.timestamp, weekly_end, monthly_end,
+            weekly_rows, monthly_rows, all_time_rows,
+        )
+    return posted
+
+async def mirror_driver_leaderboard(
+    guild, generated_at, weekly_end, monthly_end,
+    weekly_rows, monthly_rows, all_time_rows,
+):
+    """Mirror exactly the rows and order rendered in the Discord embed."""
+    secret = os.getenv("AT_COMMAND_BRIDGE_SECRET", "")
+    if os.getenv("AT_COMMAND_BRIDGE_ENABLED") != "true" or len(secret) < 32:
+        return
+
+    def entries(rows, limit, mark_former=False):
+        result = []
+        for row in rows[:limit]:
+            user_id = int(row["discord_user_id"])
+            member = guild.get_member(user_id)
+            former = mark_former and (
+                member is None or
+                driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver"
+            )
+            result.append(dict(
+                discordUserId=str(user_id),
+                name=(member.display_name if member else str(row["trucksbook_name"]))[:160],
+                realMiles=int(row["real_miles"]),
+                former=former,
+            ))
+        return result
+
+    try:
+        import hashlib
+        import hmac
+
+        path = "/api/v3/discord-leaderboard"
+        body = json.dumps(dict(
+            generatedAt=generated_at.isoformat(),
+            weeklyResetAt=uk_midnight_utc(weekly_end).isoformat(),
+            monthlyResetAt=uk_midnight_utc(monthly_end).isoformat(),
+            weekly=entries(weekly_rows, 5),
+            monthly=entries(monthly_rows, 5),
+            allTime=entries(all_time_rows, 10, mark_former=True),
+        ), separators=(",", ":")).encode()
+        timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+        signed = f"POST\n{path}\n{timestamp}\n".encode() + body
+        signature = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            async with session.post(
+                "https://at-transport-ltd.com" + path,
+                data=body,
+                headers={"content-type": "application/json", "x-at-timestamp": timestamp, "x-at-signature": signature},
+                allow_redirects=False,
+            ) as response:
+                if response.status not in (200, 202):
+                    print(f"WEBSITE LEADERBOARD MIRROR HTTP {response.status}", flush=True)
+    except Exception as error:
+        print(f"WEBSITE LEADERBOARD MIRROR ERROR: {type(error).__name__}", flush=True)
 
 
 async def maintain_driver_leaderboard():
