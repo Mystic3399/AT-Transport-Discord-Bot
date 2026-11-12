@@ -23,7 +23,7 @@ class CareerArtTests(unittest.TestCase):
                 self.assert_png(career_art.standings(period, entries), (1121, 1403))
 
     def test_recognition_art_uses_existing_assets(self):
-        self.assert_png(career_art.hall_of_fame({"Immortal": 1}), (1080, 415))
+        self.assert_png(career_art.hall_of_fame({"Immortal": ["Driver"], "Elite": ["A", "B"]}), (1122, 1402))
         self.assert_png(career_art.achievement("Driver", "Viking Pathfinder", 150000), (1536, 1024))
         self.assert_png(career_art.achievement(
             "Driver", "100K Centurion Club", 100000, permanent=True

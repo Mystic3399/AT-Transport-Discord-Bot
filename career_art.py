@@ -6,7 +6,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from tachograph import ART, ROOT, CLUBS, badge
 
-WIDTH = 1080
 WHITE = "#eef7ff"
 BLUE = "#53d7ff"
 GOLD = "#ffd477"
@@ -34,31 +33,6 @@ def label(draw, xy, value, size, colour=WHITE, *, width=None, anchor="lt"):
                 value = value[:-1]
             value += "…"
     draw.text(xy, value, font=font(size), fill=colour, anchor=anchor)
-
-
-def place(canvas, path, box, *, cover=False):
-    with Image.open(path) as source:
-        asset = source.convert("RGBA")
-    left, top, width, height = box
-    resize = ImageOps.fit if cover else ImageOps.contain
-    asset = resize(asset, (width, height), Image.Resampling.LANCZOS)
-    canvas.paste(asset, (left + (width - asset.width) // 2,
-                         top + (height - asset.height) // 2), asset)
-
-
-def background(height, accent, tint):
-    canvas = Image.new("RGB", (WIDTH, height), "#050e1d")
-    draw = ImageDraw.Draw(canvas)
-    r, g, b = (int(tint[i:i+2], 16) for i in (1, 3, 5))
-    for y in range(0, height, 2):
-        strength = max(0, 1 - abs(y - height * .22) / (height * .65))
-        draw.rectangle((0, y, WIDTH, y + 1),
-                       fill=(5 + int(r * strength), 14 + int(g * strength), 29 + int(b * strength)))
-    for x in range(-height, WIDTH, 82):
-        draw.line((x, height, x + height, 0), fill="#213149")
-    draw.rounded_rectangle((12, 12, WIDTH - 13, height - 13), radius=22,
-                           outline=accent, width=2)
-    return canvas, draw
 
 
 def encode(canvas):
@@ -92,23 +66,23 @@ def standings(period, entries):
     return encode(canvas)
 
 
-def hall_of_fame(counts):
-    canvas, draw = background(415, GOLD, "#342910")
-    place(canvas, ART / "company-logo.webp", (35, 28, 208, 130))
-    place(canvas, ART / "insignias/hall-of-fame.webp", (855, 25, 170, 147))
-    label(draw, (265, 45), "HALL OF FAME", 63, GOLD, width=570)
-    label(draw, (268, 117), "PERMANENT CAREER RECORDS", 26)
-    for x, (tier, threshold, colour) in zip((37, 379, 721), (
-        ("Immortal", "1,000,000", BLUE), ("Elite", "500,000", GOLD),
-        ("Veteran", "250,000", SILVER),
-    )):
-        draw.rounded_rectangle((x, 187, x + 322, 348), radius=12,
-                               fill="#0b1728", outline=colour, width=2)
-        label(draw, (x + 161, 207), tier.upper(), 33, colour, anchor="mt")
-        label(draw, (x + 161, 251), f"{threshold} REAL MI", 25, anchor="mt")
-        count = counts.get(tier, 0)
-        label(draw, (x + 161, 291), f"{count} INDUCTED", 24, colour, anchor="mt")
-    label(draw, (540, 368), "DRIVEN BEYOND HORIZONS", 25, GOLD, anchor="mt")
+def hall_of_fame(inductees):
+    with Image.open(CAREER_ART / "hall-of-fame.webp") as source:
+        canvas = source.convert("RGB")
+    draw = ImageDraw.Draw(canvas)
+    for tier, y, colour in (
+        ("Immortal", 792, WHITE),
+        ("Elite", 980, GOLD),
+        ("Veteran", 1169, SILVER),
+    ):
+        names = inductees.get(tier, ())
+        if len(names) == 1:
+            caption = str(names[0]).upper()
+        elif names:
+            caption = f"{len(names):,} INDUCTEES"
+        else:
+            caption = "NO INDUCTEES YET"
+        label(draw, (884, y), caption, 43, colour, width=381, anchor="mm")
     return encode(canvas)
 
 

@@ -2505,11 +2505,15 @@ async def refresh_hall_of_fame_display():
         text="A&T Transport LTD • Driven Beyond Horizons"
     )
     header = discord.Embed(colour=discord.Colour.gold())
-    counts = {tier: sum(row["highest_tier"] == tier for row in rows) for tier in thresholds}
+    inductees = {
+        tier: [row["trucksbook_name"] for row in rows if row["highest_tier"] == tier]
+        for tier in thresholds
+    }
     image = await career_art_file(
-        header, "hall-of-fame.png", career_art.hall_of_fame, counts
+        header, "hall-of-fame.png", career_art.hall_of_fame, inductees
     )
     if image:
+        image.description = "A&T Hall of Fame · Permanent career honours by verified Real Miles."
         embeds.insert(0, header)
     return await upsert_controlled_message(
         "hall_of_fame", HALL_OF_FAME_CHANNEL_ID, embeds, artwork=[image] if image else ()
