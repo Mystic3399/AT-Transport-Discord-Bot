@@ -1238,6 +1238,9 @@ async def find_driver_link(
                 "WHERE trucksbook_user_id = $1;",
                 trucksbook_user_id,
             )
+            if user_id is None:
+                from mileage_audit_confirmation_v2 import verified_trucksbook_driver
+                user_id = await verified_trucksbook_driver(connection, trucksbook_user_id)
         if user_id is not None:
             return int(user_id)
 
@@ -1527,23 +1530,16 @@ def build_progression_milestone_embed(
     )
 
     embed = discord.Embed(
-        title="🏆 A&T TRANSPORT LTD — MILESTONE ACHIEVED",
+        title=f"🏆 {milestone_rank} • {milestone_miles:,} Real Miles",
         description=(
-            f"Congratulations {driver_display}!\n\n"
-            f"💎 **{milestone_miles:,} REAL MILES**\n"
-            "A new A&T progression milestone has been reached."
+            f"{driver_display} has earned **{milestone_rank}**."
         ),
         colour=discord.Colour.from_rgb(31, 78, 121),
     )
 
+    embed.set_author(name="A&T TRANSPORT LTD  /  CAREER MILESTONE")
     if member is not None:
         embed.set_thumbnail(url=member.display_avatar.url)
-
-    embed.add_field(
-        name="Discord Driver",
-        value=driver_display,
-        inline=True,
-    )
     embed.add_field(
         name="Driver Account",
         value=f"`{trucksbook_name}`",
@@ -1867,17 +1863,16 @@ def build_achievement_embed(member, discord_user_id, trucksbook_name, achievemen
     hall_tier = get_hall_of_fame_tier(real_miles)
     driver_display = member.mention if member else f"<@{discord_user_id}>"
     embed = discord.Embed(
-        title="🌟 A&T PERMANENT ACHIEVEMENT UNLOCKED",
+        title=f"🏅 {achievement['name']} • {threshold:,} Real Miles",
         description=(
-            f"Congratulations {driver_display}!\n\n"
-            f"**{threshold:,} verified A&T Real Miles**\n"
-            "This cumulative achievement is now part of your permanent record."
+            f"{driver_display} has earned a permanent place in the **{achievement['name']}**."
         ),
         colour=discord.Colour.gold(),
     )
+    embed.set_author(name="A&T TRANSPORT LTD  /  PERMANENT ACHIEVEMENT")
     if member:
         embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="TrucksBook Driver", value=f"`{trucksbook_name}`")
+    embed.add_field(name="Driver account", value=discord.utils.escape_markdown(str(trucksbook_name))[:150])
     embed.add_field(name="Verified Real Total", value=f"**{real_miles:,} miles**")
     if hall_tier and threshold in {250000, 500000, 1000000}:
         embed.add_field(
@@ -2214,7 +2209,7 @@ def leaderboard_lines(rows, guild, limit, mark_former=False):
                 label += " *(Former Driver)*"
         prefix = medals.get(position, f"`{position:>2}.`")
         lines.append(
-            f"{prefix} {label} — **{int(row['real_miles']):,} mi**"
+            f"{prefix} {label} · **{int(row['real_miles']):,} mi**"
         )
     return "\n".join(lines) if lines else "*No qualifying Real miles recorded yet.*"
 
@@ -2262,48 +2257,32 @@ async def refresh_driver_leaderboard(guild=None):
             )
     next_week = int(uk_midnight_utc(weekly_end).timestamp())
     next_month = int(uk_midnight_utc(monthly_end).timestamp())
-    embed = discord.Embed(
-        title="🚛 A&T TRANSPORT LTD — DRIVER LEADERBOARD",
-        description=(
-            "Verified **Real Miles** only. Weekly and monthly rankings show "
-            "active A&T drivers; all-time records preserve former drivers."
-        ),
-        colour=discord.Colour.from_rgb(31, 110, 150),
-        timestamp=datetime.now(timezone.utc),
-    )
-    embed.add_field(
-        name="📅 Top 5 Weekly",
-        value=(
-            leaderboard_lines(weekly_rows, guild, 5)
-            + f"\n\nResets <t:{next_week}:R>"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🗓️ Top 5 Monthly",
-        value=(
-            leaderboard_lines(monthly_rows, guild, 5)
-            + f"\n\nResets <t:{next_month}:R>"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🏛️ Top 10 All-Time",
-        value=leaderboard_lines(all_time_rows, guild, 10, mark_former=True),
-        inline=False,
-    )
-    embed.set_footer(
-        text=(
-            "A&T Transport LTD • UK time • Ties: earliest qualifying job "
-            "then Discord ID • Automatically updated"
+    updated_at = datetime.now(timezone.utc)
+    embeds = []
+    for title, rows, limit, reset, former in (
+        ("Weekly standings", weekly_rows, 5, next_week, False),
+        ("Monthly standings", monthly_rows, 5, next_month, False),
+        ("All-time records", all_time_rows, 10, None, True),
+    ):
+        lines = leaderboard_lines(rows, guild, limit, mark_former=former)
+        if reset:
+            lines += f"\n\n**Resets** <t:{reset}:R>"
+        embed = discord.Embed(
+            title=title, description=lines,
+            colour=discord.Colour.from_rgb(27, 132, 215),
         )
-    )
+        if former:
+            embed.timestamp = updated_at
+            embed.set_footer(text="A&T Transport LTD • All-time records include former drivers")
+        embeds.append(embed)
+    embeds[0].set_author(name="A&T TRANSPORT LTD  /  DRIVER LEADERBOARD")
+    embeds[0].description = "Verified Real Miles • Active A&T drivers\n\n" + embeds[0].description
     posted = await upsert_controlled_message(
-        "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, [embed]
+        "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, embeds
     )
     if posted and guild.id == GUILD_ID:
         await mirror_driver_leaderboard(
-            guild, embed.timestamp, weekly_end, monthly_end,
+            guild, updated_at, weekly_end, monthly_end,
             weekly_rows, monthly_rows, all_time_rows,
         )
     return posted
@@ -2456,16 +2435,19 @@ async def refresh_hall_of_fame_display():
             """
         )
     colours = {
-        "Immortal": discord.Colour.from_rgb(96, 72, 170),
+        "Immortal": discord.Colour.from_rgb(31, 160, 225),
         "Elite": discord.Colour.gold(),
         "Veteran": discord.Colour.from_rgb(49, 120, 160),
     }
     icons = {"Immortal": "💎", "Elite": "👑", "Veteran": "⚔️"}
+    thresholds = {"Immortal": "1,000,000", "Elite": "500,000", "Veteran": "250,000"}
     embeds = []
     remaining_budget = 5200
     for tier_name in ("Immortal", "Elite", "Veteran"):
         tier_rows = [row for row in rows if row["highest_tier"] == tier_name]
         lines = []
+        description_limit = min(4000, remaining_budget)
+        truncated = "*Additional records are on file.*"
         for row in tier_rows:
             status = "🟢 Active" if row["is_active"] else "⚪ Former A&T Driver"
             registry = (
@@ -2479,24 +2461,24 @@ async def refresh_hall_of_fame_display():
                 f"**{int(row['highest_verified_real_miles']):,}** Real Miles\n"
                 f"`{row['trucksbook_name']}` • {status} • Since {since_text}"
             )
-            if sum(len(item) + 1 for item in lines) + len(line) > remaining_budget:
-                lines.append("*Further permanent records are safely stored in PostgreSQL.*")
+            if len("\n\n".join([*lines, line, truncated])) > description_limit:
+                lines.append(truncated)
                 break
             lines.append(line)
         description = "\n\n".join(lines) if lines else "*No drivers recorded in this tier yet.*"
         remaining_budget -= len(description)
         embeds.append(discord.Embed(
-            title=f"{icons[tier_name]} A&T {tier_name.upper()}S",
+            title=f"{icons[tier_name]} {tier_name} • {thresholds[tier_name]} Real Miles",
             description=description,
             colour=colours[tier_name],
         ))
+    embeds[0].set_author(name="A&T TRANSPORT LTD  /  HALL OF FAME")
     embeds[0].description = (
-        "**A&T Transport LTD — Permanent Hall of Fame**\n"
-        "Earned with verified Real Miles. Membership history is never erased.\n\n"
+        "Permanent career records • Verified Real Miles\n\n"
         + embeds[0].description
     )
     embeds[-1].set_footer(
-        text="Veteran 250K • Elite 500K • Immortal 1M • Active/Former shown separately"
+        text="A&T Transport LTD • Driven Beyond Horizons"
     )
     return await upsert_controlled_message(
         "hall_of_fame", HALL_OF_FAME_CHANNEL_ID, embeds
@@ -4744,8 +4726,10 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
                 COUNT(DISTINCT discord_user_id) AS drivers,
                 COALESCE(SUM(missing_distance), 0) AS missing_miles
             FROM mileage_repair_candidates
-            WHERE applied_at IS NULL;
-            """
+            WHERE applied_at IS NULL
+              AND ($1::bigint IS NULL OR discord_user_id=$1);
+            """,
+            target_driver_id,
         )
 
     preview=await create_mileage_audit_preview(db_pool,ctx.guild.id,ctx.channel.id,ctx.author.id,reviewed_job_ids)
@@ -4766,12 +4750,12 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         f"Jobs skipped — driver not linked: `{unlinked_event_jobs:,}`\n"
         f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
         f"`{int(totals['drivers']):,}` drivers\n"
-        f"Missing Real Miles pending repair: `{int(totals['missing_miles']):,}`\n"
+        f"Gross pending Real Miles before evidence and duplicate checks: `{int(totals['missing_miles']):,}`\n"
         f"Missing Race Miles (Trucky, stored pending): `{race['verified_pending_miles']:,.2f}` across `{race['verified_pending_jobs']:,}` jobs\n"
         f"Race miles stored without verified ownership: `{race['unverified_miles']:,.2f}` across `{race['unverified_jobs']:,}` jobs\n"
         f"Race observations held for classification/conflicts: `{race['classification_pending_jobs']+race['conflicting_jobs']:,}` jobs\n"
         f"Historical Real jobs held for baseline review: `{historical_real_held_jobs:,}` / `{historical_real_held_miles:,}` miles\n\n"
-        f"This preview approves only `{preview['jobs']:,}` reviewed jobs / `{preview['addition']:,}` miles.\n"
+        f"**CONFIRM will apply: `{preview['addition']:,}` net Real Miles across `{preview['jobs']:,}` reviewed jobs.**\n"
         f"Held for source, ownership or cross-provider evidence: `{preview['held_jobs']:,}` jobs.\n"
         "Unexplained balances are already in existing totals and are not added again.\n"
         + audit_confirmation_guidance(preview)
@@ -4973,7 +4957,7 @@ async def mileage_apply(ctx, confirmation: str = ""):
                     return
                 candidates=[c for c in candidates if c['job_id'] in approval['job_ids']]
                 if not candidates:
-                    await ctx.reply('No additions were approved in this preview. No mileage changed. Stored or held Trucky jobs are not approved by this TrucksBook repair command.',mention_author=False)
+                    await ctx.reply('This preview contains no eligible repairs. Review the held reasons in the audit attachment and resolve any missing account links or route evidence, then run a fresh audit.',mention_author=False)
                     return
 
                 for candidate in candidates:

@@ -96,6 +96,39 @@ def _candidate(row):
         raise AuditPreviewError('A repair delta is inconsistent. Run a fresh audit.')
     return result
 
+async def verified_trucksbook_driver(conn, account_id):
+    """Resolve a current, verified unified link by its stable provider ID."""
+    if not await conn.fetchval("SELECT to_regclass('unified_provider_links') IS NOT NULL"):
+        return None
+    return await conn.fetchval("""
+        SELECT l.discord_user_id
+        FROM unified_provider_links l
+        JOIN unified_driver_profiles p USING (discord_user_id)
+        WHERE l.provider='trucksbook' AND l.provider_account_id=$1
+          AND l.verified_at IS NOT NULL AND p.status='active'
+          AND NOT EXISTS (
+              SELECT 1 FROM driver_links d
+              WHERE (d.discord_user_id=l.discord_user_id
+                     AND d.trucksbook_user_id::text<>l.provider_account_id)
+                 OR (d.discord_user_id<>l.discord_user_id
+                     AND d.trucksbook_user_id::text=l.provider_account_id)
+          )
+        FOR SHARE OF l,p
+    """, str(account_id))
+
+
+async def audit_account_matches(conn, candidate, *, lock=False):
+    account = candidate['source_provider_account_id']
+    if not isinstance(account, str) or not re.fullmatch(r'[1-9][0-9]{0,18}', account):
+        return False
+    user = candidate['discord_user_id']
+    sql = 'SELECT trucksbook_user_id FROM driver_links WHERE discord_user_id=$1'
+    legacy_id = await conn.fetchval(sql + (' FOR UPDATE' if lock else ''), user)
+    if legacy_id is not None:
+        return str(legacy_id) == account
+    return await verified_trucksbook_driver(conn, account) == user
+
+
 async def reconciled_repair_delta(conn, candidate):
     """Calculate the net Real credit using the live TrucksBook matching rules."""
     if not await conn.fetchval("SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"):
@@ -130,10 +163,14 @@ async def create_mileage_audit_preview(pool,guild_id,channel_id,reviewer_id,job_
             await probe.start()
             try:
                 for row in rows:
-                    link=await conn.fetchval('SELECT trucksbook_user_id FROM driver_links WHERE discord_user_id=$1',row['discord_user_id'])
-                    if (not audit_source_allowed(row['source_webhook_id']) or type(link) is not int or link<=0
-                        or str(link)!=row['source_provider_account_id']):
-                        held+=1;continue
+                    if not audit_source_allowed(row['source_webhook_id']):
+                        holds[row['job_id']] = 'unapproved_webhook_source'
+                        held += 1
+                        continue
+                    if not await audit_account_matches(conn, row):
+                        holds[row['job_id']] = 'missing_or_mismatched_trucksbook_link'
+                        held += 1
+                        continue
                     candidate = _candidate(row)
                     delta, hold = await reconciled_repair_delta(conn, candidate)
                     if hold:
@@ -181,9 +218,8 @@ async def validate_mileage_audit_preview(conn,guild_id,channel_id,reviewer_id,ca
     if _canonical(current)!=_canonical(expected):
         raise AuditPreviewError('The reviewed repairs changed or were already processed. Run !mileageaudit again.')
     for candidate in current.values():
-        link=await conn.fetchval('SELECT trucksbook_user_id FROM driver_links WHERE discord_user_id=$1 FOR UPDATE',candidate['discord_user_id'])
-        if (not audit_source_allowed(candidate['source_webhook_id']) or type(link) is not int or link<=0
-                or str(link)!=candidate['source_provider_account_id']):
+        if (not audit_source_allowed(candidate['source_webhook_id'])
+                or not await audit_account_matches(conn, candidate, lock=True)):
             raise AuditPreviewError('A source or driver account link changed. Run a fresh audit.')
     for driver in snapshot['drivers']:
         # Same lock/order as the live Trucky worker. Disabling that worker
