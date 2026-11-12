@@ -11,6 +11,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import tachograph
+import career_art
 import race_progression
 import steam_profile_names
 import onboarding_flow
@@ -1638,7 +1639,11 @@ async def announce_progression_milestone(
     )
 
     try:
-        await channel.send(embed=embed)
+        artwork = await career_art_file(
+            embed, "rank-milestone.png", career_art.achievement,
+            member.display_name if member else trucksbook_name, milestone_rank, milestone_miles,
+        )
+        await channel.send(embed=embed, **({"file": artwork} if artwork else {}))
     except (discord.Forbidden, discord.HTTPException) as error:
         print(
             "MILESTONE ANNOUNCEMENT ERROR: Mileage remains saved; "
@@ -1898,16 +1903,33 @@ async def announce_permanent_achievement(
         print("PERMANENT ACHIEVEMENT ANNOUNCEMENT SKIPPED: channel unavailable.")
         return False
     try:
-        await channel.send(embed=build_achievement_embed(
+        embed = build_achievement_embed(
             member, discord_user_id, trucksbook_name, achievement, real_miles
-        ))
+        )
+        artwork = await career_art_file(
+            embed, "permanent-achievement.png", career_art.achievement,
+            member.display_name if member else trucksbook_name,
+            achievement["name"], achievement["miles"], permanent=True,
+        )
+        await channel.send(embed=embed, **({"file": artwork} if artwork else {}))
         return True
     except (discord.Forbidden, discord.HTTPException) as error:
         print(f"PERMANENT ACHIEVEMENT ANNOUNCEMENT ERROR: {error}")
         return False
 
 
-async def upsert_controlled_message(purpose, channel_id, embeds):
+async def career_art_file(embed, filename, renderer, *args, **kwargs):
+    """Keep the readable Discord embed available if an artwork asset fails."""
+    try:
+        payload = await asyncio.to_thread(renderer, *args, **kwargs)
+    except Exception as error:
+        print(f"CAREER ART ERROR ({filename}): {type(error).__name__}")
+        return None
+    embed.set_image(url=f"attachment://{filename}")
+    return discord.File(BytesIO(payload), filename=filename)
+
+
+async def upsert_controlled_message(purpose, channel_id, embeds, *, artwork=()):
     """Edit the one recorded bot-owned message, recreating only if it vanished."""
     channel = await get_discord_channel(channel_id)
     if channel is None or db_pool is None:
@@ -1934,9 +1956,9 @@ async def upsert_controlled_message(purpose, channel_id, embeds):
                         message = None
                 try:
                     if message is None:
-                        message = await channel.send(embeds=embeds)
+                        message = await channel.send(embeds=embeds, files=list(artwork))
                     else:
-                        await message.edit(content=None, embeds=embeds)
+                        await message.edit(content=None, embeds=embeds, attachments=list(artwork))
                 except (discord.Forbidden, discord.HTTPException) as error:
                     print(f"CONTROLLED MESSAGE ERROR ({purpose}): {error}")
                     return False
@@ -2203,7 +2225,7 @@ def leaderboard_lines(rows, guild, limit, mark_former=False):
             if mark_former and driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver":
                 label += " *(Former Driver)*"
         else:
-            safe_name = discord.utils.escape_markdown(str(row["trucksbook_name"]))
+            safe_name = discord.utils.escape_markdown(str(row["trucksbook_name"])[:64])
             label = f"**{safe_name}**"
             if mark_former:
                 label += " *(Former Driver)*"
@@ -2255,16 +2277,25 @@ async def refresh_driver_leaderboard(guild=None):
                 LIMIT 10;
                 """
             )
+        podium_ids = list({int(row["discord_user_id"]) for rankings in
+                           (weekly_rows, monthly_rows, all_time_rows) for row in rankings[:3]})
+        preferences = await connection.fetch(
+            "SELECT discord_user_id, truck_key FROM driver_card_preferences "
+            "WHERE discord_user_id = ANY($1::bigint[])",
+            podium_ids,
+        )
+        trucks = {int(row["discord_user_id"]): row["truck_key"] for row in preferences}
     next_week = int(uk_midnight_utc(weekly_end).timestamp())
     next_month = int(uk_midnight_utc(monthly_end).timestamp())
     updated_at = datetime.now(timezone.utc)
     embeds = []
-    for title, rows, limit, reset, former in (
-        ("Weekly standings", weekly_rows, 5, next_week, False),
-        ("Monthly standings", monthly_rows, 5, next_month, False),
-        ("All-time records", all_time_rows, 10, None, True),
+    artwork = []
+    for period, title, rows, reset, former in (
+        ("weekly", "Weekly standings", weekly_rows, next_week, False),
+        ("monthly", "Monthly standings", monthly_rows, next_month, False),
+        ("all-time", "All-time records", all_time_rows, None, True),
     ):
-        lines = leaderboard_lines(rows, guild, limit, mark_former=former)
+        lines = leaderboard_lines(rows, guild, 10, mark_former=former)
         if reset:
             lines += f"\n\n**Resets** <t:{reset}:R>"
         embed = discord.Embed(
@@ -2274,11 +2305,26 @@ async def refresh_driver_leaderboard(guild=None):
         if former:
             embed.timestamp = updated_at
             embed.set_footer(text="A&T Transport LTD • All-time records include former drivers")
+        entries = []
+        for row in rows[:10]:
+            user_id = int(row["discord_user_id"])
+            member = guild.get_member(user_id)
+            is_former = former and (
+                member is None or
+                driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver"
+            )
+            entries.append((member.display_name if member else row["trucksbook_name"],
+                            int(row["real_miles"]), trucks.get(user_id), is_former))
+        image = await career_art_file(
+            embed, f"{period}-standings.png", career_art.standings, period, entries
+        )
+        if image:
+            artwork.append(image)
         embeds.append(embed)
     embeds[0].set_author(name="A&T TRANSPORT LTD  /  DRIVER LEADERBOARD")
     embeds[0].description = "Verified Real Miles • Active A&T drivers\n\n" + embeds[0].description
     posted = await upsert_controlled_message(
-        "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, embeds
+        "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, embeds, artwork=artwork
     )
     if posted and guild.id == GUILD_ID:
         await mirror_driver_leaderboard(
@@ -2291,7 +2337,7 @@ async def mirror_driver_leaderboard(
     guild, generated_at, weekly_end, monthly_end,
     weekly_rows, monthly_rows, all_time_rows,
 ):
-    """Mirror exactly the rows and order rendered in the Discord embed."""
+    """Mirror rankings with the website feed's existing row limits."""
     secret = os.getenv("AT_COMMAND_BRIDGE_SECRET", "")
     if os.getenv("AT_COMMAND_BRIDGE_ENABLED") != "true" or len(secret) < 32:
         return
@@ -2480,8 +2526,15 @@ async def refresh_hall_of_fame_display():
     embeds[-1].set_footer(
         text="A&T Transport LTD • Driven Beyond Horizons"
     )
+    header = discord.Embed(colour=discord.Colour.gold())
+    counts = {tier: sum(row["highest_tier"] == tier for row in rows) for tier in thresholds}
+    image = await career_art_file(
+        header, "hall-of-fame.png", career_art.hall_of_fame, counts
+    )
+    if image:
+        embeds.insert(0, header)
     return await upsert_controlled_message(
-        "hall_of_fame", HALL_OF_FAME_CHANNEL_ID, embeds
+        "hall_of_fame", HALL_OF_FAME_CHANNEL_ID, embeds, artwork=[image] if image else ()
     )
 
 
