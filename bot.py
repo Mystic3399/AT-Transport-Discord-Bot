@@ -32,6 +32,7 @@ from mileage_audit_confirmation_v2 import (
     SCHEMA as MILEAGE_AUDIT_PREVIEW_SCHEMA, AuditPreviewError,
     create_mileage_audit_preview, validate_mileage_audit_preview,
     consume_mileage_audit_preview, audit_source_allowed, explicit_audit_miles,
+    reconciled_repair_delta,
 )
 
 try:
@@ -1544,7 +1545,7 @@ def build_progression_milestone_embed(
         inline=True,
     )
     embed.add_field(
-        name="TrucksBook Driver",
+        name="Driver Account",
         value=f"`{trucksbook_name}`",
         inline=True,
     )
@@ -2378,12 +2379,59 @@ async def maintain_driver_leaderboard():
         await refresh_driver_leaderboard(guild)
 
 
+async def deliver_pending_real_milestones(guild):
+    """Recover missed milestone announcements from settled, combined Real Miles."""
+    if (guild is None or db_pool is None or MILESTONE_ANNOUNCEMENT_CHANNEL_ID is None
+            or os.getenv("AT_V2_ISOLATED_STAGING") == "YES"):
+        return
+    member_ids = active_driver_ids(guild)
+    if not member_ids:
+        return
+    ranks = {miles: name for miles, _, name in PROGRESSION_ROLES if miles > 0}
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            INSERT INTO announced_milestones
+                (discord_user_id, milestone_miles, trucksbook_name, job_id)
+            SELECT p.discord_user_id, threshold.miles, p.trucksbook_name,
+                   'combined-real:' || threshold.miles::text
+            FROM driver_progress p
+            CROSS JOIN unnest($1::bigint[]) AS threshold(miles)
+            WHERE p.discord_user_id = ANY($2::bigint[]) AND p.real_miles >= threshold.miles
+            ON CONFLICT (discord_user_id, milestone_miles) DO NOTHING
+        """, list(ranks), member_ids)
+        pending = await connection.fetch("""
+            SELECT m.discord_user_id, m.milestone_miles, p.trucksbook_name, p.real_miles
+            FROM announced_milestones m
+            JOIN driver_progress p USING (discord_user_id)
+            WHERE m.announced_at IS NULL
+              AND m.discord_user_id = ANY($1::bigint[])
+              AND m.milestone_miles = ANY($2::bigint[])
+              AND p.real_miles >= m.milestone_miles
+            ORDER BY m.milestone_miles DESC, m.recorded_at, m.discord_user_id
+            LIMIT 10
+        """, member_ids, list(ranks))
+    for row in pending:
+        user_id = row["discord_user_id"]
+        miles = row["milestone_miles"]
+        sent = await announce_progression_milestone(
+            guild, guild.get_member(user_id), user_id, row["trucksbook_name"],
+            {"miles": miles, "rank": ranks[miles]}, row["real_miles"],
+        )
+        if not sent:
+            break
+
+
 @tasks.loop(minutes=1)
 async def leaderboard_rollover_task():
     try:
         await maintain_driver_leaderboard()
     except Exception as error:
         print(f"LEADERBOARD MAINTENANCE ERROR: {error}")
+    try:
+        await deliver_pending_real_milestones(bot.get_guild(GUILD_ID))
+    except Exception as error:
+        print(f"MILESTONE DELIVERY RETRY PENDING: {type(error).__name__}", flush=True)
+
 
 
 @leaderboard_rollover_task.before_loop
@@ -3121,6 +3169,15 @@ async def replay_saved_trucksbook_jobs():
             continue
         result = await record_real_job(row['provider_job_id'], name, driver, evidence['distance'])
         if result and result.get('status') == 'added':
+            guild = bot.get_guild(GUILD_ID)
+            if guild is not None:
+                try:
+                    await sync_member_progression_role(guild, driver, result['real_miles'])
+                    await sync_permanent_system_for_driver(
+                        guild, driver, name, result['real_miles'], announce=True,
+                    )
+                except Exception as error:
+                    print(f"REPLAYED TRUCKSBOOK CAREER SYNC ERROR: {type(error).__name__}", flush=True)
             processed += 1
             if processed >= 100:
                 break
@@ -4021,26 +4078,8 @@ async def on_message(message):
                 )
 
             # --------------------------------------
-            # ANNOUNCE NEWLY CROSSED MILESTONES
+            # The milestone worker delivers pending announcements from both providers.
             # --------------------------------------
-
-            for milestone in result[
-                "crossed_milestones"
-            ]:
-                try:
-                    await announce_progression_milestone(
-                        guild=guild,
-                        member=member,
-                        discord_user_id=discord_user_id,
-                        trucksbook_name=trucksbook_name,
-                        milestone=milestone,
-                        real_miles=real_miles,
-                    )
-                except Exception as error:
-                    print(
-                        "MILESTONE ANNOUNCEMENT ERROR: Mileage remains "
-                        f"saved; unexpected failure: {error}"
-                    )
 
             try:
                 await refresh_driver_leaderboard(guild)
@@ -4733,12 +4772,12 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         f"Race observations held for classification/conflicts: `{race['classification_pending_jobs']+race['conflicting_jobs']:,}` jobs\n"
         f"Historical Real jobs held for baseline review: `{historical_real_held_jobs:,}` / `{historical_real_held_miles:,}` miles\n\n"
         f"This preview approves only `{preview['jobs']:,}` reviewed jobs / `{preview['addition']:,}` miles.\n"
-        f"Held for source/account evidence: `{preview['held_jobs']:,}` jobs.\n"
+        f"Held for source, ownership or cross-provider evidence: `{preview['held_jobs']:,}` jobs.\n"
         "Unexplained balances are already in existing totals and are not added again.\n"
         + audit_confirmation_guidance(preview)
     )
     await ctx.send(
-        "**Trucky allocation — separate from this repair preview**\n"
+        "**Trucky credits reviewed alongside TrucksBook**\n"
         + f"Already credited Real: `{float(trucky_allocation['credited_real_miles']):,.2f}` miles / `{trucky_allocation['credited_real_jobs']}` jobs\n"
         + f"Already credited Race: `{float(trucky_allocation['credited_race_miles']):,.2f}` miles / `{trucky_allocation['credited_race_jobs']}` jobs\n"
         + f"Real jobs held for cross-provider/historical reconciliation: `{trucky_allocation['held_real_jobs']}`\n"
@@ -4748,10 +4787,11 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         lines=[f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + **{d['addition']:,}** = {d['proposed_real_miles']:,} Real miles ({d['jobs']} jobs)"
                for d in preview['drivers'][offset:offset+15]]
         await ctx.send('**Reviewed additions by driver**\n'+'\n'.join(lines),allowed_mentions=discord.AllowedMentions.none())
-    if preview.get('job_rows'):
+    if preview.get('job_rows') or preview.get('held_reasons'):
         await ctx.send(f"Reviewed batch #{preview['preview_id']} — exact job-level additions:",
             file=discord.File(BytesIO(json.dumps({'preview_id':preview['preview_id'],
                 'drivers':preview['drivers'],'jobs':preview['job_rows'],
+                'held_reasons':preview['held_reasons'],
                 'mileage_changed':False},indent=2).encode()),filename='mileageaudit-preview.json'),
             allowed_mentions=discord.AllowedMentions.none())
 
@@ -4914,164 +4954,184 @@ async def mileage_apply(ctx, confirmation: str = ""):
     applied_jobs = 0
     applied_miles = 0
 
-    async with db_pool.acquire() as connection:
-        async with connection.transaction():
-            candidates = await connection.fetch(
-                """
-                SELECT *
-                FROM mileage_repair_candidates
-                WHERE applied_at IS NULL
-                ORDER BY discord_user_id, job_id
-                FOR UPDATE;
-                """
-            )
-            try:
-                approval=await validate_mileage_audit_preview(connection,ctx.guild.id,ctx.channel.id,ctx.author.id,candidates)
-            except AuditPreviewError as error:
-                await ctx.reply(str(error),mention_author=False)
-                return
-            candidates=[c for c in candidates if c['job_id'] in approval['job_ids']]
-            if not candidates:
-                await ctx.reply('No additions were approved in this preview. No mileage changed. Stored or held Trucky jobs are not approved by this TrucksBook repair command.',mention_author=False)
-                return
-
-            for candidate in candidates:
-                job = await connection.fetchrow(
+    try:
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+                candidates = await connection.fetch(
                     """
-                    SELECT discord_user_id, accepted_distance, statistics
-                    FROM processed_jobs
-                    WHERE job_id = $1
+                    SELECT *
+                    FROM mileage_repair_candidates
+                    WHERE applied_at IS NULL
+                    ORDER BY discord_user_id, job_id
                     FOR UPDATE;
-                    """,
-                    candidate["job_id"],
+                    """
                 )
-                missing_job = candidate["repair_kind"] in ("missing_wotr", "missing_real")
-                if missing_job:
-                    # If live delivery or another recovery already inserted it,
-                    # consume the candidate without adding another mile.
-                    if job is not None:
-                        await connection.execute(
-                            "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
-                            "applied_by = $2 WHERE job_id = $1;",
-                            candidate["job_id"], ctx.author.id,
-                        )
-                        continue
-                elif (
-                    job is None
-                    or not is_real_statistics(job["statistics"])
-                    or int(job["discord_user_id"])
-                        != int(candidate["discord_user_id"])
-                    or int(job["accepted_distance"])
-                        != int(candidate["recorded_distance"])
-                ):
-                    continue
+                try:
+                    approval=await validate_mileage_audit_preview(connection,ctx.guild.id,ctx.channel.id,ctx.author.id,candidates)
+                except AuditPreviewError as error:
+                    await ctx.reply(str(error),mention_author=False)
+                    return
+                candidates=[c for c in candidates if c['job_id'] in approval['job_ids']]
+                if not candidates:
+                    await ctx.reply('No additions were approved in this preview. No mileage changed. Stored or held Trucky jobs are not approved by this TrucksBook repair command.',mention_author=False)
+                    return
 
-                user_id = int(candidate["discord_user_id"])
-                delta = int(candidate["missing_distance"])
-                verified_repair = VERIFIED_HISTORICAL_REAL_REPAIRS.get(candidate["job_id"])
-                if verified_repair is not None and (
-                    user_id != verified_repair[0]
-                    or int(candidate["actual_distance"]) != verified_repair[2]
-                    or delta != verified_repair[2]
-                    or int(candidate["recorded_distance"]) != 0
-                    or int(candidate["source_channel_id"]) != verified_repair[3]
-                    or int(candidate["source_message_id"]) != verified_repair[4]
-                    or not missing_job
-                ):
-                    continue
-                previous_total = int(
-                    await connection.fetchval(
+                for candidate in candidates:
+                    job = await connection.fetchrow(
                         """
-                        SELECT real_miles
-                        FROM driver_progress
-                        WHERE discord_user_id = $1
+                        SELECT discord_user_id, accepted_distance, statistics
+                        FROM processed_jobs
+                        WHERE job_id = $1
                         FOR UPDATE;
                         """,
-                        user_id,
-                    )
-                    or 0
-                )
-                new_total = previous_total + delta
-
-                if missing_job:
-                    inserted = await connection.fetchval(
-                        """
-                        INSERT INTO processed_jobs (
-                            job_id, discord_user_id, trucksbook_name,
-                            accepted_distance, statistics, processed_at
-                        ) VALUES ($1, $2, $3, $4, 'Real', COALESCE($5, NOW()))
-                        ON CONFLICT (job_id) DO NOTHING RETURNING job_id;
-                        """,
-                        candidate["job_id"], user_id, candidate["trucksbook_name"],
-                        int(candidate["actual_distance"]),
-                        candidate["source_delivered_at"],
-                    )
-                    if inserted is None:
-                        # A concurrent normal delivery won the unique job ID.
-                        await connection.execute(
-                            "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
-                            "applied_by = $2 WHERE job_id = $1;",
-                            candidate["job_id"], ctx.author.id,
-                        )
-                        continue
-                else:
-                    await connection.execute(
-                        """
-                        UPDATE processed_jobs
-                        SET accepted_distance = $2
-                        WHERE job_id = $1;
-                        """,
                         candidate["job_id"],
-                        int(candidate["actual_distance"]),
                     )
-                await connection.execute(
-                    """
-                    INSERT INTO driver_progress (
-                        discord_user_id, trucksbook_name, real_miles, updated_at
-                    )
-                    VALUES ($1, $2, $3, NOW())
-                    ON CONFLICT (discord_user_id) DO UPDATE SET
-                        real_miles = driver_progress.real_miles + $3,
-                        updated_at = NOW();
-                    """,
-                    user_id,
-                    candidate["trucksbook_name"],
-                    delta,
-                )
-
-                # Record repaired crossings as already announced. This keeps
-                # milestone history coherent without flooding the channel.
-                for milestone_miles, _, _ in PROGRESSION_ROLES:
-                    if previous_total < milestone_miles <= new_total:
-                        await connection.execute(
-                            """
-                            INSERT INTO announced_milestones (
-                                discord_user_id, milestone_miles,
-                                trucksbook_name, job_id, announced_at
+                    missing_job = candidate["repair_kind"] in ("missing_wotr", "missing_real")
+                    if missing_job:
+                        # If live delivery or another recovery already inserted it,
+                        # consume the candidate without adding another mile.
+                        if job is not None:
+                            await connection.execute(
+                                "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
+                                "applied_by = $2 WHERE job_id = $1;",
+                                candidate["job_id"], ctx.author.id,
                             )
-                            VALUES ($1, $2, $3, $4, NOW())
-                            ON CONFLICT (discord_user_id, milestone_miles)
-                            DO NOTHING;
+                            continue
+                    elif (
+                        job is None
+                        or not is_real_statistics(job["statistics"])
+                        or int(job["discord_user_id"])
+                            != int(candidate["discord_user_id"])
+                        or int(job["accepted_distance"])
+                            != int(candidate["recorded_distance"])
+                    ):
+                        continue
+
+                    user_id = int(candidate["discord_user_id"])
+                    delta = int(candidate["missing_distance"])
+                    verified_repair = VERIFIED_HISTORICAL_REAL_REPAIRS.get(candidate["job_id"])
+                    if verified_repair is not None and (
+                        user_id != verified_repair[0]
+                        or int(candidate["actual_distance"]) != verified_repair[2]
+                        or delta != verified_repair[2]
+                        or int(candidate["recorded_distance"]) != 0
+                        or int(candidate["source_channel_id"]) != verified_repair[3]
+                        or int(candidate["source_message_id"]) != verified_repair[4]
+                        or not missing_job
+                    ):
+                        continue
+                    previous_total = int(
+                        await connection.fetchval(
+                            """
+                            SELECT real_miles
+                            FROM driver_progress
+                            WHERE discord_user_id = $1
+                            FOR UPDATE;
                             """,
                             user_id,
-                            milestone_miles,
-                            candidate["trucksbook_name"],
-                            candidate["job_id"],
                         )
+                        or 0
+                    )
+                    delta, hold = await reconciled_repair_delta(connection, candidate)
+                    if hold or delta != approval['additions'][candidate['job_id']]:
+                        raise AuditPreviewError('Provider evidence changed after review. Run a fresh audit.')
+                    new_total = previous_total + delta
 
-                await connection.execute(
-                    """
-                    UPDATE mileage_repair_candidates
-                    SET applied_at = NOW(), applied_by = $2
-                    WHERE job_id = $1 AND applied_at IS NULL;
-                    """,
-                    candidate["job_id"],
-                    ctx.author.id,
-                )
-                affected_users.add(user_id)
-                applied_jobs += 1
-                applied_miles += delta
-            await consume_mileage_audit_preview(connection,approval['preview_id'])
+                    if missing_job:
+                        inserted = await connection.fetchval(
+                            """
+                            INSERT INTO processed_jobs (
+                                job_id, discord_user_id, trucksbook_name,
+                                accepted_distance, statistics, processed_at
+                            ) VALUES ($1, $2, $3, $4, 'Real', COALESCE($5, NOW()))
+                            ON CONFLICT (job_id) DO NOTHING RETURNING job_id;
+                            """,
+                            candidate["job_id"], user_id, candidate["trucksbook_name"],
+                            int(candidate["actual_distance"]),
+                            candidate["source_delivered_at"],
+                        )
+                        if inserted is None:
+                            # A concurrent normal delivery won the unique job ID.
+                            await connection.execute(
+                                "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
+                                "applied_by = $2 WHERE job_id = $1;",
+                                candidate["job_id"], ctx.author.id,
+                            )
+                            continue
+                    else:
+                        await connection.execute(
+                            """
+                            UPDATE processed_jobs
+                            SET accepted_distance = $2
+                            WHERE job_id = $1;
+                            """,
+                            candidate["job_id"],
+                            int(candidate["actual_distance"]),
+                        )
+                    await connection.execute(
+                        """
+                        INSERT INTO driver_progress (
+                            discord_user_id, trucksbook_name, real_miles, updated_at
+                        )
+                        VALUES ($1, $2, $3, NOW())
+                        ON CONFLICT (discord_user_id) DO UPDATE SET
+                            real_miles = driver_progress.real_miles + $3,
+                            updated_at = NOW();
+                        """,
+                        user_id,
+                        candidate["trucksbook_name"],
+                        delta,
+                    )
+
+                    if await connection.fetchval(
+                        "SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"
+                    ):
+                        await connection.execute("""
+                            UPDATE unified_v2_production_mileage_baselines b
+                            SET trucksbook_real_miles=p.real_miles-FLOOR(COALESCE((
+                                SELECT SUM(c.miles) FROM unified_v2_production_credit_ledger c
+                                WHERE c.discord_user_id=b.discord_user_id AND c.provider='trucky'
+                                  AND c.mileage_type='real'),0))::bigint
+                            FROM driver_progress p
+                            WHERE b.discord_user_id=$1 AND p.discord_user_id=b.discord_user_id
+                        """, user_id)
+
+                    # Record repaired crossings as already announced. This keeps
+                    # milestone history coherent without flooding the channel.
+                    for milestone_miles, _, _ in PROGRESSION_ROLES:
+                        if previous_total < milestone_miles <= new_total:
+                            await connection.execute(
+                                """
+                                INSERT INTO announced_milestones (
+                                    discord_user_id, milestone_miles,
+                                    trucksbook_name, job_id, announced_at
+                                )
+                                VALUES ($1, $2, $3, $4, NOW())
+                                ON CONFLICT (discord_user_id, milestone_miles)
+                                DO NOTHING;
+                                """,
+                                user_id,
+                                milestone_miles,
+                                candidate["trucksbook_name"],
+                                candidate["job_id"],
+                            )
+
+                    await connection.execute(
+                        """
+                        UPDATE mileage_repair_candidates
+                        SET applied_at = NOW(), applied_by = $2
+                        WHERE job_id = $1 AND applied_at IS NULL;
+                        """,
+                        candidate["job_id"],
+                        ctx.author.id,
+                    )
+                    affected_users.add(user_id)
+                    applied_jobs += 1
+                    applied_miles += delta
+                await consume_mileage_audit_preview(connection,approval['preview_id'])
+    except AuditPreviewError as error:
+        await ctx.reply(str(error), mention_author=False)
+        return
 
     role_failures = 0
     for user_id in affected_users:

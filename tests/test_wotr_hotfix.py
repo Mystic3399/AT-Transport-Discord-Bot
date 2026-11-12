@@ -155,6 +155,7 @@ class AuditApplyTests(unittest.TestCase):
                     if 'FROM driver_links' in sql: return []
                     return [c for c in candidates.values() if not c.get('applied')]
                 async def fetchval(self, sql, *args):
+                    if 'to_regclass' in sql: return False
                     if 'SELECT real_miles' in sql: return total[0]
                     if 'INSERT INTO processed_jobs' in sql:
                         self.asserted_insert = 'ON CONFLICT (job_id) DO NOTHING' in sql
@@ -203,11 +204,15 @@ class AuditApplyTests(unittest.TestCase):
             async def preview(*args):
                 selected=[c for c in candidates.values() if not c.get('applied') and c['job_id'] in args[-1]]
                 return dict(preview_id=1,jobs=len(selected),addition=sum(c['missing_distance'] for c in selected),drivers=[],held_jobs=0)
-            async def validate(*args):return dict(preview_id=1,job_ids=set(c['job_id'] for c in args[-1]))
+            async def validate(*args):
+                additions = {c['job_id']: c['missing_distance'] for c in args[-1]}
+                return dict(preview_id=1,job_ids=set(additions),additions=additions)
             async def consume(*args):pass
             ns.update(AuditPreviewError=AuditPreviewError,audit_source_allowed=lambda id:id==9,
                 explicit_audit_miles=explicit_audit_miles,create_mileage_audit_preview=preview,
                 validate_mileage_audit_preview=validate,consume_mileage_audit_preview=consume)
+            from mileage_audit_confirmation_v2 import reconciled_repair_delta
+            ns["reconciled_repair_delta"] = reconciled_repair_delta
             from unittest.mock import AsyncMock
             ns['read_pending_account_inventory']=AsyncMock(return_value={'accounts':[]})
             ns['read_pending_race']=AsyncMock(return_value=dict(verified_pending_miles=0,verified_pending_jobs=0,

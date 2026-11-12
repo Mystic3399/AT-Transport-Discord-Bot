@@ -96,34 +96,69 @@ def _candidate(row):
         raise AuditPreviewError('A repair delta is inconsistent. Run a fresh audit.')
     return result
 
+async def reconciled_repair_delta(conn, candidate):
+    """Calculate the net Real credit using the live TrucksBook matching rules."""
+    if not await conn.fetchval("SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"):
+        return candidate['missing_distance'], None
+    overlap = await conn.fetchval("""SELECT EXISTS(SELECT 1
+        FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1
+          AND provider='trucky' AND mileage_type='real')""", candidate['discord_user_id'])
+    if not overlap:
+        return candidate['missing_distance'], None
+    if (os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES'
+            or candidate['recorded_distance'] != 0
+            or candidate['repair_kind'] not in ('missing_real', 'missing_wotr')):
+        return None, 'cross_provider_review_required'
+    from automatic_linked_mileage_v2 import reconcile_trucksbook
+    delta, hold = await reconcile_trucksbook(
+        conn, candidate['job_id'], candidate['discord_user_id'], candidate['actual_distance'],
+    )
+    return (None, hold) if hold else (int(delta), None)
+
+
 async def create_mileage_audit_preview(pool,guild_id,channel_id,reviewer_id,job_ids):
     _identity(guild_id,channel_id,reviewer_id)
     async with pool.acquire() as conn:
         async with conn.transaction(isolation='repeatable_read'):
             rows=await conn.fetch('''SELECT * FROM mileage_repair_candidates
-                WHERE applied_at IS NULL AND job_id=ANY($1::text[]) ORDER BY job_id''',sorted(set(job_ids)))
+                WHERE applied_at IS NULL AND job_id=ANY($1::text[]) ORDER BY discord_user_id, job_id''',sorted(set(job_ids)))
             candidates=[];held=0
-            for row in rows:
-                link=await conn.fetchval('SELECT trucksbook_user_id FROM driver_links WHERE discord_user_id=$1',row['discord_user_id'])
-                if (not audit_source_allowed(row['source_webhook_id']) or type(link) is not int or link<=0
-                    or str(link)!=row['source_provider_account_id']):
-                    held+=1;continue
-                candidates.append(_candidate(row))
+            holds={}; additions={}
+            # Simulate the entire batch in application order. The savepoint
+            # keeps ledger replacements and duplicate decisions out of storage.
+            probe = conn.transaction()
+            await probe.start()
+            try:
+                for row in rows:
+                    link=await conn.fetchval('SELECT trucksbook_user_id FROM driver_links WHERE discord_user_id=$1',row['discord_user_id'])
+                    if (not audit_source_allowed(row['source_webhook_id']) or type(link) is not int or link<=0
+                        or str(link)!=row['source_provider_account_id']):
+                        held+=1;continue
+                    candidate = _candidate(row)
+                    delta, hold = await reconciled_repair_delta(conn, candidate)
+                    if hold:
+                        holds[candidate['job_id']] = hold
+                        held += 1
+                        continue
+                    candidates.append(candidate)
+                    additions[candidate['job_id']] = delta
+            finally:
+                await probe.rollback()
             drivers=[]
             for user in sorted({r['discord_user_id'] for r in candidates}):
                 total=int(await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1',user) or 0)
                 selected=[r for r in candidates if r['discord_user_id']==user]
-                delta=sum(r['missing_distance'] for r in selected)
+                delta=sum(additions[r['job_id']] for r in selected)
                 drivers.append(dict(discord_user_id=user,current_real_miles=total,addition=delta,
                                     proposed_real_miles=total+delta,jobs=len(selected)))
-            snapshot={'candidates':candidates,'drivers':drivers};raw=_canonical(snapshot)
+            snapshot={'candidates':candidates,'drivers':drivers,'additions':additions};raw=_canonical(snapshot)
             digest=hashlib.sha256(raw.encode()).hexdigest()
             preview_id=await conn.fetchval('''INSERT INTO mileage_audit_previews_v2
                 (guild_id,channel_id,reviewer_id,snapshot,snapshot_sha256)
                 VALUES($1,$2,$3,$4::jsonb,$5) RETURNING preview_id''',guild_id,channel_id,reviewer_id,raw,digest)
     return dict(preview_id=preview_id,drivers=drivers,jobs=len(candidates),
-                addition=sum(d['addition'] for d in drivers),held_jobs=held,mileage_awarded=False,
-                job_rows=[{k:r[k] for k in ('job_id','discord_user_id','recorded_distance','actual_distance','missing_distance')}
+                addition=sum(d['addition'] for d in drivers),held_jobs=held,held_reasons=holds,mileage_awarded=False,
+                job_rows=[dict({k:r[k] for k in ('job_id','discord_user_id','recorded_distance','actual_distance','missing_distance')}, net_addition=additions[r['job_id']])
                           for r in candidates])
 
 async def validate_mileage_audit_preview(conn,guild_id,channel_id,reviewer_id,candidates):
@@ -154,16 +189,13 @@ async def validate_mileage_audit_preview(conn,guild_id,channel_id,reviewer_id,ca
         # Same lock/order as the live Trucky worker. Disabling that worker
         # does not make its existing Real credits safe to duplicate via repair.
         await conn.execute('SELECT pg_advisory_xact_lock($1)',driver['discord_user_id'])
-        if await conn.fetchval("SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"):
-            overlap = await conn.fetchval("""SELECT EXISTS(SELECT 1
-                FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1
-                  AND provider='trucky' AND mileage_type='real')""",driver['discord_user_id'])
-            if overlap:
-                raise AuditPreviewError('This driver has credited Trucky Real jobs. Cross-provider reconciliation is required before adding TrucksBook repairs. No mileage changed.')
         total=await conn.fetchval('SELECT real_miles FROM driver_progress WHERE discord_user_id=$1 FOR UPDATE',driver['discord_user_id'])
         if int(total or 0)!=driver['current_real_miles']:
             raise AuditPreviewError('A driver balance changed after the preview. Run !mileageaudit again.')
-    return {'preview_id':row['preview_id'],'job_ids':set(expected)}
+    additions = snapshot.get('additions')
+    if not isinstance(additions, dict) or additions.keys() != expected.keys():
+        raise AuditPreviewError('Run !mileageaudit again to review the net cross-provider additions.')
+    return {'preview_id':row['preview_id'],'job_ids':set(expected),'additions':additions}
 
 async def consume_mileage_audit_preview(conn,preview_id):
     await conn.execute('UPDATE mileage_audit_previews_v2 SET applied_at=NOW() WHERE preview_id=$1 AND applied_at IS NULL',preview_id)

@@ -46,6 +46,7 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
             author=SimpleNamespace(id=self.reviewer),reply=AsyncMock(),send=AsyncMock())
         ns=dict(NS,GUILD_ID=self.guild,db_pool=self.pool,PROGRESSION_ROLES=[],VERIFIED_HISTORICAL_REAL_REPAIRS={},
             AuditPreviewError=audit.AuditPreviewError,validate_mileage_audit_preview=audit.validate_mileage_audit_preview,
+            reconciled_repair_delta=audit.reconciled_repair_delta,
             consume_mileage_audit_preview=audit.consume_mileage_audit_preview,sync_member_progression_role=AsyncMock(),
             sync_permanent_system_for_driver=AsyncMock(),announce_pending_repair_achievements=AsyncMock(return_value=(0,0)),
             refresh_driver_leaderboard=AsyncMock())
