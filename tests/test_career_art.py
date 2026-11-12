@@ -15,16 +15,16 @@ class CareerArtTests(unittest.TestCase):
 
     def test_standings_render_full_partial_and_empty_boards(self):
         rows = [
-            (f"Driver {position}", 15000 - position * 100, "scania-s-r-next-gen", position == 4)
+            (f"Driver {position}", 15000 - position * 100, position == 4)
             for position in range(1, 11)
         ]
         for period, entries in (("weekly", rows), ("monthly", rows[:2]), ("all-time", [])):
             with self.subTest(period=period):
-                self.assert_png(career_art.standings(period, entries), (1080, 1220))
+                self.assert_png(career_art.standings(period, entries), (1121, 1403))
 
     def test_recognition_art_uses_existing_assets(self):
         self.assert_png(career_art.hall_of_fame({"Immortal": 1}), (1080, 415))
-        self.assert_png(career_art.achievement("Driver", "Horizon Wolf", 75000), (1080, 490))
+        self.assert_png(career_art.achievement("Driver", "Viking Pathfinder", 150000), (1536, 1024))
         self.assert_png(career_art.achievement(
             "Driver", "100K Centurion Club", 100000, permanent=True
-        ), (1080, 490))
+        ), (1536, 1024))

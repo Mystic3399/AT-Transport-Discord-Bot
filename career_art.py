@@ -11,11 +11,11 @@ WHITE = "#eef7ff"
 BLUE = "#53d7ff"
 GOLD = "#ffd477"
 SILVER = "#c6d8ea"
-BRONZE = "#e8a782"
-THEMES = {
-    "weekly": ("WEEKLY STANDINGS", BLUE, "#082949"),
-    "monthly": ("MONTHLY STANDINGS", GOLD, "#35280f"),
-    "all-time": ("ALL-TIME STANDINGS", SILVER, "#202b46"),
+CAREER_ART = ROOT / "assets/career"
+STANDINGS_TITLES = {
+    "weekly": ("WEEKLY STANDINGS", WHITE),
+    "monthly": ("MONTHLY STANDINGS", GOLD),
+    "all-time": ("ALL-TIME STANDINGS", SILVER),
 }
 
 
@@ -68,51 +68,27 @@ def encode(canvas):
 
 
 def standings(period, entries):
-    title, accent, tint = THEMES[period]
-    canvas, draw = background(1220, accent, tint)
-    place(canvas, ART / "company-logo.webp", (30, 28, 200, 124))
-    label(draw, (252, 44), "DRIVER LEADERBOARD", 52, width=790)
-    label(draw, (254, 109), title + "  /  REAL MILES", 28, accent)
-    draw.line((34, 163, 1046, 163), fill=accent, width=3)
+    with Image.open(CAREER_ART / "leaderboard.webp") as source:
+        canvas = source.convert("RGB")
+    draw = ImageDraw.Draw(canvas)
+    title, accent = STANDINGS_TITLES[period]
+    label(draw, (382, 186), title, 31, accent, width=425, anchor="mm")
 
-    for index, (x, top, platform, colour, fallback) in enumerate((
-        (379, 180, 505, GOLD, "scania-s-r-next-gen"),
-        (38, 215, 534, SILVER, "volvo-fh6"),
-        (720, 242, 552, BRONZE, "man-euro-6"),
-    )):
-        if index >= len(entries):
-            continue
-        name, miles, truck, former = entries[index]
-        truck_path = ART / "trucks" / f"{truck}.webp"
-        if not truck or not truck_path.is_file():
-            truck_path = ART / "trucks" / f"{fallback}.webp"
-        draw.rounded_rectangle((x, top, x + 322, 578), radius=12,
-                               fill="#09192d", outline=colour, width=3)
-        place(canvas, truck_path, (x + 7, top + 7, 308, platform - top - 7), cover=True)
-        draw.rectangle((x, platform, x + 322, 598), fill="#142439", outline=colour, width=3)
-        draw.rectangle((x, platform, x + 322, platform + 7), fill=colour)
-        label(draw, (x + 161, (platform + 598) // 2 + 3), str(index + 1), 37, colour, anchor="mm")
-        label(draw, (x + 161, 612), name + (" (Former)" if former else ""),
-              31, width=310, anchor="mt")
-        label(draw, (x + 161, 652), f"{miles:,} MI", 33, colour, anchor="mt")
+    for (name, miles, former), x in zip(entries[:3], (558, 202, 924)):
+        label(draw, (x, 682), name.upper() + (" (Former)" if former else ""),
+              34, width=255, anchor="mm")
+        label(draw, (x, 726), f"{miles:,} MI", 32, "#071525",
+              width=255, anchor="mm")
 
     if not entries:
-        label(draw, (WIDTH // 2, 390), "No qualifying Real Miles yet", 42, anchor="mt")
+        label(draw, (560, 873), "No qualifying Real Miles yet", 30, anchor="mm")
 
-    draw.rounded_rectangle((34, 716, 1046, 1138), radius=12,
-                           fill="#081528", outline=accent, width=2)
-    label(draw, (57, 734), "POS", 26, accent)
-    label(draw, (174, 734), "DRIVER", 26, accent)
-    label(draw, (1020, 734), "REAL MILES", 26, accent, anchor="rt")
-    for index in range(4, 11):
-        y = 775 + (index - 4) * 50
-        draw.rectangle((39, y, 1041, y + 48), fill="#102743" if index % 2 == 0 else "#0c1d33")
-        label(draw, (59, y + 10), f"{index:02}", 28, accent)
-        if index <= len(entries):
-            name, miles, _, former = entries[index - 1]
-            label(draw, (174, y + 9), name + (" (Former)" if former else ""), 30, width=600)
-            label(draw, (1020, y + 9), f"{miles:,}", 30, anchor="rt")
-    label(draw, (540, 1162), "DRIVEN BEYOND HORIZONS", 27, accent, anchor="mt")
+    for position, (name, miles, former) in enumerate(entries[3:10], 4):
+        y = 875 + (position - 4) * 55
+        label(draw, (119, y), f"{position:02}", 34, anchor="mm")
+        label(draw, (479, y), name + (" (Former)" if former else ""),
+              35, width=510, anchor="mm")
+        label(draw, (921, y), f"{miles:,}", 35, width=300, anchor="mm")
     return encode(canvas)
 
 
@@ -137,20 +113,19 @@ def hall_of_fame(counts):
 
 
 def achievement(name, title, miles, *, permanent=False):
-    accent = GOLD if permanent else BLUE
-    canvas, draw = background(490, accent, "#3b2a13" if permanent else "#062f57")
-    place(canvas, ART / "company-logo.webp", (39, 28, 195, 120))
-    label(draw, (258, 49), "PERMANENT ACHIEVEMENT" if permanent else "RANK MILESTONE",
-          38, accent, width=775)
-    draw.line((42, 150, 1038, 150), fill=accent, width=2)
+    with Image.open(CAREER_ART / "achievement.webp") as source:
+        canvas = source.convert("RGB")
+    draw = ImageDraw.Draw(canvas)
     if permanent:
         key = CLUBS.get(miles, ("achievement", ""))[0]
-        place(canvas, ART / "insignias" / f"{key}.webp", (40, 174, 242, 246))
+        with Image.open(ART / "insignias" / f"{key}.webp") as source:
+            emblem = source.convert("RGBA")
     else:
-        asset = ImageOps.contain(badge(miles, False), (242, 246), Image.Resampling.LANCZOS)
-        canvas.paste(asset, (40 + (242 - asset.width) // 2, 174 + (246 - asset.height) // 2), asset)
-    label(draw, (310, 180), name, 37, width=710)
-    label(draw, (310, 241), title, 50, accent, width=710)
-    label(draw, (310, 320), f"{miles:,} REAL MILES", 47, width=710)
-    label(draw, (540, 443), "DRIVEN BEYOND HORIZONS", 25, accent, anchor="mt")
+        emblem = badge(miles, False)
+    emblem = ImageOps.contain(emblem, (450, 447), Image.Resampling.LANCZOS)
+    canvas.paste(emblem, (438 - emblem.width // 2, 624 - emblem.height), emblem)
+    label(draw, (768, 748), name.upper(), 76, width=1140, anchor="mm")
+    label(draw, (768, 815), title.upper(), 52, GOLD if permanent else BLUE,
+          width=1220, anchor="mm")
+    label(draw, (768, 881), f"{miles:,} REAL MILES", 68, width=1230, anchor="mm")
     return encode(canvas)

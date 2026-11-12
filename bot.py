@@ -2214,26 +2214,12 @@ async def sync_competition_role(guild, period_type, role_id):
             print(f"LEADERBOARD ROLE ADD ERROR ({winner.id}): {error}")
 
 
-def leaderboard_lines(rows, guild, limit, mark_former=False):
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    lines = []
-    for position, row in enumerate(rows[:limit], start=1):
-        user_id = int(row["discord_user_id"])
-        member = guild.get_member(user_id) if guild else None
-        if member:
-            label = member.mention
-            if mark_former and driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver":
-                label += " *(Former Driver)*"
-        else:
-            safe_name = discord.utils.escape_markdown(str(row["trucksbook_name"])[:64])
-            label = f"**{safe_name}**"
-            if mark_former:
-                label += " *(Former Driver)*"
-        prefix = medals.get(position, f"`{position:>2}.`")
-        lines.append(
-            f"{prefix} {label} · **{int(row['real_miles']):,} mi**"
-        )
-    return "\n".join(lines) if lines else "*No qualifying Real miles recorded yet.*"
+def leaderboard_lines(entries):
+    return "\n".join(
+        f"{position}. {discord.utils.escape_markdown(str(name)[:64])}"
+        f"{' (Former Driver)' if former else ''} · {miles:,} mi"
+        for position, (name, miles, former) in enumerate(entries, 1)
+    ) or "No qualifying Real Miles recorded yet."
 
 
 async def refresh_driver_leaderboard(guild=None):
@@ -2277,14 +2263,6 @@ async def refresh_driver_leaderboard(guild=None):
                 LIMIT 10;
                 """
             )
-        podium_ids = list({int(row["discord_user_id"]) for rankings in
-                           (weekly_rows, monthly_rows, all_time_rows) for row in rankings[:3]})
-        preferences = await connection.fetch(
-            "SELECT discord_user_id, truck_key FROM driver_card_preferences "
-            "WHERE discord_user_id = ANY($1::bigint[])",
-            podium_ids,
-        )
-        trucks = {int(row["discord_user_id"]): row["truck_key"] for row in preferences}
     next_week = int(uk_midnight_utc(weekly_end).timestamp())
     next_month = int(uk_midnight_utc(monthly_end).timestamp())
     updated_at = datetime.now(timezone.utc)
@@ -2295,11 +2273,9 @@ async def refresh_driver_leaderboard(guild=None):
         ("monthly", "Monthly standings", monthly_rows, next_month, False),
         ("all-time", "All-time records", all_time_rows, None, True),
     ):
-        lines = leaderboard_lines(rows, guild, 10, mark_former=former)
-        if reset:
-            lines += f"\n\n**Resets** <t:{reset}:R>"
+        reset_text = f"**Resets** <t:{reset}:R>" if reset else None
         embed = discord.Embed(
-            title=title, description=lines,
+            title=title, description=reset_text,
             colour=discord.Colour.from_rgb(27, 132, 215),
         )
         if former:
@@ -2314,15 +2290,17 @@ async def refresh_driver_leaderboard(guild=None):
                 driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver"
             )
             entries.append((member.display_name if member else row["trucksbook_name"],
-                            int(row["real_miles"]), trucks.get(user_id), is_former))
+                            int(row["real_miles"]), is_former))
         image = await career_art_file(
             embed, f"{period}-standings.png", career_art.standings, period, entries
         )
         if image:
+            image.description = f"{title} · Real Miles\n{leaderboard_lines(entries)}"[:1024]
             artwork.append(image)
+        else:
+            embed.description = "\n\n".join(filter(None, (leaderboard_lines(entries), reset_text)))
         embeds.append(embed)
     embeds[0].set_author(name="A&T TRANSPORT LTD  /  DRIVER LEADERBOARD")
-    embeds[0].description = "Verified Real Miles • Active A&T drivers\n\n" + embeds[0].description
     posted = await upsert_controlled_message(
         "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, embeds, artwork=artwork
     )
