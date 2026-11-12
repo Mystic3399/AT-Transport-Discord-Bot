@@ -2465,10 +2465,20 @@ async def refresh_hall_of_fame_display():
     }
     icons = {"Immortal": "💎", "Elite": "👑", "Veteran": "⚔️"}
     thresholds = {"Immortal": "1,000,000", "Elite": "500,000", "Veteran": "250,000"}
+    header = discord.Embed(colour=discord.Colour.gold())
+    inductees = {
+        tier: [row["trucksbook_name"] for row in rows if row["highest_tier"] == tier]
+        for tier in thresholds
+    }
+    image = await career_art_file(
+        header, "hall-of-fame.png", career_art.hall_of_fame, inductees
+    )
     embeds = []
     remaining_budget = 5200
     for tier_name in ("Immortal", "Elite", "Veteran"):
         tier_rows = [row for row in rows if row["highest_tier"] == tier_name]
+        if image and not tier_rows:
+            continue
         lines = []
         description_limit = min(4000, remaining_budget)
         truncated = "*Additional records are on file.*"
@@ -2496,22 +2506,15 @@ async def refresh_hall_of_fame_display():
             description=description,
             colour=colours[tier_name],
         ))
-    embeds[0].set_author(name="A&T TRANSPORT LTD  /  HALL OF FAME")
-    embeds[0].description = (
-        "Permanent career records • Verified Real Miles\n\n"
-        + embeds[0].description
-    )
-    embeds[-1].set_footer(
-        text="A&T Transport LTD • Driven Beyond Horizons"
-    )
-    header = discord.Embed(colour=discord.Colour.gold())
-    inductees = {
-        tier: [row["trucksbook_name"] for row in rows if row["highest_tier"] == tier]
-        for tier in thresholds
-    }
-    image = await career_art_file(
-        header, "hall-of-fame.png", career_art.hall_of_fame, inductees
-    )
+    if embeds:
+        embeds[0].set_author(name="A&T TRANSPORT LTD  /  HALL OF FAME")
+        embeds[0].description = (
+            "Permanent career records • Verified Real Miles\n\n"
+            + embeds[0].description
+        )
+        embeds[-1].set_footer(
+            text="A&T Transport LTD • Driven Beyond Horizons"
+        )
     if image:
         image.description = "A&T Hall of Fame · Permanent career honours by verified Real Miles."
         embeds.insert(0, header)
