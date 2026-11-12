@@ -76,13 +76,15 @@ def hall_of_fame(inductees):
         ("Veteran", 1169, SILVER),
     ):
         names = inductees.get(tier, ())
-        if len(names) == 1:
-            caption = str(names[0]).upper()
-        elif names:
-            caption = f"{len(names):,} INDUCTEES"
-        else:
-            caption = "NO INDUCTEES YET"
-        label(draw, (884, y), caption, 43, colour, width=381, anchor="mm")
+        captions = [str(name).upper() for name in names[:3]]
+        if len(names) > 3:
+            captions.append(f"+{len(names) - 3:,} MORE")
+        if not captions:
+            captions = ["NO INDUCTEES YET"]
+        size = 43 if len(captions) == 1 else 28
+        for index, caption in enumerate(captions):
+            line_y = y + (index - (len(captions) - 1) / 2) * 30
+            label(draw, (884, line_y), caption, size, colour, width=381, anchor="mm")
     return encode(canvas)
 
 
