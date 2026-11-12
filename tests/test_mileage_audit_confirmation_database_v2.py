@@ -170,7 +170,7 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
         try:
             await self.apply(self.ctx,'CONFIRM')
             self.assertEqual(await self.total(),1000)
-            self.assertIn('Cross-provider reconciliation is required',self.ctx.reply.call_args.args[0])
+            self.assertIn('Provider evidence changed after review',self.ctx.reply.call_args.args[0])
         finally:
             async with self.pool.acquire() as c:
                 await c.execute('DELETE FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',self.user)
