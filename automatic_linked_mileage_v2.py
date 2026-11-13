@@ -22,7 +22,7 @@ ALTER TABLE automatic_linked_journey_pairs_v2
 """
 
 
-def trucksbook_comparison(job_id, user, evidence, miles):
+def trucksbook_comparison(job_id, user, evidence, miles, *, allow_missing_cargo=False):
     value = json.loads(evidence) if isinstance(evidence, str) else evidence
     if not isinstance(value, dict):
         raise ValueError("Invalid stored delivery")
@@ -37,7 +37,11 @@ def trucksbook_comparison(job_id, user, evidence, miles):
     record = dict(provider="trucksbook", provider_job_id=job_id, discord_user_id=user,
                   mileage_type="real", miles=Decimal(str(miles)), metadata=value,
                   delivered_at=datetime.fromisoformat(value["source_message_at"]))
-    _normalized_metadata(value)
+    if allow_missing_cargo and not value.get("cargo"):
+        # Validate the route without inventing cargo in the retained evidence.
+        _normalized_metadata(dict(value, cargo="missing cargo"))
+    else:
+        _normalized_metadata(value)
     if record["delivered_at"].tzinfo is None or record["miles"] <= 0:
         raise ValueError("Invalid delivery")
     return record
@@ -96,10 +100,16 @@ async def reconcile_trucky(conn, candidate):
         for version in versions:
             try:
                 comparisons.append(trucksbook_comparison(
-                    job_id, user, version["evidence"], version["accepted_distance"]))
+                    job_id, user, version["evidence"], version["accepted_distance"],
+                    allow_missing_cargo=True))
             except (ValueError, TypeError, KeyError, InvalidOperation):
                 comparisons = []
                 break
+        if any(not item["metadata"].get("cargo") for item in comparisons):
+            if any(abs(incoming["delivered_at"] - item["delivered_at"]) <= timedelta(minutes=30)
+                   for item in comparisons):
+                return None, "route_evidence_pending"
+            continue
         if comparisons:
             comparable_jobs.add(job_id)
             uncertain_route = uncertain_route or any(
@@ -206,15 +216,28 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
     incoming_versions = []
     try:
         for row in rows:
-            incoming_versions.append(trucksbook_comparison(job_id, user, row["evidence"], miles))
+            incoming_versions.append(trucksbook_comparison(
+                job_id, user, row["evidence"], miles, allow_missing_cargo=True,
+            ))
     except (ValueError, TypeError, KeyError, InvalidOperation):
         return None, "route_evidence_pending"
     if not incoming_versions:
         return None, "route_evidence_pending"
     credits = await conn.fetch("""
-        SELECT provider_job_id,miles FROM unified_v2_production_credit_ledger
+        SELECT provider_job_id,miles,delivered_at FROM unified_v2_production_credit_ledger
         WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real'
         """, user)
+    if any(not job["metadata"].get("cargo") for job in incoming_versions):
+        # Cargo-free jobs cannot be paired. Only credit them when all
+        # existing Trucky credits are outside the duplicate matching window.
+        for credit in credits:
+            delivered_at = credit["delivered_at"]
+            if delivered_at is None or any(
+                abs(delivered_at - job["delivered_at"]) <= timedelta(minutes=30)
+                for job in incoming_versions
+            ):
+                return None, "route_evidence_pending"
+        return Decimal(miles), None
     credited = {row["provider_job_id"]: row["miles"] for row in credits}
     candidates = await linked_trucky_comparisons(conn, user)
     if any(not candidate.get("metadata")

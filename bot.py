@@ -4109,6 +4109,9 @@ async def on_message(message):
                     f"{error}"
                 )
 
+        else:
+            print(f"ACTION: TrucksBook job {job_id} held ({result['status']}).")
+
         print("--------------------------------")
 
     await bot.process_commands(
