@@ -46,6 +46,7 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
             author=SimpleNamespace(id=self.reviewer),reply=AsyncMock(),send=AsyncMock())
         ns=dict(NS,GUILD_ID=self.guild,db_pool=self.pool,PROGRESSION_ROLES=[],VERIFIED_HISTORICAL_REAL_REPAIRS={},
             AuditPreviewError=audit.AuditPreviewError,validate_mileage_audit_preview=audit.validate_mileage_audit_preview,
+            reconciled_repair_delta=audit.reconciled_repair_delta,
             consume_mileage_audit_preview=audit.consume_mileage_audit_preview,sync_member_progression_role=AsyncMock(),
             sync_permanent_system_for_driver=AsyncMock(),announce_pending_repair_achievements=AsyncMock(return_value=(0,0)),
             refresh_driver_leaderboard=AsyncMock())
@@ -169,7 +170,7 @@ class AuditDatabaseTests(unittest.IsolatedAsyncioTestCase):
         try:
             await self.apply(self.ctx,'CONFIRM')
             self.assertEqual(await self.total(),1000)
-            self.assertIn('Cross-provider reconciliation is required',self.ctx.reply.call_args.args[0])
+            self.assertIn('Provider evidence changed after review',self.ctx.reply.call_args.args[0])
         finally:
             async with self.pool.acquire() as c:
                 await c.execute('DELETE FROM unified_v2_production_credit_ledger WHERE discord_user_id=$1',self.user)

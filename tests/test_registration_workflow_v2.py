@@ -80,7 +80,8 @@ class RegistrationEmbedTests(unittest.IsolatedAsyncioTestCase):
             utils=SimpleNamespace(escape_markdown=lambda v:v),
             AllowedMentions=SimpleNamespace(none=lambda:None),NotFound=type('NotFound',(Exception,),{}))
         ns=dict(asyncio=asyncio,registration_embed_locks={},db_pool=SimpleNamespace(acquire=Acquire),
-                bot=SimpleNamespace(get_channel=lambda channel_id:channel), GUILD_ID=11,discord=fake_discord)
+                bot=SimpleNamespace(get_channel=lambda channel_id:channel), GUILD_ID=11,discord=fake_discord,
+                onboarding_flow=SimpleNamespace(panel=lambda title,description:Embed(description=description),advance=AsyncMock()))
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'),ns)
         view=dict(session={'verification_channel_id':22,'verification_message_id':33,'status':'pending'},
             steam_status='Verified',steam_id64='76561198000000072',ready=True,
@@ -92,7 +93,7 @@ class RegistrationEmbedTests(unittest.IsolatedAsyncioTestCase):
         channel.send.assert_not_awaited()
         embed=message.edit.await_args.kwargs['embed']
         self.assertEqual([f['name'] for f in embed.fields],['Steam — Verified','TrucksBook — Linked','Trucky — Not Linked'])
-        self.assertIn('!confirm',embed.description)
+        ns['onboarding_flow'].advance.assert_awaited_once_with(ns['db_pool'],channel,111,view)
         self.assertIn('steamcommunity.com/profiles/',embed.fields[0]['value'])
 
 class StagingSlashSyncTests(unittest.IsolatedAsyncioTestCase):

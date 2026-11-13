@@ -69,7 +69,59 @@ def vault_candidate(versions, driver_id):
         'job': job_id, 'account': merged['provider_account_id'],
         'evidence': merged['evidence'], 'source': 'authenticated_api'
     }, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    from unified_production_ledger_adapter_v2 import comparison_metadata_from_history
+    metadata = comparison_metadata_from_history(
+        candidate, {"mileage_type": candidate["mileage_type"], "canonical_miles": str(candidate["miles"])},
+        versions,
+    )
+    if metadata:
+        candidate["job_metadata"] = metadata
     return candidate
+
+
+def vault_webhook_overlap_leads(rows):
+    """Find review leads using the Discord post time, never award from it."""
+    from datetime import datetime
+    from decimal import InvalidOperation
+    from unified_job_matching_v2 import is_candidate_duplicate
+    from unified_production_ledger_adapter_v2 import comparison_metadata_from_history
+
+    versions = defaultdict(list)
+    comparisons = defaultdict(dict)
+    for row in rows:
+        key = (row["discord_user_id"], row["provider_job_id"])
+        version = {field: row[field] for field in (
+            "provider", "provider_job_id", "provider_account_id", "source_kind", "evidence",
+        )}
+        if version not in versions[key]:
+            versions[key].append(version)
+        comparisons[key][(row["trucksbook_job_id"], row["trucksbook_evidence"])] = row["trucksbook_credited_miles"]
+
+    leads = set()
+    for (driver_id, job_id), observations in versions.items():
+        candidate = vault_candidate(observations, driver_id)
+        if not candidate or candidate["mileage_type"] != "real":
+            continue
+        metadata = comparison_metadata_from_history(
+            candidate, {"mileage_type": "real", "canonical_miles": str(candidate["miles"])},
+            observations,
+        )
+        if metadata is None:
+            continue
+        incoming = dict(candidate, metadata=metadata)
+        for (trucksbook_id, payload), miles in comparisons[(driver_id, job_id)].items():
+            try:
+                evidence = json.loads(payload)
+                other = {
+                    "provider": "trucksbook", "discord_user_id": driver_id,
+                    "mileage_type": "real", "metadata": evidence, "miles": miles,
+                    "delivered_at": datetime.fromisoformat(evidence["source_message_at"]),
+                }
+                if is_candidate_duplicate(incoming, other):
+                    leads.add((job_id, trucksbook_id))
+            except (KeyError, ValueError, TypeError, InvalidOperation):
+                continue
+    return {trucky_id for trucky_id, _ in leads}
 
 
 def historical_job_approved(candidate, approvals):
@@ -168,6 +220,7 @@ async def _settle_candidate(conn, candidate, member_ids):
               AND canonical_credit_key NOT LIKE 'accepted-link-trucky:%')""", user)
         if foreign_credit:
             return 'ledger_cutover_pending'
+        replaced_tb = Decimal(0)
         if candidate['mileage_type'] == 'real':
             overlap = await conn.fetchval("""SELECT
                 EXISTS(SELECT 1 FROM unified_provider_links WHERE discord_user_id=$1 AND provider='trucksbook')
@@ -178,8 +231,14 @@ async def _settle_candidate(conn, candidate, member_ids):
             # Even without a saved TB link, an existing unexplained balance is
             # historical evidence, never permission to add a second total.
             if overlap or int(legacy or 0) != int(existing_real.to_integral_value(rounding=ROUND_FLOOR)):
-                await _record_decision(conn, candidate, 'pending_reconciliation', 'historical_or_trucksbook_overlap')
-                return 'pending_reconciliation'
+                if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
+                    await _record_decision(conn, candidate, 'pending_reconciliation', 'historical_or_trucksbook_overlap')
+                    return 'pending_reconciliation'
+                from automatic_linked_mileage_v2 import reconcile_trucky
+                replaced_tb, hold = await reconcile_trucky(conn, candidate)
+                if hold:
+                    await _record_decision(conn, candidate, 'pending_reconciliation', hold)
+                    return hold
         ownership_digest = hashlib.sha256(json.dumps({
             'policy': POLICY, 'discord': user, 'account': account,
             'steam': owner['steam_id64'], 'active_company': 49041
@@ -197,6 +256,13 @@ async def _settle_candidate(conn, candidate, member_ids):
             (discord_user_id,trucksbook_real_miles)
             VALUES($1,COALESCE((SELECT real_miles FROM driver_progress WHERE discord_user_id=$1),0))
             ON CONFLICT(discord_user_id) DO NOTHING""", user)
+        if replaced_tb:
+            await conn.execute("""
+                UPDATE unified_v2_production_mileage_baselines
+                SET trucksbook_real_miles=(
+                    SELECT real_miles FROM driver_progress WHERE discord_user_id=$1)
+                    - FLOOR($3::numeric)::bigint - $2 WHERE discord_user_id=$1
+                """, user, int(replaced_tb), existing_real)
         real = candidate['miles'] if candidate['mileage_type'] == 'real' else Decimal(0)
         race = candidate['miles'] if candidate['mileage_type'] == 'race' else Decimal(0)
         await conn.execute("""INSERT INTO unified_v2_production_mileage_totals
@@ -212,7 +278,7 @@ async def _settle_candidate(conn, candidate, member_ids):
             await conn.execute("""INSERT INTO driver_progress(discord_user_id,trucksbook_name,real_miles)
                 VALUES($1,$2,$3) ON CONFLICT(discord_user_id) DO UPDATE SET
                 real_miles=driver_progress.real_miles+EXCLUDED.real_miles,updated_at=NOW()""",
-                user, 'Trucky:' + account, added)
+                user, 'Trucky:' + account, added - int(replaced_tb))
         await _record_decision(conn, candidate, 'credited', POLICY)
         return 'credited_' + candidate['mileage_type']
 
@@ -242,6 +308,9 @@ async def allocate_saved_linked_history(pool):
         if actual != os.environ.get('AT_V2_LINKED_MILEAGE_DATABASE_SHA256'):
             return {'status': 'database_identity_blocked', 'mileage_awarded': False}
         await conn.execute(SCHEMA)
+        if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') == 'YES':
+            from automatic_linked_mileage_v2 import SCHEMA as AUTOMATIC_SCHEMA
+            await conn.execute(AUTOMATIC_SCHEMA)
         rows = await conn.fetch("""SELECT h.provider,h.provider_job_id,h.provider_account_id,
                 h.source_kind,h.evidence,l.discord_user_id
             FROM pending_provider_job_history_v2 h

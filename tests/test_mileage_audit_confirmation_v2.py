@@ -66,3 +66,29 @@ class AuditOutcomeTests(unittest.TestCase):
         self.assertIn('read_trucky_allocation_audit',body)
         self.assertIn('Already credited Real',body)
         self.assertIn('Real jobs held',body)
+
+
+class AuditOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    async def test_verified_unified_link_can_authorize_repair(self):
+        from mileage_audit_confirmation_v2 import audit_account_matches
+
+        conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[None, True, 42]))
+        candidate = dict(source_provider_account_id='100', discord_user_id=42)
+        self.assertTrue(await audit_account_matches(conn, candidate, lock=True))
+        self.assertIn('FOR UPDATE', conn.fetchval.await_args_list[0].args[0])
+        self.assertEqual(conn.fetchval.await_args.args[1], '100')
+
+    async def test_mismatched_legacy_link_cannot_authorize_repair(self):
+        from mileage_audit_confirmation_v2 import audit_account_matches
+
+        conn = SimpleNamespace(fetchval=AsyncMock(return_value=200))
+        candidate = dict(source_provider_account_id='100', discord_user_id=42)
+        self.assertFalse(await audit_account_matches(conn, candidate))
+        self.assertEqual(conn.fetchval.await_count, 1)
+
+    async def test_unified_link_to_another_driver_cannot_authorize_repair(self):
+        from mileage_audit_confirmation_v2 import audit_account_matches
+
+        conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[None, True, 43]))
+        candidate = dict(source_provider_account_id='100', discord_user_id=42)
+        self.assertFalse(await audit_account_matches(conn, candidate))

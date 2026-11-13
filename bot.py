@@ -10,6 +10,13 @@ from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import tachograph
+import career_art
+import race_progression
+import steam_profile_names
+import onboarding_flow
+import account_unlink
+
 import aiohttp
 import asyncpg
 import discord
@@ -26,6 +33,7 @@ from mileage_audit_confirmation_v2 import (
     SCHEMA as MILEAGE_AUDIT_PREVIEW_SCHEMA, AuditPreviewError,
     create_mileage_audit_preview, validate_mileage_audit_preview,
     consume_mileage_audit_preview, audit_source_allowed, explicit_audit_miles,
+    reconciled_repair_delta,
 )
 
 try:
@@ -638,11 +646,8 @@ async def refresh_unified_registration(discord_user_id):
             return
         if channel is None or getattr(getattr(channel, "guild", None), "id", None) != GUILD_ID:
             raise ValueError("Registration channel unavailable in configured guild")
-        embed = discord.Embed(
-            title="A&T — Driver Registration",
-            description=registration.next_steps(view),
-            colour=discord.Colour.blue(),
-        )
+        embed = onboarding_flow.panel("📋 YOUR SETUP • Live account status",
+            "Your progress updates here automatically. Follow the latest numbered step in this room.")
         steam = (f"[Confirmed Steam account](https://steamcommunity.com/profiles/{view['steam_id64']})"
                  if view["steam_id64"] else "Use !linksteam")
         embed.add_field(name="Steam — " + view["steam_status"], value=steam, inline=False)
@@ -661,11 +666,26 @@ async def refresh_unified_registration(discord_user_id):
             except discord.NotFound:
                 pass
         if message is None:
-            message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await onboarding_flow.advance(db_pool,channel,discord_user_id,view)
+            message = await onboarding_flow.send(channel,embed)
             async with db_pool.acquire() as conn:
                 await conn.execute("UPDATE unified_registration_sessions SET verification_message_id=$2 WHERE discord_user_id=$1", discord_user_id, message.id)
         else:
             await message.edit(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await onboarding_flow.advance(db_pool,channel,discord_user_id,view)
+
+
+async def notify_steam_failure(discord_user_id,reason,event_key):
+    import unified_registration_workflow_v2 as registration
+    if db_pool is None or not registration.enabled():
+        return
+    view=await registration.state(db_pool,discord_user_id)
+    session=view.get("session")
+    if not session or session["status"]=="cancelled" or view["steam_status"]=="Verified":
+        return
+    channel=bot.get_channel(session["verification_channel_id"])
+    if channel and channel.guild.id==GUILD_ID:
+        await onboarding_flow.failure(db_pool,channel,discord_user_id,reason,event_key)
 
 
 async def audit_registration_account(ctx, provider, outcome, account_id=None, display_name=None):
@@ -702,7 +722,10 @@ async def link_registration_provider(ctx, provider, account_id):
         return
     if not account_id or not account_id.isascii() or not account_id.isdecimal() or len(account_id) > 30 or int(account_id) <= 0:
         await audit_registration_account(ctx, provider, "invalid_id")
-        await ctx.reply("Supply your numeric provider profile ID, not a username.", mention_author=False)
+        await ctx.reply(embed=onboarding_flow.panel("⚠️ CHECK YOUR PROFILE NUMBER",
+            "Use the **number** from your provider profile URL. Do not enter your username.\n\n"
+            + ("Example only: **`!trucksbook 123456`**" if provider=="trucksbook" else "Example only: **`!trucky 209123`**")
+            + "\nReplace the example number with your own profile ID.","error"),mention_author=False)
         return
     await audit_registration_account(ctx, provider, "attempt", account_id)
     try:
@@ -720,19 +743,20 @@ async def link_registration_provider(ctx, provider, account_id):
                 await ctx.reply("Trucky could not confirm this account's active A&T membership.", mention_author=False)
                 return
         await registration.link_supported_account(db_pool, ctx.author.id, provider, str(int(account_id)), canonical_name)
-        await refresh_unified_registration(ctx.author.id)
     except asyncpg.UniqueViolationError:
         await audit_registration_account(ctx, provider, "account_conflict", account_id)
         await ctx.reply('This provider account is already recorded for another driver. Contact management if the link is incorrect.', mention_author=False)
         return
     except ValueError as error:
         await audit_registration_account(ctx, provider, "link_rejected", account_id)
-        await ctx.reply(str(error), mention_author=False)
+        await ctx.reply(embed=onboarding_flow.panel("⚠️ ACCOUNT NOT CONNECTED",str(error)+"\n\nCheck your account ID, then follow the latest numbered step in this room.","error"),mention_author=False)
         return
     except Exception as error:
         await audit_registration_account(ctx, provider, "provider_unavailable", account_id)
         print(f"REGISTRATION PROVIDER LINK FAILED: {type(error).__name__}", flush=True)
-        await ctx.reply("Account linking is temporarily unavailable. Existing accounts are unchanged; retry /register to refresh status.", mention_author=False)
+        await ctx.reply(embed=onboarding_flow.panel("⚠️ TRACKER NOT CONNECTED • Try again",
+            "The provider could not be reached. Your saved accounts have not changed.\n\n"
+            + ("Try **`!trucksbook YOUR_ID`** again shortly." if provider=="trucksbook" else "Try **`!trucky YOUR_ID`** again shortly."),"error"),mention_author=False)
         return
     await audit_registration_account(ctx, provider, "linked", account_id, canonical_name)
     label = "TrucksBook" if provider == "trucksbook" else "Trucky"
@@ -748,6 +772,7 @@ async def link_registration_provider(ctx, provider, account_id):
     confirmation.add_field(name="Account status", value="Linked — ownership is not independently verified by this lookup", inline=False)
     confirmation.set_footer(text="Existing driver history retained. No mileage or roles awarded. If this is the wrong account, contact management before confirming.")
     await ctx.reply(embed=confirmation, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+    await refresh_unified_registration(ctx.author.id)
 
 
 async def start_public_integrations():
@@ -768,7 +793,8 @@ async def start_public_integrations():
         runner = web.AppRunner(
             trucky_staging_receiver_v2.create_integrations_app(
                 db_pool, on_trucky_linked=on_trucky_linked,
-                on_steam_verified=refresh_unified_registration
+                on_steam_verified=refresh_unified_registration,
+                on_steam_failed=notify_steam_failure
             ),
             access_log=None,
         )
@@ -1037,6 +1063,12 @@ async def setup_database():
             """
         )
 
+    async with pool.acquire() as connection:
+        await connection.execute(tachograph.SCHEMA)
+        await connection.execute(race_progression.SCHEMA)
+        await connection.execute(steam_profile_names.SCHEMA)
+        await connection.execute(onboarding_flow.SCHEMA)
+        await connection.execute(account_unlink.SCHEMA)
     db_pool = pool
 
     print("POSTGRESQL CONNECTED")
@@ -1044,6 +1076,8 @@ async def setup_database():
     print("Driver onboarding tables ready.")
     print("Permanent achievements and Hall of Fame tables ready.")
     print("Automated driver leaderboard tables ready.")
+    print("Tachograph preferences and separate Race career tables ready.", flush=True)
+    print("STAGED ONBOARDING AND MANAGEMENT UNLINK SCHEMA READY",flush=True)
 
 
 # --------------------------------------------------
@@ -1055,6 +1089,9 @@ intents.members = True
 intents.message_content = True
 
 class ATCommandBot(commands.Bot):
+    async def setup_hook(self):
+        self.add_dynamic_items(TachographFlip)
+
     async def close(self):
         global public_http_runner
         if public_http_runner is not None:
@@ -1202,6 +1239,9 @@ async def find_driver_link(
                 "WHERE trucksbook_user_id = $1;",
                 trucksbook_user_id,
             )
+            if user_id is None:
+                from mileage_audit_confirmation_v2 import verified_trucksbook_driver
+                user_id = await verified_trucksbook_driver(connection, trucksbook_user_id)
         if user_id is not None:
             return int(user_id)
 
@@ -1233,7 +1273,9 @@ async def find_driver_link(
         return None
     for mapped_name, mapped_user_id in DRIVER_MAPPINGS.items():
         if normalise_trucksbook_name(mapped_name).casefold() == normalised_name.casefold():
-            return mapped_user_id
+            async with db_pool.acquire() as connection:
+                detached=await connection.fetchval("SELECT EXISTS(SELECT 1 FROM driver_account_unlink_audit WHERE discord_user_id=$1 AND 'trucksbook'=ANY(providers))",mapped_user_id)
+            return None if detached else mapped_user_id
     return None
 
 
@@ -1262,12 +1304,26 @@ async def record_real_job(
             await connection.execute('SELECT pg_advisory_xact_lock($1)', discord_user_id)
             ledger_exists = await connection.fetchval(
                 "SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL")
-            if ledger_exists and await connection.fetchval("""SELECT EXISTS(
+            credit_distance = accepted_distance
+            automatic = os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') == 'YES'
+            has_trucky_credit = ledger_exists and await connection.fetchval("""SELECT EXISTS(
                 SELECT 1 FROM unified_v2_production_credit_ledger
                 WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real')""",
-                discord_user_id):
-                return {'status':'pending_cross_provider_reconciliation',
-                        'real_miles':None,'crossed_milestones':[]}
+                discord_user_id)
+            if has_trucky_credit:
+                if not automatic:
+                    return {'status':'pending_cross_provider_reconciliation',
+                            'real_miles':None,'crossed_milestones':[]}
+                if await connection.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM processed_jobs WHERE job_id=$1)", job_id):
+                    return {'status':'duplicate','real_miles':None,'crossed_milestones':[]}
+                from automatic_linked_mileage_v2 import reconcile_trucksbook, SCHEMA as AUTOMATIC_SCHEMA
+                await connection.execute(AUTOMATIC_SCHEMA)
+                credit_distance, hold = await reconcile_trucksbook(
+                    connection, job_id, discord_user_id, accepted_distance)
+                if hold:
+                    return {'status':hold,'real_miles':None,'crossed_milestones':[]}
+                credit_distance = int(credit_distance)
 
             previous_real_miles = await connection.fetchval(
                 """
@@ -1344,8 +1400,27 @@ async def record_real_job(
                 """,
                 discord_user_id,
                 trucksbook_name,
-                accepted_distance,
+                credit_distance,
             )
+            if automatic and ledger_exists:
+                await connection.execute("""
+                    UPDATE processed_jobs SET processed_at=COALESCE((
+                        SELECT MIN((h.evidence->>'source_message_at')::timestamptz)
+                        FROM pending_provider_job_history_v2 h
+                        WHERE h.provider='trucksbook' AND h.provider_job_id=$1
+                          AND h.source_kind='verified_webhook_source'
+                          AND h.evidence ? 'source_message_at'),processed_at)
+                    WHERE job_id=$1
+                    """, job_id)
+                await connection.execute("""
+                    UPDATE unified_v2_production_mileage_baselines b
+                    SET trucksbook_real_miles=p.real_miles-FLOOR(COALESCE((
+                        SELECT SUM(c.miles) FROM unified_v2_production_credit_ledger c
+                        WHERE c.discord_user_id=b.discord_user_id AND c.provider='trucky'
+                          AND c.mileage_type='real'),0))::bigint
+                    FROM driver_progress p
+                    WHERE b.discord_user_id=$1 AND p.discord_user_id=b.discord_user_id
+                    """, discord_user_id)
 
             real_miles = (
                 await connection.fetchval(
@@ -1456,25 +1531,18 @@ def build_progression_milestone_embed(
     )
 
     embed = discord.Embed(
-        title="🏆 A&T TRANSPORT LTD — MILESTONE ACHIEVED",
+        title=f"🏆 {milestone_rank} • {milestone_miles:,} Real Miles",
         description=(
-            f"Congratulations {driver_display}!\n\n"
-            f"💎 **{milestone_miles:,} REAL MILES**\n"
-            "A new A&T progression milestone has been reached."
+            f"{driver_display} has earned **{milestone_rank}**."
         ),
         colour=discord.Colour.from_rgb(31, 78, 121),
     )
 
+    embed.set_author(name="A&T TRANSPORT LTD  /  CAREER MILESTONE")
     if member is not None:
         embed.set_thumbnail(url=member.display_avatar.url)
-
     embed.add_field(
-        name="Discord Driver",
-        value=driver_display,
-        inline=True,
-    )
-    embed.add_field(
-        name="TrucksBook Driver",
+        name="Driver Account",
         value=f"`{trucksbook_name}`",
         inline=True,
     )
@@ -1571,7 +1639,11 @@ async def announce_progression_milestone(
     )
 
     try:
-        await channel.send(embed=embed)
+        artwork = await career_art_file(
+            embed, "rank-milestone.png", career_art.achievement,
+            member.display_name if member else trucksbook_name, milestone_rank, milestone_miles,
+        )
+        await channel.send(embed=embed, **({"file": artwork} if artwork else {}))
     except (discord.Forbidden, discord.HTTPException) as error:
         print(
             "MILESTONE ANNOUNCEMENT ERROR: Mileage remains saved; "
@@ -1796,17 +1868,16 @@ def build_achievement_embed(member, discord_user_id, trucksbook_name, achievemen
     hall_tier = get_hall_of_fame_tier(real_miles)
     driver_display = member.mention if member else f"<@{discord_user_id}>"
     embed = discord.Embed(
-        title="🌟 A&T PERMANENT ACHIEVEMENT UNLOCKED",
+        title=f"🏅 {achievement['name']} • {threshold:,} Real Miles",
         description=(
-            f"Congratulations {driver_display}!\n\n"
-            f"**{threshold:,} verified A&T Real Miles**\n"
-            "This cumulative achievement is now part of your permanent record."
+            f"{driver_display} has earned a permanent place in the **{achievement['name']}**."
         ),
         colour=discord.Colour.gold(),
     )
+    embed.set_author(name="A&T TRANSPORT LTD  /  PERMANENT ACHIEVEMENT")
     if member:
         embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="TrucksBook Driver", value=f"`{trucksbook_name}`")
+    embed.add_field(name="Driver account", value=discord.utils.escape_markdown(str(trucksbook_name))[:150])
     embed.add_field(name="Verified Real Total", value=f"**{real_miles:,} miles**")
     if hall_tier and threshold in {250000, 500000, 1000000}:
         embed.add_field(
@@ -1832,16 +1903,33 @@ async def announce_permanent_achievement(
         print("PERMANENT ACHIEVEMENT ANNOUNCEMENT SKIPPED: channel unavailable.")
         return False
     try:
-        await channel.send(embed=build_achievement_embed(
+        embed = build_achievement_embed(
             member, discord_user_id, trucksbook_name, achievement, real_miles
-        ))
+        )
+        artwork = await career_art_file(
+            embed, "permanent-achievement.png", career_art.achievement,
+            member.display_name if member else trucksbook_name,
+            achievement["name"], achievement["miles"], permanent=True,
+        )
+        await channel.send(embed=embed, **({"file": artwork} if artwork else {}))
         return True
     except (discord.Forbidden, discord.HTTPException) as error:
         print(f"PERMANENT ACHIEVEMENT ANNOUNCEMENT ERROR: {error}")
         return False
 
 
-async def upsert_controlled_message(purpose, channel_id, embeds):
+async def career_art_file(embed, filename, renderer, *args, **kwargs):
+    """Keep the readable Discord embed available if an artwork asset fails."""
+    try:
+        payload = await asyncio.to_thread(renderer, *args, **kwargs)
+    except Exception as error:
+        print(f"CAREER ART ERROR ({filename}): {type(error).__name__}")
+        return None
+    embed.set_image(url=f"attachment://{filename}")
+    return discord.File(BytesIO(payload), filename=filename)
+
+
+async def upsert_controlled_message(purpose, channel_id, embeds, *, artwork=()):
     """Edit the one recorded bot-owned message, recreating only if it vanished."""
     channel = await get_discord_channel(channel_id)
     if channel is None or db_pool is None:
@@ -1868,9 +1956,9 @@ async def upsert_controlled_message(purpose, channel_id, embeds):
                         message = None
                 try:
                     if message is None:
-                        message = await channel.send(embeds=embeds)
+                        message = await channel.send(embeds=embeds, files=list(artwork))
                     else:
-                        await message.edit(content=None, embeds=embeds)
+                        await message.edit(content=None, embeds=embeds, attachments=list(artwork))
                 except (discord.Forbidden, discord.HTTPException) as error:
                     print(f"CONTROLLED MESSAGE ERROR ({purpose}): {error}")
                     return False
@@ -1932,6 +2020,7 @@ async def fetch_period_rankings(connection, guild, period_start, period_end):
     if not member_ids:
         return []
     trucky_jobs = ""
+    exclude_superseded = ""
     if await connection.fetchval("""
         SELECT EXISTS(SELECT 1 FROM information_schema.columns
                       WHERE table_schema='public'
@@ -1947,14 +2036,27 @@ async def fetch_period_rankings(connection, guild, period_start, period_end):
               AND c.delivered_at >= $1 AND c.delivered_at < $2
               AND c.discord_user_id = ANY($3::BIGINT[])
         """
+    if trucky_jobs and await connection.fetchval(
+        "SELECT to_regclass('public.unified_v2_production_mileage_decisions') IS NOT NULL"
+    ):
+        exclude_superseded = """
+            AND NOT EXISTS (
+                SELECT 1 FROM unified_v2_production_mileage_decisions d
+                WHERE d.provider='trucksbook' AND d.provider_job_id=p.job_id
+                  AND d.discord_user_id=p.discord_user_id
+                  AND d.decision='duplicate_provider_job'
+                  AND d.reason_code='superseded_by_higher_real_credit'
+            )
+        """
     return await connection.fetch(
         f"""
         WITH eligible_jobs AS (
             SELECT discord_user_id, trucksbook_name, accepted_distance, processed_at
-            FROM processed_jobs
+            FROM processed_jobs p
             WHERE LOWER(statistics) = 'real' AND accepted_distance > 0
               AND processed_at >= $1 AND processed_at < $2
               AND discord_user_id = ANY($3::BIGINT[])
+            {exclude_superseded}
             {trucky_jobs}
         )
         SELECT jobs.discord_user_id,
@@ -2112,26 +2214,12 @@ async def sync_competition_role(guild, period_type, role_id):
             print(f"LEADERBOARD ROLE ADD ERROR ({winner.id}): {error}")
 
 
-def leaderboard_lines(rows, guild, limit, mark_former=False):
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    lines = []
-    for position, row in enumerate(rows[:limit], start=1):
-        user_id = int(row["discord_user_id"])
-        member = guild.get_member(user_id) if guild else None
-        if member:
-            label = member.mention
-            if mark_former and driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver":
-                label += " *(Former Driver)*"
-        else:
-            safe_name = discord.utils.escape_markdown(str(row["trucksbook_name"]))
-            label = f"**{safe_name}**"
-            if mark_former:
-                label += " *(Former Driver)*"
-        prefix = medals.get(position, f"`{position:>2}.`")
-        lines.append(
-            f"{prefix} {label} — **{int(row['real_miles']):,} mi**"
-        )
-    return "\n".join(lines) if lines else "*No qualifying Real miles recorded yet.*"
+def leaderboard_lines(entries):
+    return "\n".join(
+        f"{position}. {discord.utils.escape_markdown(str(name)[:64])}"
+        f"{' (Former Driver)' if former else ''} · {miles:,} mi"
+        for position, (name, miles, former) in enumerate(entries, 1)
+    ) or "No qualifying Real Miles recorded yet."
 
 
 async def refresh_driver_leaderboard(guild=None):
@@ -2149,56 +2237,133 @@ async def refresh_driver_leaderboard(guild=None):
         monthly_rows = await fetch_period_rankings(
             connection, guild, monthly_start, monthly_end
         )
-        all_time_rows = await connection.fetch(
-            """
-            SELECT discord_user_id, trucksbook_name, real_miles
-            FROM driver_progress
-            WHERE real_miles > 0
-            ORDER BY real_miles DESC, updated_at ASC, discord_user_id ASC
-            LIMIT 10;
-            """
-        )
+        if os.getenv("AT_V2_PROGRESSION_ENABLED") == "YES":
+            all_time_rows = await connection.fetch("""
+                SELECT b.discord_user_id,
+                       COALESCE(p.trucksbook_name, l.provider_display_name, 'A&T Driver') AS trucksbook_name,
+                       FLOOR(b.trucksbook_real_miles + COALESCE(t.combined_real_miles, 0))::BIGINT AS real_miles
+                FROM unified_v2_production_mileage_baselines b
+                LEFT JOIN unified_v2_production_mileage_totals t USING (discord_user_id)
+                LEFT JOIN driver_progress p USING (discord_user_id)
+                LEFT JOIN unified_provider_links l ON l.discord_user_id=b.discord_user_id
+                    AND l.provider='trucky'
+                WHERE b.trucksbook_real_miles + COALESCE(t.combined_real_miles, 0) >= 1
+                ORDER BY real_miles DESC,
+                         COALESCE(t.updated_at, p.updated_at, b.snapshotted_at) ASC,
+                         b.discord_user_id ASC
+                LIMIT 10
+            """)
+        else:
+            all_time_rows = await connection.fetch(
+                """
+                SELECT discord_user_id, trucksbook_name, real_miles
+                FROM driver_progress
+                WHERE real_miles > 0
+                ORDER BY real_miles DESC, updated_at ASC, discord_user_id ASC
+                LIMIT 10;
+                """
+            )
     next_week = int(uk_midnight_utc(weekly_end).timestamp())
     next_month = int(uk_midnight_utc(monthly_end).timestamp())
-    embed = discord.Embed(
-        title="🚛 A&T TRANSPORT LTD — DRIVER LEADERBOARD",
-        description=(
-            "Verified **Real Miles** only. Weekly and monthly rankings show "
-            "active A&T drivers; all-time records preserve former drivers."
-        ),
-        colour=discord.Colour.from_rgb(31, 110, 150),
-        timestamp=datetime.now(timezone.utc),
-    )
-    embed.add_field(
-        name="📅 Top 5 Weekly",
-        value=(
-            leaderboard_lines(weekly_rows, guild, 5)
-            + f"\n\nResets <t:{next_week}:R>"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🗓️ Top 5 Monthly",
-        value=(
-            leaderboard_lines(monthly_rows, guild, 5)
-            + f"\n\nResets <t:{next_month}:R>"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="🏛️ Top 10 All-Time",
-        value=leaderboard_lines(all_time_rows, guild, 10, mark_former=True),
-        inline=False,
-    )
-    embed.set_footer(
-        text=(
-            "A&T Transport LTD • UK time • Ties: earliest qualifying job "
-            "then Discord ID • Automatically updated"
+    updated_at = datetime.now(timezone.utc)
+    embeds = []
+    artwork = []
+    for period, title, rows, reset, former in (
+        ("weekly", "Weekly standings", weekly_rows, next_week, False),
+        ("monthly", "Monthly standings", monthly_rows, next_month, False),
+        ("all-time", "All-time records", all_time_rows, None, True),
+    ):
+        reset_text = f"**Resets** <t:{reset}:R>" if reset else None
+        embed = discord.Embed(
+            title=title, description=reset_text,
+            colour=discord.Colour.from_rgb(27, 132, 215),
         )
+        if former:
+            embed.timestamp = updated_at
+            embed.set_footer(text="A&T Transport LTD • All-time records include former drivers")
+        entries = []
+        for row in rows[:10]:
+            user_id = int(row["discord_user_id"])
+            member = guild.get_member(user_id)
+            is_former = former and (
+                member is None or
+                driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver"
+            )
+            entries.append((member.display_name if member else row["trucksbook_name"],
+                            int(row["real_miles"]), is_former))
+        image = await career_art_file(
+            embed, f"{period}-standings.png", career_art.standings, period, entries
+        )
+        if image:
+            image.description = f"{title} · Real Miles\n{leaderboard_lines(entries)}"[:1024]
+            artwork.append(image)
+        else:
+            embed.description = "\n\n".join(filter(None, (leaderboard_lines(entries), reset_text)))
+        embeds.append(embed)
+    embeds[0].set_author(name="A&T TRANSPORT LTD  /  DRIVER LEADERBOARD")
+    posted = await upsert_controlled_message(
+        "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, embeds, artwork=artwork
     )
-    return await upsert_controlled_message(
-        "driver_leaderboard", DRIVER_LEADERBOARD_CHANNEL_ID, [embed]
-    )
+    if posted and guild.id == GUILD_ID:
+        await mirror_driver_leaderboard(
+            guild, updated_at, weekly_end, monthly_end,
+            weekly_rows, monthly_rows, all_time_rows,
+        )
+    return posted
+
+async def mirror_driver_leaderboard(
+    guild, generated_at, weekly_end, monthly_end,
+    weekly_rows, monthly_rows, all_time_rows,
+):
+    """Mirror rankings with the website feed's existing row limits."""
+    secret = os.getenv("AT_COMMAND_BRIDGE_SECRET", "")
+    if os.getenv("AT_COMMAND_BRIDGE_ENABLED") != "true" or len(secret) < 32:
+        return
+
+    def entries(rows, limit, mark_former=False):
+        result = []
+        for row in rows[:limit]:
+            user_id = int(row["discord_user_id"])
+            member = guild.get_member(user_id)
+            former = mark_former and (
+                member is None or
+                driver_membership_snapshot_v2.get(user_id, {}).get("company") == "Former company driver"
+            )
+            result.append(dict(
+                discordUserId=str(user_id),
+                name=(member.display_name if member else str(row["trucksbook_name"]))[:160],
+                realMiles=int(row["real_miles"]),
+                former=former,
+            ))
+        return result
+
+    try:
+        import hashlib
+        import hmac
+
+        path = "/api/v3/discord-leaderboard"
+        body = json.dumps(dict(
+            generatedAt=generated_at.isoformat(),
+            weeklyResetAt=uk_midnight_utc(weekly_end).isoformat(),
+            monthlyResetAt=uk_midnight_utc(monthly_end).isoformat(),
+            weekly=entries(weekly_rows, 5),
+            monthly=entries(monthly_rows, 5),
+            allTime=entries(all_time_rows, 10, mark_former=True),
+        ), separators=(",", ":")).encode()
+        timestamp = str(int(datetime.now(timezone.utc).timestamp()))
+        signed = f"POST\n{path}\n{timestamp}\n".encode() + body
+        signature = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8)) as session:
+            async with session.post(
+                "https://at-transport-ltd.com" + path,
+                data=body,
+                headers={"content-type": "application/json", "x-at-timestamp": timestamp, "x-at-signature": signature},
+                allow_redirects=False,
+            ) as response:
+                if response.status not in (200, 202):
+                    print(f"WEBSITE LEADERBOARD MIRROR HTTP {response.status}", flush=True)
+    except Exception as error:
+        print(f"WEBSITE LEADERBOARD MIRROR ERROR: {type(error).__name__}", flush=True)
 
 
 async def maintain_driver_leaderboard():
@@ -2217,12 +2382,59 @@ async def maintain_driver_leaderboard():
         await refresh_driver_leaderboard(guild)
 
 
+async def deliver_pending_real_milestones(guild):
+    """Recover missed milestone announcements from settled, combined Real Miles."""
+    if (guild is None or db_pool is None or MILESTONE_ANNOUNCEMENT_CHANNEL_ID is None
+            or os.getenv("AT_V2_ISOLATED_STAGING") == "YES"):
+        return
+    member_ids = active_driver_ids(guild)
+    if not member_ids:
+        return
+    ranks = {miles: name for miles, _, name in PROGRESSION_ROLES if miles > 0}
+    async with db_pool.acquire() as connection:
+        await connection.execute("""
+            INSERT INTO announced_milestones
+                (discord_user_id, milestone_miles, trucksbook_name, job_id)
+            SELECT p.discord_user_id, threshold.miles, p.trucksbook_name,
+                   'combined-real:' || threshold.miles::text
+            FROM driver_progress p
+            CROSS JOIN unnest($1::bigint[]) AS threshold(miles)
+            WHERE p.discord_user_id = ANY($2::bigint[]) AND p.real_miles >= threshold.miles
+            ON CONFLICT (discord_user_id, milestone_miles) DO NOTHING
+        """, list(ranks), member_ids)
+        pending = await connection.fetch("""
+            SELECT m.discord_user_id, m.milestone_miles, p.trucksbook_name, p.real_miles
+            FROM announced_milestones m
+            JOIN driver_progress p USING (discord_user_id)
+            WHERE m.announced_at IS NULL
+              AND m.discord_user_id = ANY($1::bigint[])
+              AND m.milestone_miles = ANY($2::bigint[])
+              AND p.real_miles >= m.milestone_miles
+            ORDER BY m.milestone_miles DESC, m.recorded_at, m.discord_user_id
+            LIMIT 10
+        """, member_ids, list(ranks))
+    for row in pending:
+        user_id = row["discord_user_id"]
+        miles = row["milestone_miles"]
+        sent = await announce_progression_milestone(
+            guild, guild.get_member(user_id), user_id, row["trucksbook_name"],
+            {"miles": miles, "rank": ranks[miles]}, row["real_miles"],
+        )
+        if not sent:
+            break
+
+
 @tasks.loop(minutes=1)
 async def leaderboard_rollover_task():
     try:
         await maintain_driver_leaderboard()
     except Exception as error:
         print(f"LEADERBOARD MAINTENANCE ERROR: {error}")
+    try:
+        await deliver_pending_real_milestones(bot.get_guild(GUILD_ID))
+    except Exception as error:
+        print(f"MILESTONE DELIVERY RETRY PENDING: {type(error).__name__}", flush=True)
+
 
 
 @leaderboard_rollover_task.before_loop
@@ -2247,16 +2459,29 @@ async def refresh_hall_of_fame_display():
             """
         )
     colours = {
-        "Immortal": discord.Colour.from_rgb(96, 72, 170),
+        "Immortal": discord.Colour.from_rgb(31, 160, 225),
         "Elite": discord.Colour.gold(),
         "Veteran": discord.Colour.from_rgb(49, 120, 160),
     }
     icons = {"Immortal": "💎", "Elite": "👑", "Veteran": "⚔️"}
+    thresholds = {"Immortal": "1,000,000", "Elite": "500,000", "Veteran": "250,000"}
+    header = discord.Embed(colour=discord.Colour.gold())
+    inductees = {
+        tier: [row["trucksbook_name"] for row in rows if row["highest_tier"] == tier]
+        for tier in thresholds
+    }
+    image = await career_art_file(
+        header, "hall-of-fame.png", career_art.hall_of_fame, inductees
+    )
     embeds = []
     remaining_budget = 5200
     for tier_name in ("Immortal", "Elite", "Veteran"):
         tier_rows = [row for row in rows if row["highest_tier"] == tier_name]
+        if image and not tier_rows:
+            continue
         lines = []
+        description_limit = min(4000, remaining_budget)
+        truncated = "*Additional records are on file.*"
         for row in tier_rows:
             status = "🟢 Active" if row["is_active"] else "⚪ Former A&T Driver"
             registry = (
@@ -2270,27 +2495,31 @@ async def refresh_hall_of_fame_display():
                 f"**{int(row['highest_verified_real_miles']):,}** Real Miles\n"
                 f"`{row['trucksbook_name']}` • {status} • Since {since_text}"
             )
-            if sum(len(item) + 1 for item in lines) + len(line) > remaining_budget:
-                lines.append("*Further permanent records are safely stored in PostgreSQL.*")
+            if len("\n\n".join([*lines, line, truncated])) > description_limit:
+                lines.append(truncated)
                 break
             lines.append(line)
         description = "\n\n".join(lines) if lines else "*No drivers recorded in this tier yet.*"
         remaining_budget -= len(description)
         embeds.append(discord.Embed(
-            title=f"{icons[tier_name]} A&T {tier_name.upper()}S",
+            title=f"{icons[tier_name]} {tier_name} • {thresholds[tier_name]} Real Miles",
             description=description,
             colour=colours[tier_name],
         ))
-    embeds[0].description = (
-        "**A&T Transport LTD — Permanent Hall of Fame**\n"
-        "Earned with verified Real Miles. Membership history is never erased.\n\n"
-        + embeds[0].description
-    )
-    embeds[-1].set_footer(
-        text="Veteran 250K • Elite 500K • Immortal 1M • Active/Former shown separately"
-    )
+    if embeds:
+        embeds[0].set_author(name="A&T TRANSPORT LTD  /  HALL OF FAME")
+        embeds[0].description = (
+            "Permanent career records • Verified Real Miles\n\n"
+            + embeds[0].description
+        )
+        embeds[-1].set_footer(
+            text="A&T Transport LTD • Driven Beyond Horizons"
+        )
+    if image:
+        image.description = "A&T Hall of Fame · Permanent career honours by verified Real Miles."
+        embeds.insert(0, header)
     return await upsert_controlled_message(
-        "hall_of_fame", HALL_OF_FAME_CHANNEL_ID, embeds
+        "hall_of_fame", HALL_OF_FAME_CHANNEL_ID, embeds, artwork=[image] if image else ()
     )
 
 
@@ -2890,6 +3119,90 @@ async def reconcile_linked_trucky_career_records(guild):
         trucky_hall_refresh_pending = not await refresh_hall_of_fame_display()
 
 
+async def deliver_automatic_linked_progression(guild):
+    """Retry Discord updates only after the mileage transaction has committed."""
+    if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES' or guild is None:
+        return
+    async with db_pool.acquire() as connection:
+        rows = await connection.fetch("""
+            SELECT p.discord_user_id,p.real_miles,
+                ARRAY(SELECT d.decision_id FROM unified_v2_production_mileage_decisions d
+                    WHERE d.discord_user_id=p.discord_user_id AND d.decision='credited'
+                      AND d.reason_code='steam_registered_company_member_link_v1'
+                      AND d.progression_delivered_at IS NULL) AS decision_ids,
+                ARRAY(SELECT j.trucky_job_id FROM automatic_linked_journey_pairs_v2 j
+                    WHERE j.discord_user_id=p.discord_user_id
+                      AND j.progression_delivered_at IS NULL) AS pair_ids
+            FROM driver_progress p
+            WHERE EXISTS(SELECT 1 FROM automatic_linked_journey_pairs_v2 j
+                    WHERE j.discord_user_id=p.discord_user_id AND j.progression_delivered_at IS NULL)
+               OR EXISTS(SELECT 1 FROM unified_v2_production_mileage_decisions d
+                    WHERE d.discord_user_id=p.discord_user_id AND d.decision='credited'
+                      AND d.reason_code='steam_registered_company_member_link_v1'
+                      AND d.progression_delivered_at IS NULL)
+            LIMIT 100
+            """)
+    delivered = False
+    for row in rows:
+        result = await apply_verified_v2_progression(row['discord_user_id'], row['real_miles'], False)
+        if result.get('status') not in ('updated', 'correct'):
+            continue
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+                await connection.execute("""
+                    UPDATE unified_v2_production_mileage_decisions SET progression_delivered_at=NOW()
+                    WHERE decision_id=ANY($1::bigint[]) AND progression_delivered_at IS NULL
+                    """, row['decision_ids'])
+                await connection.execute("""
+                    UPDATE automatic_linked_journey_pairs_v2 SET progression_delivered_at=NOW()
+                    WHERE trucky_job_id=ANY($1::text[]) AND progression_delivered_at IS NULL
+                    """, row['pair_ids'])
+        delivered = True
+    if delivered:
+        await refresh_driver_leaderboard(guild)
+        await refresh_hall_of_fame_display()
+
+
+async def replay_saved_trucksbook_jobs():
+    """Retry stored notices through the same credit function as live delivery."""
+    if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
+        return
+    import json
+    async with db_pool.acquire() as connection:
+        rows = await connection.fetch("""
+            SELECT h.provider_job_id,h.provider_account_id,h.evidence
+            FROM pending_provider_job_history_v2 h
+            WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
+              AND NOT EXISTS(SELECT 1 FROM processed_jobs p WHERE p.job_id=h.provider_job_id)
+            ORDER BY h.first_received_at,h.provider_job_id
+            """)
+    processed = 0
+    for row in rows:
+        evidence = json.loads(row['evidence']) if isinstance(row['evidence'],str) else row['evidence']
+        if (evidence.get('unit') != 'mi' or not is_real_statistics(evidence.get('stats_type'))
+                or type(evidence.get('distance')) is not int or evidence['distance'] <= 0):
+            continue
+        name = evidence.get('candidate_driver_label') or ''
+        account = row['provider_account_id']
+        driver = await find_driver_link(name, int(account) if account else None)
+        if driver is None:
+            continue
+        result = await record_real_job(row['provider_job_id'], name, driver, evidence['distance'])
+        if result and result.get('status') == 'added':
+            guild = bot.get_guild(GUILD_ID)
+            if guild is not None:
+                try:
+                    await sync_member_progression_role(guild, driver, result['real_miles'])
+                    await sync_permanent_system_for_driver(
+                        guild, driver, name, result['real_miles'], announce=True,
+                    )
+                except Exception as error:
+                    print(f"REPLAYED TRUCKSBOOK CAREER SYNC ERROR: {type(error).__name__}", flush=True)
+            processed += 1
+            if processed >= 100:
+                break
+
+
 @tasks.loop(seconds=60)
 async def ingest_trucky_company_jobs():
     """Poll the existing authenticated API; never awards from tracker messages."""
@@ -2906,12 +3219,14 @@ async def ingest_trucky_company_jobs():
             print('TRUCKY_HISTORY_SWEEP ' + json.dumps(sweep,sort_keys=True),flush=True)
         try:
             from trucky_linked_allocation_v2 import allocate_saved_linked_history
+            await replay_saved_trucksbook_jobs()
             linked_credits = await allocate_saved_linked_history(db_pool)
             if linked_credits['status'] != 'disabled':
                 print('TRUCKY LINKED ALLOCATION ' + json.dumps(linked_credits,sort_keys=True),flush=True)
             guild = bot.get_guild(GUILD_ID)
             if guild is not None and linked_credits['status'] == 'linked_history_processed':
                 await reconcile_linked_trucky_career_records(guild)
+                await deliver_automatic_linked_progression(guild)
         except Exception as error:
             print(f'TRUCKY LINKED ALLOCATION RETRY PENDING: {type(error).__name__}',flush=True)
         try:
@@ -2942,6 +3257,23 @@ async def deliver_v2_progression():
             print('V2 PROGRESSION BLOCKED: ' + ','.join(result['blockers']), flush=True)
     except Exception as error:
         print(f'V2 PROGRESSION RETRY PENDING: {type(error).__name__}', flush=True)
+
+
+@tasks.loop(minutes=5)
+async def publish_website_totals():
+    if db_pool is None:
+        return
+    try:
+        import website_company_bridge
+        await website_company_bridge.publish(db_pool,bot.get_guild(GUILD_ID),
+            fetch_driver_profile_stats,driver_membership_snapshot_v2)
+    except Exception as error:
+        print(f'WEBSITE COMPANY TOTALS RETRY: {type(error).__name__}: {error}',flush=True)
+
+
+@publish_website_totals.before_loop
+async def before_website_totals():
+    await bot.wait_until_ready()
 
 
 @bot.event
@@ -2982,6 +3314,8 @@ async def on_ready():
 
     if db_pool is not None and unified_schema_ready:
         await start_public_integrations()
+        if not isolated_staging and not publish_website_totals.is_running():
+            publish_website_totals.start()
         if not monitor_driver_memberships_v2.is_running():
             monitor_driver_memberships_v2.start()
         if (not isolated_staging and os.getenv('AT_V2_TRUCKY_API_INGEST_ENABLED') == 'YES'
@@ -3023,6 +3357,15 @@ async def on_ready():
     print(f"Logged in as: {bot.user}")
     print(f"Bot ID: {bot.user.id}")
     print("--------------------------------")
+
+    if db_pool is not None and not cleanup_onboarding_logo_previews.is_running():
+        cleanup_onboarding_logo_previews.start()
+    if db_pool is not None and not assign_driver_card_trucks.is_running():
+        assign_driver_card_trucks.start()
+    if db_pool is not None and not refresh_card_account_names.is_running():
+        refresh_card_account_names.start()
+    if db_pool is not None and not sync_race_careers.is_running():
+        sync_race_careers.start()
 
     guild = bot.get_guild(
         GUILD_ID
@@ -3100,25 +3443,39 @@ async def on_ready():
         except Exception as error:
             print(f"ROLE DIVIDER STARTUP SYNC ERROR: {error}")
 
+    if not retry_application_commands.is_running():
+        retry_application_commands.start()
+
+
+application_commands_synced = False
+
+
+@tasks.loop(minutes=1)
+async def retry_application_commands():
+    global application_commands_synced
+    if application_commands_synced or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
+    commands_to_keep = bot.tree.get_commands()
     try:
-        # Keep the commands server-scoped only to avoid duplicate entries
-        # from simultaneous global and guild registrations.
-        home_guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=home_guild)
-        guild_synced = await bot.tree.sync(guild=home_guild)
-        bot.tree.clear_commands(guild=None)
-        global_synced = await bot.tree.sync()
-
-        print(
-            f"Synced {len(guild_synced)} home-server slash command(s) "
-            f"and {len(global_synced)} global slash command(s)."
-        )
-
+        home = discord.Object(id=GUILD_ID)
+        bot.tree.copy_global_to(guild=home)
+        synced = await bot.tree.sync(guild=home)
+        # Delete global duplicates without losing definitions on reconnect/retry.
+        try:
+            bot.tree.clear_commands(guild=None)
+            await bot.tree.sync()
+        finally:
+            for command in commands_to_keep:
+                bot.tree.add_command(command, override=True)
+        application_commands_synced = True
+        print("SLASH COMMANDS READY: " + ", ".join(command.name for command in synced), flush=True)
     except Exception as error:
-        print(
-            "Slash command sync failed: "
-            f"{error}"
-        )
+        print(f"SLASH COMMAND RETRY: {type(error).__name__}: {error}", flush=True)
+
+
+@retry_application_commands.before_loop
+async def before_application_command_retry():
+    await bot.wait_until_ready()
 
 
 @bot.event
@@ -3173,6 +3530,10 @@ async def on_member_update(before, after):
 
     if before_role_ids == after_role_ids and not booster_changed:
         return
+
+    if before_role_ids != after_role_ids and after.guild.id == GUILD_ID and db_pool is not None:
+        if tachograph.company_role(before, GUILD_ID) != tachograph.company_role(after, GUILD_ID):
+            await refresh_member_role_cards(after)
 
     try:
         await sync_member_role_category_dividers(after)
@@ -3335,6 +3696,8 @@ async def on_message(message):
                     configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID", "").strip(),
                     configured_webhook_ids=os.getenv("TRUCKSBOOK_HISTORY_WEBHOOK_IDS", "").strip(),
                     parsed_job=extract_trucksbook_job_from_embed(history_embed),
+                    observed_account_id=trucksbook_author_user_id(history_data),
+                    source_message_at=getattr(message, "created_at", None),
                     driver_label=(history_data.get("author") or {}).get("name"))
             except Exception:
                 # Evidence capture must not interrupt the established processor.
@@ -3510,7 +3873,7 @@ async def on_message(message):
         # ------------------------------------------
 
         if (
-            not is_real_statistics(statistics)
+            not is_real_statistics(statistics) or extract_trucksbook_job_from_embed(embed) is None
         ):
             print(
                 "ACTION: Job ignored. "
@@ -3735,26 +4098,8 @@ async def on_message(message):
                 )
 
             # --------------------------------------
-            # ANNOUNCE NEWLY CROSSED MILESTONES
+            # The milestone worker delivers pending announcements from both providers.
             # --------------------------------------
-
-            for milestone in result[
-                "crossed_milestones"
-            ]:
-                try:
-                    await announce_progression_milestone(
-                        guild=guild,
-                        member=member,
-                        discord_user_id=discord_user_id,
-                        trucksbook_name=trucksbook_name,
-                        milestone=milestone,
-                        real_miles=real_miles,
-                    )
-                except Exception as error:
-                    print(
-                        "MILESTONE ANNOUNCEMENT ERROR: Mileage remains "
-                        f"saved; unexpected failure: {error}"
-                    )
 
             try:
                 await refresh_driver_leaderboard(guild)
@@ -3763,6 +4108,9 @@ async def on_message(message):
                     "LEADERBOARD REFRESH ERROR: Mileage remains saved; "
                     f"{error}"
                 )
+
+        else:
+            print(f"ACTION: TrucksBook job {job_id} held ({result['status']}).")
 
         print("--------------------------------")
 
@@ -3796,27 +4144,43 @@ def extract_trucksbook_job_from_embed(embed):
             details = field.get("value") or ""
             break
 
-    from world_of_trucks_policy_v2 import excluded_trucksbook_details
-
-    if excluded_trucksbook_details(details):
-        return None
+    comparison = {}
+    comparison_labels = {"from": "origin", "to": "destination", "cargo": "cargo", "game": "game"}
+    from world_of_trucks_policy_v2 import exceeds_mileage_speed_limit
 
     statistics = None
     accepted_distance = None
     for line in details.splitlines():
         clean_line = line.replace("**", "").strip()
         lower_line = clean_line.lower()
+        label, separator, value = clean_line.partition(":")
+        if separator and label.lower() in comparison_labels and value.strip():
+            comparison[comparison_labels[label.lower()]] = value.strip()
+        if label.strip().lower() in ("status", "statistics") and any(
+            part.strip().casefold() in ("cancelled", "canceled", "unlisted")
+            for part in value.split(",")
+        ):
+            return None
+        if label.strip().lower() in ("maximal reached speed", "maximum speed", "max speed"):
+            speed = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*(mph|km/h|kph)\s*", value, re.I)
+            if speed and exceeds_mileage_speed_limit(speed[1], speed[2].lower()):
+                return None
         if lower_line.startswith("statistics:"):
             statistics = clean_line.split(":", 1)[1].strip()
         elif lower_line.startswith("accepted distance:"):
-            accepted_distance = extract_integer(
-                clean_line.split(":", 1)[1].strip()
+            distance_text = value.strip()
+            accepted_distance = extract_integer(distance_text)
+            explicit = re.fullmatch(
+                r"[0-9]+(?:[ ,][0-9]{3})*\s*(mi|mil|miles|km)", distance_text, re.I,
             )
+            if explicit:
+                comparison["unit"] = "km" if explicit[1].lower() == "km" else "mi"
 
     return {
         "job_id": job_match.group(1),
         "statistics": statistics,
         "accepted_distance": accepted_distance,
+        **comparison,
     }
 
 
@@ -4105,9 +4469,39 @@ async def trucky_logbook_audit(ctx):
                   AND LOWER(p.statistics)='real' AND p.accepted_distance>0
                 WHERE t.provider='trucky' AND t.provider_job_id=ANY($1::text[])
             """, sorted(vault_ids - credited_ids))
-    from unified_job_matching_v2 import credited_route_overlaps, unique_overlap_topups
+            webhook_pairs = await conn.fetch("""
+                SELECT t.provider, t.provider_job_id, t.provider_account_id,
+                       t.source_kind, t.evidence, l.discord_user_id,
+                       b.provider_job_id AS trucksbook_job_id,
+                       b.evidence::text AS trucksbook_evidence,
+                       p.accepted_distance AS trucksbook_credited_miles
+                FROM pending_provider_job_history_v2 t
+                JOIN unified_provider_links l ON l.provider='trucky'
+                  AND l.provider_account_id=t.provider_account_id
+                JOIN driver_links d ON d.discord_user_id=l.discord_user_id
+                JOIN pending_provider_job_history_v2 b ON b.provider='trucksbook'
+                  AND b.source_kind='verified_webhook_source'
+                  AND b.provider_account_id=d.trucksbook_user_id::text
+                  AND b.evidence->>'unit'='mi'
+                  AND b.evidence ? 'source_message_at'
+                JOIN processed_jobs p ON p.job_id=b.provider_job_id
+                  AND p.discord_user_id=l.discord_user_id
+                  AND LOWER(p.statistics)='real' AND p.accepted_distance>0
+                WHERE t.provider='trucky' AND t.source_kind='authenticated_api'
+                  AND t.provider_job_id=ANY($1::text[])
+                  AND NOT EXISTS (
+                      SELECT 1 FROM pending_provider_job_history_v2 other
+                      WHERE other.provider=t.provider AND other.provider_job_id=t.provider_job_id
+                        AND other.source_kind=t.source_kind
+                        AND other.provider_account_id IS DISTINCT FROM t.provider_account_id
+                  )
+            """, sorted(vault_ids - credited_ids))
+    from trucky_linked_allocation_v2 import vault_webhook_overlap_leads
+    from unified_job_matching_v2 import credited_route_overlaps, unique_overlap_winners
     overlaps = credited_route_overlaps(route_pairs)
-    topups = unique_overlap_topups(overlaps)
+    webhook_leads = vault_webhook_overlap_leads(webhook_pairs)
+    winners = unique_overlap_winners(overlaps)
+    trucky_winners = sum(provider == "trucky" for provider, _ in winners.values())
     jobs_with_timed_pairs = {row["trucky_job_id"] for row in route_pairs}
     from collections import Counter
     pending_counts = Counter(row["status"] for row in vault_status)
@@ -4124,7 +4518,9 @@ async def trucky_logbook_audit(ctx):
         f"Pending jobs with a credited TrucksBook record in the delivery window: {len(jobs_with_timed_pairs)}\n"
         f"Possible overlap with a credited TrucksBook trip: {len(overlaps)}\n"
         f"Jobs outside the available comparison records remain unresolved.\n"
-        f"One-to-one matches: {len(topups)}. Unconfirmed top-up preview: {sum(topups.values()):,.2f} mi.\n"
+        f"Additional review leads using webhook message time: {len(webhook_leads - overlaps.keys())}\n"
+        f"One-to-one review leads: {len(winners)}. Higher eligible mileage preview: "
+        f"{trucky_winners} Trucky, {len(winners) - trucky_winners} TrucksBook (including ties).\n"
         f"No authenticated vault or credit record: {len(audited_ids - vault_ids - credited_ids)}",
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -4371,8 +4767,10 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
                 COUNT(DISTINCT discord_user_id) AS drivers,
                 COALESCE(SUM(missing_distance), 0) AS missing_miles
             FROM mileage_repair_candidates
-            WHERE applied_at IS NULL;
-            """
+            WHERE applied_at IS NULL
+              AND ($1::bigint IS NULL OR discord_user_id=$1);
+            """,
+            target_driver_id,
         )
 
     preview=await create_mileage_audit_preview(db_pool,ctx.guild.id,ctx.channel.id,ctx.author.id,reviewed_job_ids)
@@ -4393,18 +4791,18 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         f"Jobs skipped — driver not linked: `{unlinked_event_jobs:,}`\n"
         f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
         f"`{int(totals['drivers']):,}` drivers\n"
-        f"Missing Real Miles pending repair: `{int(totals['missing_miles']):,}`\n"
+        f"Gross pending Real Miles before evidence and duplicate checks: `{int(totals['missing_miles']):,}`\n"
         f"Missing Race Miles (Trucky, stored pending): `{race['verified_pending_miles']:,.2f}` across `{race['verified_pending_jobs']:,}` jobs\n"
         f"Race miles stored without verified ownership: `{race['unverified_miles']:,.2f}` across `{race['unverified_jobs']:,}` jobs\n"
         f"Race observations held for classification/conflicts: `{race['classification_pending_jobs']+race['conflicting_jobs']:,}` jobs\n"
         f"Historical Real jobs held for baseline review: `{historical_real_held_jobs:,}` / `{historical_real_held_miles:,}` miles\n\n"
-        f"This preview approves only `{preview['jobs']:,}` reviewed jobs / `{preview['addition']:,}` miles.\n"
-        f"Held for source/account evidence: `{preview['held_jobs']:,}` jobs.\n"
+        f"**CONFIRM will apply: `{preview['addition']:,}` net Real Miles across `{preview['jobs']:,}` reviewed jobs.**\n"
+        f"Held for source, ownership or cross-provider evidence: `{preview['held_jobs']:,}` jobs.\n"
         "Unexplained balances are already in existing totals and are not added again.\n"
         + audit_confirmation_guidance(preview)
     )
     await ctx.send(
-        "**Trucky allocation — separate from this repair preview**\n"
+        "**Trucky credits reviewed alongside TrucksBook**\n"
         + f"Already credited Real: `{float(trucky_allocation['credited_real_miles']):,.2f}` miles / `{trucky_allocation['credited_real_jobs']}` jobs\n"
         + f"Already credited Race: `{float(trucky_allocation['credited_race_miles']):,.2f}` miles / `{trucky_allocation['credited_race_jobs']}` jobs\n"
         + f"Real jobs held for cross-provider/historical reconciliation: `{trucky_allocation['held_real_jobs']}`\n"
@@ -4414,10 +4812,11 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         lines=[f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + **{d['addition']:,}** = {d['proposed_real_miles']:,} Real miles ({d['jobs']} jobs)"
                for d in preview['drivers'][offset:offset+15]]
         await ctx.send('**Reviewed additions by driver**\n'+'\n'.join(lines),allowed_mentions=discord.AllowedMentions.none())
-    if preview.get('job_rows'):
+    if preview.get('job_rows') or preview.get('held_reasons'):
         await ctx.send(f"Reviewed batch #{preview['preview_id']} — exact job-level additions:",
             file=discord.File(BytesIO(json.dumps({'preview_id':preview['preview_id'],
                 'drivers':preview['drivers'],'jobs':preview['job_rows'],
+                'held_reasons':preview['held_reasons'],
                 'mileage_changed':False},indent=2).encode()),filename='mileageaudit-preview.json'),
             allowed_mentions=discord.AllowedMentions.none())
 
@@ -4580,164 +4979,184 @@ async def mileage_apply(ctx, confirmation: str = ""):
     applied_jobs = 0
     applied_miles = 0
 
-    async with db_pool.acquire() as connection:
-        async with connection.transaction():
-            candidates = await connection.fetch(
-                """
-                SELECT *
-                FROM mileage_repair_candidates
-                WHERE applied_at IS NULL
-                ORDER BY discord_user_id, job_id
-                FOR UPDATE;
-                """
-            )
-            try:
-                approval=await validate_mileage_audit_preview(connection,ctx.guild.id,ctx.channel.id,ctx.author.id,candidates)
-            except AuditPreviewError as error:
-                await ctx.reply(str(error),mention_author=False)
-                return
-            candidates=[c for c in candidates if c['job_id'] in approval['job_ids']]
-            if not candidates:
-                await ctx.reply('No additions were approved in this preview. No mileage changed. Stored or held Trucky jobs are not approved by this TrucksBook repair command.',mention_author=False)
-                return
-
-            for candidate in candidates:
-                job = await connection.fetchrow(
+    try:
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+                candidates = await connection.fetch(
                     """
-                    SELECT discord_user_id, accepted_distance, statistics
-                    FROM processed_jobs
-                    WHERE job_id = $1
+                    SELECT *
+                    FROM mileage_repair_candidates
+                    WHERE applied_at IS NULL
+                    ORDER BY discord_user_id, job_id
                     FOR UPDATE;
-                    """,
-                    candidate["job_id"],
+                    """
                 )
-                missing_job = candidate["repair_kind"] in ("missing_wotr", "missing_real")
-                if missing_job:
-                    # If live delivery or another recovery already inserted it,
-                    # consume the candidate without adding another mile.
-                    if job is not None:
-                        await connection.execute(
-                            "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
-                            "applied_by = $2 WHERE job_id = $1;",
-                            candidate["job_id"], ctx.author.id,
-                        )
-                        continue
-                elif (
-                    job is None
-                    or not is_real_statistics(job["statistics"])
-                    or int(job["discord_user_id"])
-                        != int(candidate["discord_user_id"])
-                    or int(job["accepted_distance"])
-                        != int(candidate["recorded_distance"])
-                ):
-                    continue
+                try:
+                    approval=await validate_mileage_audit_preview(connection,ctx.guild.id,ctx.channel.id,ctx.author.id,candidates)
+                except AuditPreviewError as error:
+                    await ctx.reply(str(error),mention_author=False)
+                    return
+                candidates=[c for c in candidates if c['job_id'] in approval['job_ids']]
+                if not candidates:
+                    await ctx.reply('This preview contains no eligible repairs. Review the held reasons in the audit attachment and resolve any missing account links or route evidence, then run a fresh audit.',mention_author=False)
+                    return
 
-                user_id = int(candidate["discord_user_id"])
-                delta = int(candidate["missing_distance"])
-                verified_repair = VERIFIED_HISTORICAL_REAL_REPAIRS.get(candidate["job_id"])
-                if verified_repair is not None and (
-                    user_id != verified_repair[0]
-                    or int(candidate["actual_distance"]) != verified_repair[2]
-                    or delta != verified_repair[2]
-                    or int(candidate["recorded_distance"]) != 0
-                    or int(candidate["source_channel_id"]) != verified_repair[3]
-                    or int(candidate["source_message_id"]) != verified_repair[4]
-                    or not missing_job
-                ):
-                    continue
-                previous_total = int(
-                    await connection.fetchval(
+                for candidate in candidates:
+                    job = await connection.fetchrow(
                         """
-                        SELECT real_miles
-                        FROM driver_progress
-                        WHERE discord_user_id = $1
+                        SELECT discord_user_id, accepted_distance, statistics
+                        FROM processed_jobs
+                        WHERE job_id = $1
                         FOR UPDATE;
                         """,
-                        user_id,
-                    )
-                    or 0
-                )
-                new_total = previous_total + delta
-
-                if missing_job:
-                    inserted = await connection.fetchval(
-                        """
-                        INSERT INTO processed_jobs (
-                            job_id, discord_user_id, trucksbook_name,
-                            accepted_distance, statistics, processed_at
-                        ) VALUES ($1, $2, $3, $4, 'Real', COALESCE($5, NOW()))
-                        ON CONFLICT (job_id) DO NOTHING RETURNING job_id;
-                        """,
-                        candidate["job_id"], user_id, candidate["trucksbook_name"],
-                        int(candidate["actual_distance"]),
-                        candidate["source_delivered_at"],
-                    )
-                    if inserted is None:
-                        # A concurrent normal delivery won the unique job ID.
-                        await connection.execute(
-                            "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
-                            "applied_by = $2 WHERE job_id = $1;",
-                            candidate["job_id"], ctx.author.id,
-                        )
-                        continue
-                else:
-                    await connection.execute(
-                        """
-                        UPDATE processed_jobs
-                        SET accepted_distance = $2
-                        WHERE job_id = $1;
-                        """,
                         candidate["job_id"],
-                        int(candidate["actual_distance"]),
                     )
-                await connection.execute(
-                    """
-                    INSERT INTO driver_progress (
-                        discord_user_id, trucksbook_name, real_miles, updated_at
-                    )
-                    VALUES ($1, $2, $3, NOW())
-                    ON CONFLICT (discord_user_id) DO UPDATE SET
-                        real_miles = driver_progress.real_miles + $3,
-                        updated_at = NOW();
-                    """,
-                    user_id,
-                    candidate["trucksbook_name"],
-                    delta,
-                )
-
-                # Record repaired crossings as already announced. This keeps
-                # milestone history coherent without flooding the channel.
-                for milestone_miles, _, _ in PROGRESSION_ROLES:
-                    if previous_total < milestone_miles <= new_total:
-                        await connection.execute(
-                            """
-                            INSERT INTO announced_milestones (
-                                discord_user_id, milestone_miles,
-                                trucksbook_name, job_id, announced_at
+                    missing_job = candidate["repair_kind"] in ("missing_wotr", "missing_real")
+                    if missing_job:
+                        # If live delivery or another recovery already inserted it,
+                        # consume the candidate without adding another mile.
+                        if job is not None:
+                            await connection.execute(
+                                "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
+                                "applied_by = $2 WHERE job_id = $1;",
+                                candidate["job_id"], ctx.author.id,
                             )
-                            VALUES ($1, $2, $3, $4, NOW())
-                            ON CONFLICT (discord_user_id, milestone_miles)
-                            DO NOTHING;
+                            continue
+                    elif (
+                        job is None
+                        or not is_real_statistics(job["statistics"])
+                        or int(job["discord_user_id"])
+                            != int(candidate["discord_user_id"])
+                        or int(job["accepted_distance"])
+                            != int(candidate["recorded_distance"])
+                    ):
+                        continue
+
+                    user_id = int(candidate["discord_user_id"])
+                    delta = int(candidate["missing_distance"])
+                    verified_repair = VERIFIED_HISTORICAL_REAL_REPAIRS.get(candidate["job_id"])
+                    if verified_repair is not None and (
+                        user_id != verified_repair[0]
+                        or int(candidate["actual_distance"]) != verified_repair[2]
+                        or delta != verified_repair[2]
+                        or int(candidate["recorded_distance"]) != 0
+                        or int(candidate["source_channel_id"]) != verified_repair[3]
+                        or int(candidate["source_message_id"]) != verified_repair[4]
+                        or not missing_job
+                    ):
+                        continue
+                    previous_total = int(
+                        await connection.fetchval(
+                            """
+                            SELECT real_miles
+                            FROM driver_progress
+                            WHERE discord_user_id = $1
+                            FOR UPDATE;
                             """,
                             user_id,
-                            milestone_miles,
-                            candidate["trucksbook_name"],
-                            candidate["job_id"],
                         )
+                        or 0
+                    )
+                    delta, hold = await reconciled_repair_delta(connection, candidate)
+                    if hold or delta != approval['additions'][candidate['job_id']]:
+                        raise AuditPreviewError('Provider evidence changed after review. Run a fresh audit.')
+                    new_total = previous_total + delta
 
-                await connection.execute(
-                    """
-                    UPDATE mileage_repair_candidates
-                    SET applied_at = NOW(), applied_by = $2
-                    WHERE job_id = $1 AND applied_at IS NULL;
-                    """,
-                    candidate["job_id"],
-                    ctx.author.id,
-                )
-                affected_users.add(user_id)
-                applied_jobs += 1
-                applied_miles += delta
-            await consume_mileage_audit_preview(connection,approval['preview_id'])
+                    if missing_job:
+                        inserted = await connection.fetchval(
+                            """
+                            INSERT INTO processed_jobs (
+                                job_id, discord_user_id, trucksbook_name,
+                                accepted_distance, statistics, processed_at
+                            ) VALUES ($1, $2, $3, $4, 'Real', COALESCE($5, NOW()))
+                            ON CONFLICT (job_id) DO NOTHING RETURNING job_id;
+                            """,
+                            candidate["job_id"], user_id, candidate["trucksbook_name"],
+                            int(candidate["actual_distance"]),
+                            candidate["source_delivered_at"],
+                        )
+                        if inserted is None:
+                            # A concurrent normal delivery won the unique job ID.
+                            await connection.execute(
+                                "UPDATE mileage_repair_candidates SET applied_at = NOW(), "
+                                "applied_by = $2 WHERE job_id = $1;",
+                                candidate["job_id"], ctx.author.id,
+                            )
+                            continue
+                    else:
+                        await connection.execute(
+                            """
+                            UPDATE processed_jobs
+                            SET accepted_distance = $2
+                            WHERE job_id = $1;
+                            """,
+                            candidate["job_id"],
+                            int(candidate["actual_distance"]),
+                        )
+                    await connection.execute(
+                        """
+                        INSERT INTO driver_progress (
+                            discord_user_id, trucksbook_name, real_miles, updated_at
+                        )
+                        VALUES ($1, $2, $3, NOW())
+                        ON CONFLICT (discord_user_id) DO UPDATE SET
+                            real_miles = driver_progress.real_miles + $3,
+                            updated_at = NOW();
+                        """,
+                        user_id,
+                        candidate["trucksbook_name"],
+                        delta,
+                    )
+
+                    if await connection.fetchval(
+                        "SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"
+                    ):
+                        await connection.execute("""
+                            UPDATE unified_v2_production_mileage_baselines b
+                            SET trucksbook_real_miles=p.real_miles-FLOOR(COALESCE((
+                                SELECT SUM(c.miles) FROM unified_v2_production_credit_ledger c
+                                WHERE c.discord_user_id=b.discord_user_id AND c.provider='trucky'
+                                  AND c.mileage_type='real'),0))::bigint
+                            FROM driver_progress p
+                            WHERE b.discord_user_id=$1 AND p.discord_user_id=b.discord_user_id
+                        """, user_id)
+
+                    # Record repaired crossings as already announced. This keeps
+                    # milestone history coherent without flooding the channel.
+                    for milestone_miles, _, _ in PROGRESSION_ROLES:
+                        if previous_total < milestone_miles <= new_total:
+                            await connection.execute(
+                                """
+                                INSERT INTO announced_milestones (
+                                    discord_user_id, milestone_miles,
+                                    trucksbook_name, job_id, announced_at
+                                )
+                                VALUES ($1, $2, $3, $4, NOW())
+                                ON CONFLICT (discord_user_id, milestone_miles)
+                                DO NOTHING;
+                                """,
+                                user_id,
+                                milestone_miles,
+                                candidate["trucksbook_name"],
+                                candidate["job_id"],
+                            )
+
+                    await connection.execute(
+                        """
+                        UPDATE mileage_repair_candidates
+                        SET applied_at = NOW(), applied_by = $2
+                        WHERE job_id = $1 AND applied_at IS NULL;
+                        """,
+                        candidate["job_id"],
+                        ctx.author.id,
+                    )
+                    affected_users.add(user_id)
+                    applied_jobs += 1
+                    applied_miles += delta
+                await consume_mileage_audit_preview(connection,approval['preview_id'])
+    except AuditPreviewError as error:
+        await ctx.reply(str(error), mention_author=False)
+        return
 
     role_failures = 0
     for user_id in affected_users:
@@ -6256,7 +6675,7 @@ def render_driver_profile_v5_png(avatar_bytes, discord_name, profile):
         profile_text(draw, (centre_x, 1094), label, fit_profile_text(draw, label, 142, 10, True), ice, anchor="ma", shadow=0)
         if ribbon:
             profile_text(draw, (centre_x, 1115), ribbon, fit_profile_text(draw, ribbon, 140, 9, True), muted, anchor="ma", shadow=0)
-    profile_text(draw, (69, 1152), "JOB STATS: TRUCKSBOOK REAL JOBS", load_profile_font(11, True), muted, shadow=0)
+    profile_text(draw, (69, 1152), "JOB STATS: CREDITED REAL JOBS", load_profile_font(11, True), muted, shadow=0)
 
     if profile.get("is_preview"):
         draw.rounded_rectangle((504, 1162, 1096, 1192), 10, fill=(1, 8, 17, 225), outline=(*gold[:3], 205), width=1)
@@ -6343,8 +6762,8 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     row = await connection.fetchrow(
         """
         SELECT
-            COALESCE(links.trucksbook_name,tb.provider_display_name,tr.provider_display_name,'A&T Driver') AS trucksbook_name,
-            links.discord_user_id IS NOT NULL AS legacy_linked,
+            COALESCE(tb.provider_display_name,links.trucksbook_name,tr.provider_display_name,'A&T Driver') AS trucksbook_name,
+            (links.discord_user_id IS NOT NULL AND links.trucksbook_name<>('__unlinked_driver_'||links.discord_user_id::text||'__')) AS legacy_linked,
             tr.provider_account_id AS trucky_account_id,
             tr.provider_display_name AS trucky_display_name,
             tr.verified_at IS NOT NULL AS trucky_verified,
@@ -6429,6 +6848,34 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
                        WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real'""",
                     discord_user_id,
                 )
+    if linked_real is not None:
+        career = await connection.fetchrow(
+            """
+            WITH credited_jobs AS (
+                SELECT p.accepted_distance::numeric AS miles
+                FROM processed_jobs p
+                WHERE p.discord_user_id=$1 AND LOWER(p.statistics)='real'
+                  AND p.accepted_distance>0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM unified_v2_production_mileage_decisions d
+                      WHERE d.provider='trucksbook' AND d.provider_job_id=p.job_id
+                        AND d.discord_user_id=p.discord_user_id
+                        AND d.decision='duplicate_provider_job'
+                        AND d.reason_code='superseded_by_higher_real_credit'
+                  )
+                UNION ALL
+                SELECT c.miles FROM unified_v2_production_credit_ledger c
+                WHERE c.discord_user_id=$1 AND c.provider='trucky'
+                  AND c.mileage_type='real'
+            )
+            SELECT COUNT(*)::bigint AS jobs_completed,
+                   COALESCE(ROUND(AVG(miles)),0)::bigint AS average_job_distance,
+                   COALESCE(ROUND(MAX(miles)),0)::bigint AS longest_job_distance
+            FROM credited_jobs
+            """, discord_user_id,
+        )
+        row = dict(row)
+        row.update(dict(career))
     credited = None
     if os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
         from unified_production_ledger_adapter_v2 import read_credited_progression_totals
@@ -6460,6 +6907,419 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         "weekly_wins": max(int(row["weekly_wins"] or 0), 0),
         "monthly_wins": max(int(row["monthly_wins"] or 0), 0),
     }
+
+
+@tasks.loop(count=1)
+async def cleanup_onboarding_logo_previews():
+    if db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING")=="YES": return
+    async with db_pool.acquire() as connection:
+        rows=await connection.fetch("SELECT verification_channel_id FROM unified_registration_sessions WHERE verification_channel_id IS NOT NULL AND status<>'cancelled'")
+    cleaned=0
+    for row in rows:
+        channel=bot.get_channel(row["verification_channel_id"])
+        if channel is None or channel.guild.id!=GUILD_ID or channel.category_id!=VERIFICATION_CATEGORY_ID:
+            continue
+        try:
+            async for message in channel.history(limit=30):
+                if message.author.id!=bot.user.id or not any(a.filename=="at-onboarding.webp" for a in message.attachments):
+                    continue
+                embeds=[embed.copy().set_thumbnail(url=None) for embed in message.embeds]
+                await message.edit(embeds=embeds,attachments=[])
+                cleaned+=1
+        except discord.HTTPException as error:
+            print(f"ONBOARDING LOGO CLEANUP RETRY: {type(error).__name__}",flush=True)
+    print(f"ONBOARDING LOGO PREVIEWS CLEANED: {cleaned}",flush=True)
+
+
+@cleanup_onboarding_logo_previews.before_loop
+async def before_onboarding_logo_cleanup():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=15)
+async def refresh_card_account_names():
+    if db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
+    try:
+        steam_count = await steam_profile_names.refresh(db_pool)
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""SELECT discord_user_id,provider,provider_account_id FROM unified_provider_links
+                UNION SELECT discord_user_id,'trucksbook',trucksbook_user_id::text FROM driver_links
+                WHERE trucksbook_user_id IS NOT NULL""")
+        try:
+            trucky_names = await trucky_membership_adapter.fetch_current_member_names()
+        except Exception as error:
+            trucky_names = {}
+            print(f"CARD NAME REFRESH TRUCKY RETRY: {type(error).__name__}", flush=True)
+        updated = 0
+        for row in rows:
+            account = str(row["provider_account_id"])
+            provider = row["provider"]
+            name = None
+            if provider == "trucky":
+                name = trucky_names.get(account)
+            elif provider == "trucksbook" and account.isdecimal():
+                result = await fetch_trucksbook_profile(int(account))
+                if result.get("success"):
+                    name = result.get("trucksbook_name")
+            if not isinstance(name,str) or not name.strip():
+                continue
+            async with db_pool.acquire() as conn:
+                async with conn.transaction():
+                    # Stable account IDs are the guard; names never relink accounts.
+                    await conn.execute("""UPDATE unified_provider_links SET provider_display_name=$4
+                        WHERE discord_user_id=$1 AND provider=$2 AND provider_account_id=$3""",
+                        row["discord_user_id"],provider,account,name.strip())
+                    if provider == "trucksbook":
+                        await conn.execute("""UPDATE driver_links SET trucksbook_name=$3
+                            WHERE discord_user_id=$1 AND trucksbook_user_id=$2""",
+                            row["discord_user_id"],int(account),name.strip())
+            updated += 1
+        print(f"CARD ACCOUNT NAMES REFRESHED: {updated} tracking accounts; {steam_count} Steam names", flush=True)
+    except Exception as error:
+        print(f"CARD NAME REFRESH RETRY: {type(error).__name__}", flush=True)
+
+
+@refresh_card_account_names.before_loop
+async def before_card_account_names():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=5)
+async def sync_race_careers():
+    if (db_pool is None or os.getenv('AT_V2_ISOLATED_STAGING') == 'YES'
+            or os.getenv('AT_V2_LINKED_TRUCKY_MILEAGE_ENABLED') != 'YES'):
+        return
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    try:
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+                # One worker owns role creation, including during deploy overlap.
+                if not await connection.fetchval("SELECT pg_try_advisory_xact_lock(746520032)"):
+                    return
+                drivers = await connection.fetch("""
+                    SELECT t.discord_user_id,t.trucky_race_miles
+                    FROM unified_v2_production_mileage_totals t
+                    WHERE EXISTS (
+                        SELECT 1 FROM unified_provider_links p
+                        WHERE p.discord_user_id=t.discord_user_id AND p.provider='trucky'
+                          AND p.verified_at IS NOT NULL)
+                """)
+                mapped = await race_progression.ensure_roles(connection,guild,
+                    PROGRESSION_ROLES,ACHIEVEMENT_ROLES,HALL_OF_FAME_ROLES)
+                count = 0
+                for row in drivers:
+                    count += await race_progression.sync_driver(connection,guild,row['discord_user_id'],
+                        row['trucky_race_miles'],mapped,PROGRESSION_ROLES,ACHIEVEMENT_ROLES,HALL_OF_FAME_ROLES)
+                print(f"RACE CAREER SYNC: {count} drivers; {len(mapped)} separate roles ready", flush=True)
+    except Exception as error:
+        print(f"RACE CAREER RETRY: {type(error).__name__}: {error}", flush=True)
+
+
+@sync_race_careers.before_loop
+async def before_race_careers():
+    await bot.wait_until_ready()
+
+
+@tasks.loop(minutes=5)
+async def assign_driver_card_trucks():
+    if db_pool is None:
+        return
+    try:
+        async with db_pool.acquire() as connection:
+            async with connection.transaction():
+                drivers = await connection.fetch(
+                    """SELECT discord_user_id FROM driver_links
+                       UNION SELECT discord_user_id FROM unified_provider_links"""
+                )
+                for driver in drivers:
+                    await tachograph.appearance(connection, driver["discord_user_id"])
+                print(f"TACHOGRAPH ASSIGNMENTS: {len(drivers)} linked drivers ready", flush=True)
+    except Exception as error:
+        print(f"CARD TRUCK ASSIGNMENT RETRY: {type(error).__name__}")
+
+
+@assign_driver_card_trucks.before_loop
+async def before_card_truck_assignment():
+    await bot.wait_until_ready()
+
+
+async def refresh_member_role_cards(member):
+    """Refresh recently posted profile cards when a company job title changes."""
+    for message in list(bot.cached_messages):
+        if message.author.id != bot.user.id or getattr(message.guild, "id", None) != GUILD_ID:
+            continue
+        destination = None
+        for row in message.components:
+            for component in row.children:
+                custom_id = getattr(component, "custom_id", "") or ""
+                if custom_id in {f"at:tacho:{member.id}:front", f"at:tacho:{member.id}:back"}:
+                    destination = custom_id.rsplit(":", 1)[1]
+        if destination is None:
+            continue
+        try:
+            async with db_pool.acquire() as connection:
+                profile = await fetch_driver_profile_stats(connection, member.id)
+            if profile is None:
+                continue
+            side = "back" if destination == "front" else "front"
+            image = await make_tachograph(member, profile, side)
+            await message.edit(attachments=[discord.File(image, filename="at-driver-profile.png")],
+                               view=tachograph_view(member.id, destination))
+        except (discord.HTTPException, discord.Forbidden) as error:
+            print(f"CARD ROLE REFRESH SKIPPED: {type(error).__name__}", flush=True)
+        except Exception as error:
+            print(f"CARD ROLE REFRESH ERROR: {type(error).__name__}", flush=True)
+
+
+@bot.event
+async def on_guild_role_update(before, after):
+    if before.name == after.name or after.guild.id != GUILD_ID or db_pool is None:
+        return
+    if os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
+    for member in after.members:
+        await refresh_member_role_cards(member)
+
+
+async def make_tachograph(member, profile, side):
+    # Fetch current Discord roles rather than relying on an old command member object.
+    member = await member.guild.fetch_member(member.id)
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            prefs = await tachograph.appearance(connection, member.id)
+            profile = dict(profile)
+            profile["steam_id64"] = await connection.fetchval(
+                "SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1",
+                member.id,
+            )
+            profile["steam_display_name"] = await connection.fetchval(
+                "SELECT display_name FROM driver_card_steam_names WHERE discord_user_id=$1 AND steam_id64=$2",
+                member.id, profile["steam_id64"],
+            )
+    role = tachograph.company_role(member, GUILD_ID)
+    return await asyncio.to_thread(
+        tachograph.render, member.display_name, profile, prefs, side, role
+    )
+
+
+def tachograph_view(user_id, destination):
+    view = discord.ui.View(timeout=None)
+    view.add_item(TachographFlip(user_id, destination))
+    return view
+
+
+class TachographFlip(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"at:tacho:(?P<user_id>[0-9]+):(?P<side>front|back)",
+):
+    def __init__(self, user_id, side):
+        self.user_id, self.side = user_id, side
+        super().__init__(discord.ui.Button(
+            label="View Back" if side == "back" else "View Front",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"at:tacho:{user_id}:{side}",
+        ))
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        return cls(int(match["user_id"]), match["side"])
+
+    async def callback(self, interaction):
+        if interaction.guild_id != GUILD_ID or db_pool is None:
+            await interaction.response.send_message("Driver database unavailable.", ephemeral=True)
+            return
+        await interaction.response.defer()
+        try:
+            member = interaction.guild.get_member(self.user_id)
+            if member is None:
+                await interaction.followup.send("This driver is no longer in the server.", ephemeral=True)
+                return
+            async with db_pool.acquire() as connection:
+                async with connection.transaction(readonly=True):
+                    profile = await fetch_driver_profile_stats(connection, self.user_id)
+            if profile is None:
+                await interaction.followup.send("Driver profile unavailable.", ephemeral=True)
+                return
+            image = await make_tachograph(member, profile, self.side)
+            await interaction.edit_original_response(
+                attachments=[discord.File(image, filename="at-driver-profile.png")],
+                view=tachograph_view(self.user_id, "front" if self.side == "back" else "back"),
+            )
+        except Exception as error:
+            print(f"TACHOGRAPH FLIP ERROR: {type(error).__name__}")
+            await interaction.followup.send("Unable to load this card. Please try again.", ephemeral=True)
+
+
+async def save_card_country(ctx, country: str):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    choices = tachograph.countries()
+    choice = tachograph.resolve_country(country)
+    if not choice:
+        await ctx.reply("Choose a country name or code, for example GB, IE or AU. Use CLEAR to remove it.", mention_author=False)
+        return
+    if ctx.interaction:
+        await ctx.defer(ephemeral=True)
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            if await fetch_driver_profile_stats(connection, ctx.author.id) is None:
+                await ctx.reply("Complete driver registration first.", mention_author=False)
+                return
+            await tachograph.appearance(connection, ctx.author.id)
+            await connection.execute(
+                "UPDATE driver_card_preferences SET country_code=$2 WHERE discord_user_id=$1",
+                ctx.author.id, None if choice == "CLEAR" else choice,
+            )
+    label = "Not set" if choice == "CLEAR" else choices[choice]["name"]
+    await ctx.reply(f"Card country saved: **{label}**. Use !profile to view it.", mention_author=False)
+
+
+@bot.hybrid_command(name="country", description="Choose the country displayed on your driver card")
+async def card_country(ctx, *, country: str):
+    await save_card_country(ctx, country)
+
+
+class UnlinkConfirmation(discord.ui.View):
+    def __init__(self,actor_id,user_id,scope,fingerprint):
+        super().__init__(timeout=120)
+        self.actor_id,self.user_id,self.scope,self.fingerprint=actor_id,user_id,scope,fingerprint
+
+    async def interaction_check(self,interaction):
+        if interaction.user.id!=self.actor_id or interaction.guild_id!=GUILD_ID or not account_unlink.allowed(interaction.user,VERIFICATION_STAFF_ROLE_IDS):
+            await interaction.response.send_message("Only the requesting A&T manager can confirm this action.",ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm unlink",style=discord.ButtonStyle.danger)
+    async def confirm_unlink(self,interaction,button):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await account_unlink.unlink(db_pool,self.user_id,self.actor_id,self.scope,self.fingerprint)
+        except ValueError as error:
+            await interaction.edit_original_response(content=str(error),embed=None,view=None)
+            self.stop()
+            return
+        except Exception as error:
+            print(f"ACCOUNT UNLINK FAILED: {type(error).__name__}",flush=True)
+            await interaction.edit_original_response(content="Unable to unlink the accounts. No partial changes were saved. Try again shortly.",embed=None,view=None)
+            self.stop()
+            return
+        await interaction.edit_original_response(content=f"Accounts unlinked for <@{self.user_id}>. Earned mileage, jobs, badges and truck/flag preferences are retained. The driver can use /register to reconnect.",embed=None,view=None,allowed_mentions=discord.AllowedMentions.none())
+        self.stop()
+        try:
+            await log_verification(interaction.guild,"🔗 Management account unlink",f"Manager: <@{self.actor_id}>\nDriver: <@{self.user_id}>\nAccount selection: **{self.scope}**\nCareer history retained. Audit snapshot saved.")
+            await refresh_unified_registration(self.user_id)
+        except Exception as error:
+            print(f"UNLINK NOTICE PENDING: {type(error).__name__}",flush=True)
+
+    @discord.ui.button(label="Cancel",style=discord.ButtonStyle.secondary)
+    async def cancel_unlink(self,interaction,button):
+        await interaction.response.edit_message(content="Unlink cancelled. Accounts are unchanged.",embed=None,view=None)
+        self.stop()
+
+
+@bot.hybrid_command(name="unlink",description="Management only: unlink a driver's selected accounts while retaining career history")
+@discord.app_commands.default_permissions(manage_guild=True)
+@discord.app_commands.choices(account=[
+    discord.app_commands.Choice(name="TrucksBook",value="trucksbook"),
+    discord.app_commands.Choice(name="Trucky",value="trucky"),
+    discord.app_commands.Choice(name="Steam + tracking accounts",value="steam"),
+    discord.app_commands.Choice(name="All linked accounts",value="all")])
+async def unlink_driver(ctx,driver:str,account:str):
+    if ctx.guild is None or ctx.guild.id!=GUILD_ID or db_pool is None:
+        return
+    if not account_unlink.allowed(ctx.author,VERIFICATION_STAFF_ROLE_IDS):
+        await ctx.reply("This command is restricted to A&T owners and Management.",ephemeral=True,mention_author=False)
+        return
+    if ctx.interaction is None:
+        await ctx.reply("Use the /unlink slash command so the account review stays private.",mention_author=False)
+        return
+    scope=account.casefold()
+    if scope not in account_unlink.SCOPES:
+        await ctx.reply("Choose TrucksBook, Trucky, Steam + tracking accounts, or All linked accounts.",ephemeral=True,mention_author=False)
+        return
+    await ctx.defer(ephemeral=True)
+    try:
+        async with db_pool.acquire() as connection:
+            user_id=await account_unlink.resolve_target(connection,ctx.guild,driver)
+            data,fingerprint,_=await account_unlink.snapshot(connection,user_id)
+    except ValueError as error:
+        await ctx.reply(str(error),ephemeral=True,mention_author=False)
+        return
+    lines=[f"**Driver:** <@{user_id}> (`{user_id}`)",f"**Account selection:** {scope}"]
+    for row in data['links']:
+        lines.append(f"{row['provider'].title()}: {discord.utils.escape_markdown(row.get('provider_display_name') or 'Linked')} (`{row['provider_account_id']}`)")
+    if data['legacy'] and data['legacy']['trucksbook_user_id']:
+        lines.append(f"Legacy TrucksBook: `{data['legacy']['trucksbook_user_id']}`")
+    if data['steam']:
+        lines.append(f"Steam: `{data['steam']['steam_id64']}`")
+    lines.append("\nEarned mileage, jobs, achievements and card preferences stay saved.")
+    if scope in {'steam','all'}:
+        lines.append("Steam unlinking also disconnects both tracking providers. The driver must verify/link again.")
+    await ctx.reply(embed=onboarding_flow.panel("🔗 REVIEW ACCOUNT UNLINK","\n".join(lines)),
+        view=UnlinkConfirmation(ctx.author.id,user_id,scope,fingerprint),ephemeral=True,mention_author=False)
+
+
+@unlink_driver.autocomplete("driver")
+async def unlink_driver_autocomplete(interaction,current):
+    if interaction.guild_id!=GUILD_ID or not account_unlink.allowed(interaction.user,VERIFICATION_STAFF_ROLE_IDS): return []
+    query=current.casefold().strip().lstrip('@')
+    return [discord.app_commands.Choice(name=f"{member.display_name} (@{member.name})"[:100],value=str(member.id))
+            for member in interaction.guild.members if not member.bot
+            and (query in member.display_name.casefold() or query in member.name.casefold() or query in str(member.id))][:25]
+
+
+@bot.hybrid_group(name="change", invoke_without_command=True, description="Change your driver card settings")
+async def card_change(ctx):
+    await ctx.reply("Use /change country or /change truck to update your driver card.", mention_author=False)
+
+
+@card_change.command(name="country", description="Choose the country displayed on your driver card")
+async def change_country(ctx, *, country: str):
+    await save_card_country(ctx, country)
+
+
+@card_change.command(name="truck", description="Choose the fleet truck displayed on your driver card")
+async def change_truck(ctx, *, truck: str):
+    if ctx.guild is None or ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    key=tachograph.resolve_truck(truck)
+    if not key:
+        await ctx.reply("Choose a truck from the /change truck suggestions. Use its full fleet name.", mention_author=False)
+        return
+    if ctx.interaction:
+        await ctx.defer(ephemeral=True)
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            if await fetch_driver_profile_stats(connection,ctx.author.id) is None:
+                await ctx.reply("Complete driver registration first.",mention_author=False)
+                return
+            await tachograph.appearance(connection,ctx.author.id)
+            await connection.execute("UPDATE driver_card_preferences SET truck_key=$2 WHERE discord_user_id=$1",ctx.author.id,key)
+    await ctx.reply(f"Card truck saved: **{tachograph.available_trucks()[key]}**. Use !profile to view it.",mention_author=False)
+
+
+@change_truck.autocomplete("truck")
+async def truck_autocomplete(interaction,current):
+    query=current.casefold().strip()
+    return [discord.app_commands.Choice(name=label,value=key)
+            for key,label in tachograph.available_trucks().items()
+            if query in label.casefold() or query in key.casefold()][:25]
+
+
+@change_country.autocomplete("country")
+@card_country.autocomplete("country")
+async def country_autocomplete(interaction, current):
+    query = current.casefold()
+    choices = [
+        discord.app_commands.Choice(name=value["name"], value=key)
+        for key, value in tachograph.countries().items()
+        if query in value["name"].casefold() or query in key.casefold()
+    ]
+    return choices[:24] + [discord.app_commands.Choice(name="Clear country", value="CLEAR")]
 
 
 @bot.command(
@@ -6547,18 +7407,10 @@ async def driver_profile(
     )
 
     try:
-        avatar_bytes = await target_member.display_avatar.with_size(256).read()
-        profile_png = await asyncio.to_thread(
-            render_driver_profile_v5_png,
-            avatar_bytes,
-            target_member.display_name,
-            profile,
-        )
+        profile_png = await make_tachograph(target_member, profile, "front")
         await ctx.send(
-            file=discord.File(
-                profile_png,
-                filename="at-driver-profile.png",
-            ),
+            file=discord.File(profile_png, filename="at-driver-profile.png"),
+            view=tachograph_view(target_member.id, "back"),
         )
     except Exception as error:
         print(f"GRAPHICAL PROFILE FALLBACK: {error}")
@@ -6994,6 +7846,7 @@ async def register_driver(ctx):
                 manage_channels=True,
                 manage_messages=True,
                 embed_links=True,
+                attach_files=True,
             ),
     }
 
@@ -7236,12 +8089,8 @@ async def link_steam_for_registration(ctx):
         await ctx.reply("Could not create a secure Steam login. Please try later.", mention_author=False)
         return
     await refresh_unified_registration(ctx.author.id)
-    await ctx.reply(
-        "🔐 **Verify your Steam account**\n"
-        f"Sign in with Steam using this one-time link (expires in 10 minutes):\n{url}\n"
-        "Never share this link. Linking Steam alone does not approve a tracking provider.",
-        mention_author=False,
-    )
+    await ctx.reply(embed=onboarding_flow.steam_signin(url),mention_author=False)
+
 
 
 @bot.command(name="truckyidentitycheck")
@@ -8715,7 +9564,7 @@ async def confirm_verification(
             await ctx.reply(registration.next_steps(view), mention_author=False)
             return
         await audit_registration_account(ctx, "registration", "confirmed")
-        await ctx.reply("✅ Registration complete. Your linked accounts and existing driver history are retained. This private channel closes in **30 seconds**. No mileage or roles were awarded.", mention_author=False)
+        await onboarding_flow.send(ctx.channel,onboarding_flow.completion())
         await asyncio.sleep(30)
         # Recheck after the grace period: cancellation/suspension or a different
         # registration channel must not cause deletion of the wrong channel.

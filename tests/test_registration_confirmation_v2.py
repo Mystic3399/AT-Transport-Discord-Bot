@@ -26,6 +26,7 @@ class RegistrationConfirmationTests(unittest.IsolatedAsyncioTestCase):
         channel=SimpleNamespace(id=22,delete=AsyncMock(side_effect=delete_error))
         ctx=SimpleNamespace(guild=SimpleNamespace(id=1),author=SimpleNamespace(id=11,bot=False),channel=channel,reply=AsyncMock())
         ns=dict(GUILD_ID=1,db_pool=object(),discord=discord,asyncio=SimpleNamespace(sleep=AsyncMock()),
+                onboarding_flow=SimpleNamespace(send=AsyncMock(),completion=lambda:'completion-panel'),
                 get_verification_by_channel=AsyncMock(return_value={'discord_user_id':owner}),
                 refresh_unified_registration=AsyncMock(),audit_registration_account=AsyncMock(),print=lambda *a,**k:None)
         exec(compile(ast.Module(body=[fn],type_ignores=[]),'bot.py','exec'),ns)
@@ -42,6 +43,7 @@ class RegistrationConfirmationTests(unittest.IsolatedAsyncioTestCase):
         finish.assert_awaited_once()
         ns['asyncio'].sleep.assert_awaited_once_with(30)
         ctx.channel.delete.assert_awaited_once()
+        ns['onboarding_flow'].send.assert_awaited_once_with(ctx.channel,'completion-panel')
 
     async def test_other_member_cannot_confirm(self):
         ctx,ns,_=self.command(owner=99)
