@@ -126,7 +126,42 @@ async def audit_account_matches(conn, candidate, *, lock=False):
     legacy_id = await conn.fetchval(sql + (' FOR UPDATE' if lock else ''), user)
     if legacy_id is not None:
         return str(legacy_id) == account
-    return await verified_trucksbook_driver(conn, account) == user
+    verified_owner = await verified_trucksbook_driver(conn, account)
+    if verified_owner is not None:
+        return verified_owner == user
+
+    # Some older registrations recorded the ID on the completed verification
+    # but left it blank on the active legacy link. Require both records.
+    if not await conn.fetchval("""
+        SELECT to_regclass('driver_verifications') IS NOT NULL
+           AND to_regclass('unified_provider_links') IS NOT NULL
+           AND to_regclass('unified_driver_profiles') IS NOT NULL
+    """):
+        return False
+    return bool(await conn.fetchval("""
+        SELECT TRUE
+        FROM driver_links d
+        JOIN driver_verifications v USING (discord_user_id)
+        WHERE d.discord_user_id=$1 AND d.trucksbook_user_id IS NULL
+          AND LEFT(d.trucksbook_name, 18)<>'__unlinked_driver_'
+          AND v.status='completed' AND v.completed_at IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM unified_driver_profiles p
+              WHERE p.discord_user_id=$1 AND p.status='suspended'
+          )
+          AND v.trucksbook_user_id::text=$2
+          AND NOT EXISTS (
+              SELECT 1 FROM driver_links other
+              WHERE other.trucksbook_user_id::text=$2
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM unified_provider_links l
+              WHERE l.provider='trucksbook'
+                AND ((l.discord_user_id=$1 AND l.provider_account_id<>$2)
+                  OR (l.discord_user_id<>$1 AND l.provider_account_id=$2))
+          )
+        FOR UPDATE OF d, v
+    """, user, account))
 
 
 async def reconciled_repair_delta(conn, candidate):
