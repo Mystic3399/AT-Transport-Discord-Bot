@@ -62,6 +62,7 @@ class VerifiedJobCandidateTests(unittest.TestCase):
         from decimal import Decimal
         for kph,expected in [('129','real'),('132','race'),
                 (str(Decimal(81)*Decimal('1.609344')),'real'),
+                ('131','race'),
                 (str(Decimal(82)*Decimal('1.609344')),'race'),
                 (str(Decimal(112)*Decimal('1.609344')),'race')]:
             with self.subTest(kph=kph):
@@ -74,9 +75,9 @@ class VerifiedJobCandidateTests(unittest.TestCase):
         self.assertEqual(self.candidate({**BASE,'game_id':2,'max_speed_kmh':129,'stats_type':'race_miles'})['mileage_type'],'real')
         self.assertEqual(self.candidate({**BASE,'game_id':2,'max_speed_kmh':132})['mileage_type'],'race')
 
-    def test_ats_missing_unit_specific_speed_and_fractional_gap_stay_pending(self):
+    def test_ats_missing_invalid_or_excessive_speed_stays_pending(self):
         from decimal import Decimal
-        for speed in (None,True,-1,'nan',str(Decimal('81.5')*Decimal('1.609344')),
+        for speed in (None,True,-1,'nan',
                       str(Decimal('112.1')*Decimal('1.609344'))):
             self.assertIsNone(self.candidate({**BASE,'game_id':2,'max_speed':129,'max_speed_kmh':speed}))
         for statistics in ('none','invalid','road_trip_real','road_trip_race'):

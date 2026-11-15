@@ -84,9 +84,15 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
     if all(isinstance(value,str) and value.strip() and len(value)<=300 for value in metadata.values()):
         result['job_metadata'] = metadata
     if game=='ATS' or classification.mileage_type=='race':
+        policy = 'ets2_provider_classification'
+        if game == 'ATS':
+            # Retain the evidence label for previously accepted immutable records.
+            policy = 'ats_maximum_speed_0_81_real_82_112_race'
+            if classification.mileage_type == 'race' and Decimal(str(job['max_speed_kmh'])) < 82 * Decimal('1.609344'):
+                policy = 'ats_maximum_speed_above_81_through_112_race'
         result['classification_evidence']={
             'game':game,'provider_stats_type':job['stats_type'],
-            'policy':'ats_maximum_speed_0_81_real_82_112_race' if game=='ATS' else 'ets2_provider_classification',
+            'policy':policy,
         }
         if game=='ATS':
             result['classification_evidence']['max_speed_kmh']=str(job['max_speed_kmh'])

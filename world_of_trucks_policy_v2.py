@@ -72,8 +72,8 @@ def excluded_trucksbook_details(details):
 def classify_job_mileage(provider, statistics, *, game, max_speed=None, speed_unit=None):
     """Apply the owner's ATS-only maximum-speed policy without guessing units.
 
-    ATS 0–81 mph is Real; 82–112 mph is Race. The open fractional interval
-    remains pending, with no rounding. ETS2 retains explicit provider labels.
+    ATS 0–81 mph is Real. Above 81 mph through 112 mph is Race.
+    Speeds are compared without rounding. ETS2 retains explicit provider labels.
     Invalid/road-trip provider classifications never become eligible jobs.
     This classifies evidence only; ownership/completion/dedup remain separate.
     """
@@ -95,8 +95,6 @@ def classify_job_mileage(provider, statistics, *, game, max_speed=None, speed_un
         mph=speed if speed_unit=='mph' else speed/Decimal('1.609344')
     except (InvalidOperation, ValueError, TypeError):
         return None
-    kind='Real' if mph<=81 else 'Race' if 82<=mph<=112 else None
-    if kind is None:
-        return None
+    kind = 'Real' if mph <= 81 else 'Race'
     wotr = isinstance(statistics,str) and 'wotr' in [s.strip().lower() for s in statistics.split(',')]
     return classify_event_mileage(provider, kind + (', WoTr' if wotr else ''))
