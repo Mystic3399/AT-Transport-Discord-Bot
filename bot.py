@@ -1513,74 +1513,19 @@ async def mark_milestone_announced(
     return result != "UPDATE 0"
 
 
-def build_progression_milestone_embed(
-    member,
-    discord_user_id,
-    trucksbook_name,
-    milestone,
-    real_miles,
-):
-    """Build a real milestone announcement embed."""
-    milestone_miles = milestone["miles"]
-    milestone_rank = milestone["rank"]
+def build_progression_milestone_embed(member, discord_user_id, milestone, real_miles):
+    driver = member.mention if member else f"<@{discord_user_id}>"
     next_role = get_next_progression_role(real_miles)
-    driver_display = (
-        member.mention
-        if member is not None
-        else f"<@{discord_user_id}>"
-    )
-
-    embed = discord.Embed(
-        title=f"🏆 {milestone_rank} • {milestone_miles:,} Real Miles",
-        description=(
-            f"{driver_display} has earned **{milestone_rank}**."
-        ),
-        colour=discord.Colour.from_rgb(31, 78, 121),
-    )
-
-    embed.set_author(name="A&T TRANSPORT LTD  /  CAREER MILESTONE")
-    if member is not None:
-        embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(
-        name="Driver Account",
-        value=f"`{trucksbook_name}`",
-        inline=True,
-    )
-    embed.add_field(
-        name="New Progression Rank",
-        value=f"🏅 **{milestone_rank}**",
-        inline=False,
-    )
-    embed.add_field(
-        name="Current Real Total",
-        value=f"🚛 **{real_miles:,} Real miles**",
-        inline=False,
-    )
-
-    if next_role is None:
-        embed.add_field(
-            name="Progression Status",
-            value="🌌 **Beyond Horizons — maximum rank achieved**",
-            inline=False,
-        )
-    else:
+    lines = [
+        f"{driver} earned **{milestone['rank']}** at **{milestone['miles']:,} Real Miles**.",
+        f"**{real_miles:,} Real Miles** total.",
+    ]
+    if next_role:
         next_miles, _, next_rank = next_role
-        miles_remaining = max(next_miles - real_miles, 0)
-        embed.add_field(
-            name="Next Milestone",
-            value=f"🌠 **{next_miles:,} — {next_rank}**",
-            inline=True,
-        )
-        embed.add_field(
-            name="Miles Remaining",
-            value=f"📏 **{miles_remaining:,}**",
-            inline=True,
-        )
-
-    embed.set_footer(
-        text="A&T Transport LTD • Driven Beyond Horizons"
-    )
-    return embed
+        lines.append(f"**{next_miles - real_miles:,} mi** to **{next_rank}**.")
+    else:
+        lines.append("Highest rank reached.")
+    return discord.Embed(description="\n".join(lines), colour=discord.Colour.from_rgb(31, 78, 121))
 
 
 async def announce_progression_milestone(
@@ -1630,20 +1575,12 @@ async def announce_progression_milestone(
         )
         return False
 
-    embed = build_progression_milestone_embed(
-        member,
-        discord_user_id,
-        trucksbook_name,
-        milestone,
-        real_miles,
-    )
-
+    caption = build_progression_milestone_embed(member, discord_user_id, milestone, real_miles)
     try:
-        artwork = await career_art_file(
-            embed, "rank-milestone.png", career_art.achievement,
+        await send_achievement_post(
+            channel, caption, "rank-milestone.png",
             member.display_name if member else trucksbook_name, milestone_rank, milestone_miles,
         )
-        await channel.send(embed=embed, **({"file": artwork} if artwork else {}))
     except (discord.Forbidden, discord.HTTPException) as error:
         print(
             "MILESTONE ANNOUNCEMENT ERROR: Mileage remains saved; "
@@ -1863,36 +1800,30 @@ async def sync_member_permanent_roles(guild, discord_user_id, real_miles, *, com
     return {"status": "updated" if add_roles or remove_roles else "correct"}
 
 
-def build_achievement_embed(member, discord_user_id, trucksbook_name, achievement, real_miles):
+def build_achievement_embed(member, discord_user_id, achievement, real_miles):
     threshold = achievement["miles"]
+    driver = member.mention if member else f"<@{discord_user_id}>"
+    lines = [
+        f"{driver} earned **{achievement['name']}** at **{threshold:,} Real Miles**.",
+        f"**{real_miles:,} Real Miles** total.",
+    ]
     hall_tier = get_hall_of_fame_tier(real_miles)
-    driver_display = member.mention if member else f"<@{discord_user_id}>"
-    embed = discord.Embed(
-        title=f"🏅 {achievement['name']} • {threshold:,} Real Miles",
-        description=(
-            f"{driver_display} has earned a permanent place in the **{achievement['name']}**."
-        ),
-        colour=discord.Colour.gold(),
-    )
-    embed.set_author(name="A&T TRANSPORT LTD  /  PERMANENT ACHIEVEMENT")
-    if member:
-        embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Driver account", value=discord.utils.escape_markdown(str(trucksbook_name))[:150])
-    embed.add_field(name="Verified Real Total", value=f"**{real_miles:,} miles**")
     if hall_tier and threshold in {250000, 500000, 1000000}:
-        embed.add_field(
-            name="Hall of Fame",
-            value=f"🏛️ **{hall_tier[2]}** — a permanent place in A&T history",
-            inline=False,
-        )
+        lines.append(f"Hall of Fame • **{hall_tier[2]}**")
     if threshold == 40000 and MILEAGE_CLUB_40K_CHANNEL_ID:
-        embed.add_field(
-            name="40K Reward Hub Unlocked",
-            value=f"Visit <#{MILEAGE_CLUB_40K_CHANNEL_ID}> for your milestone rewards.",
-            inline=False,
-        )
-    embed.set_footer(text="A&T Transport LTD • Permanent Achievement")
-    return embed
+        lines.append(f"Claim your rewards in <#{MILEAGE_CLUB_40K_CHANNEL_ID}>.")
+    return discord.Embed(description="\n".join(lines), colour=discord.Colour.gold())
+
+
+async def send_achievement_post(channel, caption, filename, name, award, miles, *, permanent=False):
+    image_embed = discord.Embed(colour=caption.colour)
+    artwork = await career_art_file(
+        image_embed, filename, career_art.achievement, name, award, miles, permanent=permanent,
+    )
+    if artwork:
+        await channel.send(embeds=[image_embed, caption], file=artwork)
+    else:
+        await channel.send(embed=caption)
 
 
 async def announce_permanent_achievement(
@@ -1903,15 +1834,12 @@ async def announce_permanent_achievement(
         print("PERMANENT ACHIEVEMENT ANNOUNCEMENT SKIPPED: channel unavailable.")
         return False
     try:
-        embed = build_achievement_embed(
-            member, discord_user_id, trucksbook_name, achievement, real_miles
-        )
-        artwork = await career_art_file(
-            embed, "permanent-achievement.png", career_art.achievement,
+        caption = build_achievement_embed(member, discord_user_id, achievement, real_miles)
+        await send_achievement_post(
+            channel, caption, "permanent-achievement.png",
             member.display_name if member else trucksbook_name,
             achievement["name"], achievement["miles"], permanent=True,
         )
-        await channel.send(embed=embed, **({"file": artwork} if artwork else {}))
         return True
     except (discord.Forbidden, discord.HTTPException) as error:
         print(f"PERMANENT ACHIEVEMENT ANNOUNCEMENT ERROR: {error}")
