@@ -88,24 +88,6 @@ def hall_of_fame(inductees):
     return encode(canvas)
 
 
-def achievement_nameplate(canvas, name, title, miles, *, permanent):
-    """Engrave the award and its threshold on a plate matched to the badge."""
-    accent = GOLD if permanent or miles == 50_000 else "#d59aff" if miles == 75_000 else BLUE
-    draw = ImageDraw.Draw(canvas)
-    outline = [(72, 779), (139, 704), (1397, 704), (1464, 779),
-               (1432, 886), (1392, 927), (144, 927), (104, 886)]
-    draw.polygon(outline, fill="#081827", outline=accent, width=4)
-    draw.line([(146, 716), (1390, 716)], fill="#30475a", width=2)
-    draw.line([(154, 913), (1382, 913)], fill="#30475a", width=2)
-    draw.line([(1017, 744), (1017, 889)], fill=accent, width=3)
-    draw.line([(152, 747), (222, 747)], fill=accent, width=4)
-
-    label(draw, (152, 793), name.upper(), 44, SILVER, width=810, anchor="lm")
-    label(draw, (152, 860), title.upper(), 68, accent, width=820, anchor="lm")
-    label(draw, (1214, 799), f"{miles:,}", 68, width=335, anchor="mm")
-    label(draw, (1214, 864), "REAL MILES", 38, SILVER, width=315, anchor="mm")
-
-
 def achievement(name, title, miles, *, permanent=False):
     with Image.open(CAREER_ART / "achievement.webp") as source:
         canvas = source.convert("RGB")
@@ -115,7 +97,12 @@ def achievement(name, title, miles, *, permanent=False):
             emblem = source.convert("RGBA")
     else:
         emblem = badge(miles, False)
-    emblem = ImageOps.contain(emblem, (450, 447), Image.Resampling.LANCZOS)
-    canvas.paste(emblem, (438 - emblem.width // 2, 624 - emblem.height), emblem)
-    achievement_nameplate(canvas, name, title, miles, permanent=permanent)
+    bounds = emblem.getbbox()
+    if bounds:
+        emblem = emblem.crop(bounds)
+    emblem = ImageOps.contain(emblem, (490, 460), Image.Resampling.LANCZOS)
+    canvas.paste(emblem, (475 - emblem.width // 2, 640 - emblem.height), emblem)
+    draw = ImageDraw.Draw(canvas)
+    label(draw, (491, 753), name.upper(), 61, SILVER, width=620, anchor="mm")
+    label(draw, (491, 811), f"{miles:,} REAL MILES", 49, GOLD, width=675, anchor="mm")
     return encode(canvas)

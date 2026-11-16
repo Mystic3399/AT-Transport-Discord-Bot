@@ -1517,8 +1517,7 @@ def build_progression_milestone_embed(member, discord_user_id, milestone, real_m
     driver = member.mention if member else f"<@{discord_user_id}>"
     next_role = get_next_progression_role(real_miles)
     lines = [
-        f"{driver} earned **{milestone['rank']}** at **{milestone['miles']:,} Real Miles**.",
-        f"**{real_miles:,} Real Miles** total.",
+        f"Congratulations, {driver}! **{milestone['rank']}** earned at **{milestone['miles']:,} Real Miles**.",
     ]
     if next_role:
         next_miles, _, next_rank = next_role
@@ -1804,8 +1803,7 @@ def build_achievement_embed(member, discord_user_id, achievement, real_miles):
     threshold = achievement["miles"]
     driver = member.mention if member else f"<@{discord_user_id}>"
     lines = [
-        f"{driver} earned **{achievement['name']}** at **{threshold:,} Real Miles**.",
-        f"**{real_miles:,} Real Miles** total.",
+        f"Congratulations, {driver}! **{achievement['name']}** earned at **{threshold:,} Real Miles**.",
     ]
     hall_tier = get_hall_of_fame_tier(real_miles)
     if hall_tier and threshold in {250000, 500000, 1000000}:
