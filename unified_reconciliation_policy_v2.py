@@ -90,3 +90,49 @@ def classify_delivery(incoming, other_provider_jobs, *, provider_watermark=None,
     if provider_watermark.astimezone(timezone.utc) < delivered.astimezone(timezone.utc) + timedelta(minutes=30):
         return "pending"
     return "creditable"
+
+
+def automatic_credit_selection(incoming, other_provider_jobs, *, provider_watermark=None,
+                               provider_feed_complete=False):
+    """Select one eligible Real record after the opposite feed is complete."""
+    if incoming.get("mileage_type") != "real":
+        return {"status": "pending", "reason": "real_jobs_required"}
+    if any(incoming.get(key) is False for key in
+           ("trusted", "verified_delivery", "eligible_for_award")):
+        return {"status": "pending", "reason": "incoming_evidence_incomplete"}
+    try:
+        incoming_miles = Decimal(str(incoming["miles"]))
+        if not incoming_miles.is_finite() or incoming_miles <= 0:
+            raise ValueError("Invalid mileage")
+        _normalized_metadata(incoming.get("metadata"))
+        matches = []
+        for other in other_provider_jobs:
+            if (other.get("provider") not in ("trucky", "trucksbook")
+                    or other["provider"] == incoming.get("provider")
+                    or Decimal(str(other["miles"])) <= 0):
+                return {"status": "pending", "reason": "comparison_evidence_incomplete"}
+            if any(other.get(key) is False for key in
+                   ("trusted", "verified_delivery", "eligible_for_award")):
+                return {"status": "pending", "reason": "comparison_evidence_incomplete"}
+            comparable = dict(other, mileage_type="real")
+            if is_candidate_duplicate(incoming, comparable, max_miles_delta=None):
+                if other.get("mileage_type") != "real":
+                    return {"status": "pending", "reason": "classification_conflict"}
+                matches.append(other)
+        if len(matches) > 1:
+            return {"status": "pending", "reason": "ambiguous_journey"}
+        # A completed feed is required even for a match to exclude a second
+        # delivery that could make the apparent one-to-one pairing ambiguous.
+        readiness = classify_delivery(incoming, [], provider_watermark=provider_watermark,
+                                      provider_feed_complete=provider_feed_complete)
+        if readiness != "creditable":
+            return {"status": "pending", "reason": "provider_feed_incomplete"}
+        if not matches:
+            return {"status": "independent", "winner": incoming}
+        other = matches[0]
+        winner = max((incoming, other), key=lambda job: (
+            Decimal(str(job["miles"])), job["provider"] == "trucksbook"))
+        return {"status": "matched", "winner": winner,
+                "suppressed": other if winner is incoming else incoming}
+    except (ValueError, TypeError, KeyError, ArithmeticError):
+        return {"status": "pending", "reason": "comparison_evidence_incomplete"}

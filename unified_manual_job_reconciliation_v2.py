@@ -137,9 +137,10 @@ async def resolve_review_case(
                     ON bc.provider='trucksbook' AND bc.provider_account_id=b.provider_account_id
                    AND bc.discord_user_id=b.discord_user_id AND bc.status='approved'
                    AND bc.membership_confirmed=TRUE AND bc.ownership_confirmed=TRUE
-                   -- No verified TrucksBook ownership mechanism is available yet.
-                   -- Keep source rows and cases intact, but deny terminal review.
-                   AND FALSE
+                   AND bc.ownership_evidence_kind='trucksbook_staff_reviewed_profile_steam_mapping'
+                   AND bc.ownership_evidence_sha256 IS NOT NULL
+                   AND bc.reviewed_by IS NOT NULL AND bc.reviewed_at IS NOT NULL
+                   AND (bc.expires_at IS NULL OR bc.expires_at>NOW())
                   JOIN unified_steam_links s
                     ON s.discord_user_id=t.discord_user_id AND s.verified_at IS NOT NULL
                  WHERE t.provider='trucky' AND t.provider_job_id=$1

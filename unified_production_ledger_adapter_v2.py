@@ -261,6 +261,17 @@ async def apply_verified_credit(
                 """, provider, provider_job_id, user_id, decision, reason,
                      reconciliation_evidence_sha256)
 
+            superseded = await conn.fetchval("""
+                SELECT EXISTS (
+                    SELECT 1 FROM unified_v2_production_mileage_decisions
+                    WHERE provider=$1 AND provider_job_id=$2
+                      AND decision='duplicate_provider_job'
+                      AND reason_code='superseded_by_higher_real_credit'
+                )
+            """, provider, provider_job_id)
+            if superseded:
+                return {"status": "duplicate_provider_job", "reason": "superseded_by_higher_real_credit"}
+
             if pending_reason:
                 await log_decision("pending_reconciliation", pending_reason)
                 return {"status": "pending_reconciliation", "reason": pending_reason}
@@ -295,6 +306,7 @@ async def apply_verified_credit(
                 await log_decision("rejected_evidence", "provider_event_mismatch")
                 return {"status": "rejected_evidence", "reason": "provider_event_mismatch"}
 
+            legacy_credit = None
             if reconciliation_status in ("verified_independent", "confirmed_duplicate") and not pending_reason:
                 companion = job["reconciliation_companion"]
                 expected_trucky = provider_job_id if provider == "trucky" else companion["provider_job_id"]
@@ -311,15 +323,23 @@ async def apply_verified_credit(
                     )
                 """, expected_trucky, expected_trucksbook, user_id,
                      case_status, reviewer_id, reconciliation_evidence_sha256)
-                # A legacy TrucksBook award is already part of the retained
-                # baseline. Selecting Trucky as a reviewed duplicate primary
-                # must never create a second credit on top of that baseline.
                 if reconciliation_status == "confirmed_duplicate" and audited_case:
-                    historical_companion = await conn.fetchval(
-                        "SELECT EXISTS(SELECT 1 FROM processed_jobs WHERE job_id=$1)",
-                        expected_trucksbook,
-                    )
-                    if historical_companion:
+                    legacy_credit = await conn.fetchrow("""
+                        SELECT p.discord_user_id, p.accepted_distance, p.statistics,
+                               p.processed_at <= b.snapshotted_at AS included_in_snapshot
+                        FROM processed_jobs p
+                        LEFT JOIN unified_v2_production_mileage_baselines b
+                          ON b.discord_user_id=p.discord_user_id
+                        WHERE p.job_id=$1
+                        FOR UPDATE OF p
+                    """, expected_trucksbook)
+                    if legacy_credit is not None and (
+                        provider != "trucky" or job["mileage_type"] != "real"
+                        or legacy_credit["discord_user_id"] != user_id
+                        or legacy_credit["statistics"].lower() != "real"
+                        or not legacy_credit["included_in_snapshot"]
+                        or not 0 < legacy_credit["accepted_distance"] < amount
+                    ):
                         await log_decision("pending_reconciliation", "duplicate_already_in_historical_baseline")
                         return {"status": "pending_reconciliation", "reason": "duplicate_already_in_historical_baseline"}
                 other_provider_verified = await conn.fetchval("""
@@ -334,8 +354,13 @@ async def apply_verified_credit(
                        AND c.status='approved' AND c.ownership_confirmed=TRUE
                        AND c.membership_confirmed=TRUE
                        AND c.ownership_evidence_sha256 IS NOT NULL
-                       AND l.provider='trucky'
-                       AND c.ownership_evidence_kind='trucky_signed_job_steam_match'
+                       AND (
+                           (l.provider='trucky'
+                            AND c.ownership_evidence_kind='trucky_signed_job_steam_match')
+                           OR (l.provider='trucksbook'
+                               AND c.ownership_evidence_kind='trucksbook_staff_reviewed_profile_steam_mapping'
+                               AND c.reviewed_by IS NOT NULL AND c.reviewed_at IS NOT NULL)
+                       )
                        AND (c.expires_at IS NULL OR c.expires_at>NOW())
                       JOIN unified_steam_links s
                         ON s.discord_user_id=e.discord_user_id AND s.verified_at IS NOT NULL
@@ -345,6 +370,23 @@ async def apply_verified_credit(
                 if not audited_case or not other_provider_verified:
                     await log_decision("pending_reconciliation", "review_case_or_companion_unverified")
                     return {"status": "pending_reconciliation", "reason": "review_case_or_companion_unverified"}
+
+            if reconciliation_status == "confirmed_duplicate" and job["mileage_type"] == "real":
+                companion = job["reconciliation_companion"]
+                companion_miles = await conn.fetchval("""
+                    SELECT (source_payload->>'canonical_miles')
+                    FROM unified_provider_job_events
+                    WHERE provider=$1 AND provider_job_id=$2 AND discord_user_id=$3
+                      AND source_payload->>'mileage_type'='real'
+                    FOR SHARE
+                """, companion["provider"], companion["provider_job_id"], user_id)
+                try:
+                    companion_amount = _decimal_miles(companion_miles)
+                except (TypeError, ValueError, ArithmeticError):
+                    companion_amount = None
+                if companion_amount is None or companion_amount > amount:
+                    await log_decision("pending_reconciliation", "higher_eligible_winner_not_selected")
+                    return {"status": "pending_reconciliation", "reason": "higher_eligible_winner_not_selected"}
 
             if job.get('receipt_evidence_sha256') is not None:
                 receipt = await conn.fetchval("""SELECT payload_sha256 FROM unified_trucky_webhook_receipts
@@ -400,6 +442,57 @@ async def apply_verified_credit(
                 await log_decision("rejected_evidence", "distance_or_classification_mismatch")
                 return {"status": "rejected_evidence", "reason": "distance_or_classification_mismatch"}
 
+            if reconciliation_status == "confirmed_duplicate" and job["mileage_type"] == "real":
+                companion = job["reconciliation_companion"]
+                prior = await conn.fetchrow("""
+                    SELECT canonical_credit_key, mileage_type, miles
+                    FROM unified_v2_production_credit_ledger
+                    WHERE discord_user_id=$1 AND provider=$2 AND provider_job_id=$3
+                    FOR UPDATE
+                """, user_id, companion["provider"], companion["provider_job_id"])
+                if prior and (prior["mileage_type"] != "real" or amount <= prior["miles"]):
+                    await log_decision("pending_reconciliation", "existing_companion_credit_retained")
+                    return {"status": "pending_reconciliation", "reason": "existing_companion_credit_retained"}
+                if prior and prior["mileage_type"] == "real" and amount > prior["miles"]:
+                    incoming_already_credited = await conn.fetchval("""
+                        SELECT EXISTS(SELECT 1 FROM unified_v2_production_credit_ledger
+                                      WHERE provider=$1 AND provider_job_id=$2)
+                    """, provider, provider_job_id)
+                    if incoming_already_credited:
+                        await log_decision("pending_reconciliation", "both_provider_jobs_already_credited")
+                        return {"status": "pending_reconciliation", "reason": "both_provider_jobs_already_credited"}
+                    # Replace the original ledger row in place. A conflicting provider
+                    # job ID aborts the transaction and preserves the old credit.
+                    await conn.execute("""
+                        UPDATE unified_v2_production_credit_ledger
+                        SET provider=$3, provider_job_id=$4, provider_account_id=$5,
+                            miles=$6, source_evidence_sha256=$7,
+                            ownership_evidence_sha256=$8, delivered_at=$9
+                        WHERE discord_user_id=$1 AND canonical_credit_key=$2
+                    """, user_id, prior["canonical_credit_key"], provider, provider_job_id, account_id, amount,
+                         job["source_evidence_sha256"], job["ownership_evidence_sha256"],
+                         job.get("delivered_at"))
+                    prior_trucksbook = prior["miles"] if companion["provider"] == "trucksbook" else Decimal(0)
+                    updated = await conn.fetchval("""
+                        UPDATE unified_v2_production_mileage_totals
+                        SET combined_real_miles=combined_real_miles+$2,
+                            trucksbook_real_miles=trucksbook_real_miles+$3,
+                            updated_at=NOW()
+                        WHERE discord_user_id=$1
+                        RETURNING discord_user_id
+                    """, user_id, amount - prior["miles"],
+                         buckets["company_mods_trucksbook_real_miles"] - prior_trucksbook)
+                    if updated is None:
+                        raise RuntimeError("Missing mileage totals for replaced credit")
+                    await conn.execute("""
+                        INSERT INTO unified_v2_production_mileage_decisions
+                          (provider,provider_job_id,discord_user_id,decision,reason_code,evidence_sha256)
+                        VALUES($1,$2,$3,'duplicate_provider_job','superseded_by_higher_real_credit',$4)
+                    """, companion["provider"], companion["provider_job_id"], user_id,
+                         reconciliation_evidence_sha256)
+                    await log_decision("credited", "replaced_lower_duplicate_credit")
+                    return {"status": "credited", "miles": str(amount), "policy_buckets": buckets}
+
             inserted = await conn.fetchval("""
                 INSERT INTO unified_v2_production_credit_ledger
                   (provider,provider_job_id,discord_user_id,provider_account_id,
@@ -412,15 +505,21 @@ async def apply_verified_credit(
                  job["source_evidence_sha256"], job["ownership_evidence_sha256"], job.get("delivered_at"))
             if inserted is None:
                 existing = await conn.fetchrow("""
-                    SELECT discord_user_id,miles,mileage_type,canonical_credit_key
+                    SELECT discord_user_id,miles,mileage_type,canonical_credit_key,
+                           provider_account_id,source_evidence_sha256
                     FROM unified_v2_production_credit_ledger
                     WHERE provider=$1 AND provider_job_id=$2
                 """, provider, provider_job_id)
                 if existing is not None:
+                    replaced_key_replay = (
+                        reconciliation_status == "confirmed_duplicate"
+                        and existing["provider_account_id"] == account_id
+                        and existing["source_evidence_sha256"] == job["source_evidence_sha256"]
+                    )
                     if (existing["discord_user_id"] != user_id
                             or Decimal(str(existing["miles"])) != amount
                             or existing["mileage_type"] != job["mileage_type"]
-                            or existing["canonical_credit_key"] != job["canonical_credit_key"]):
+                            or (existing["canonical_credit_key"] != key and not replaced_key_replay)):
                         await log_decision("rejected_evidence", "conflicting_provider_job_replay")
                         return {"status": "rejected_evidence", "reason": "conflicting_provider_job_replay"}
                     decision, reason_code = "duplicate_provider_job", "idempotent_replay"
@@ -428,6 +527,29 @@ async def apply_verified_credit(
                     decision, reason_code = "duplicate_canonical_credit", "canonical_key_already_credited"
                 await log_decision(decision, reason_code)
                 return {"status": decision, "reason": reason_code}
+
+            if legacy_credit is not None:
+                old_job_id = job["reconciliation_companion"]["provider_job_id"]
+                already_replaced = await conn.fetchval("""
+                    SELECT EXISTS(SELECT 1 FROM unified_v2_production_mileage_decisions
+                    WHERE provider='trucksbook' AND provider_job_id=$1
+                      AND reason_code='superseded_by_higher_real_credit')
+                """, old_job_id)
+                if already_replaced:
+                    raise RuntimeError("Legacy job credit has already been replaced")
+                baseline = await conn.fetchval("""
+                    UPDATE unified_v2_production_mileage_baselines
+                    SET trucksbook_real_miles=trucksbook_real_miles-$2
+                    WHERE discord_user_id=$1 AND trucksbook_real_miles >= $2
+                    RETURNING trucksbook_real_miles
+                """, user_id, legacy_credit["accepted_distance"])
+                if baseline is None:
+                    raise RuntimeError("Legacy credit exceeds the retained mileage baseline")
+                await conn.execute("""
+                    INSERT INTO unified_v2_production_mileage_decisions
+                      (provider,provider_job_id,discord_user_id,decision,reason_code,evidence_sha256)
+                    VALUES('trucksbook',$1,$2,'duplicate_provider_job','superseded_by_higher_real_credit',$3)
+                """, old_job_id, user_id, reconciliation_evidence_sha256)
 
             await conn.execute("""
                 INSERT INTO unified_v2_production_mileage_baselines(discord_user_id,trucksbook_real_miles)

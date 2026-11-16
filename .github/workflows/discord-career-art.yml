@@ -1,0 +1,31 @@
+name: Discord career artwork checks
+
+on:
+  push:
+    branches:
+      - fix/dual-provider-mileage-desktop
+    paths:
+      - bot.py
+      - career_art.py
+      - tachograph.py
+      - assets/tachograph/**
+      - assets/profile/fonts/**
+      - tests/test_career_art.py
+      - .github/workflows/discord-career-art.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install Pillow
+      - run: python -m py_compile bot.py career_art.py
+      - run: python -m unittest discover -s tests -p test_career_art.py

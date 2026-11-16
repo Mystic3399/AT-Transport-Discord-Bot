@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - feature/unified-driver-registration-v2
+  pull_request:
+    branches:
+      - fix/mileage-job-exclusions
   workflow_dispatch:
 
 permissions:

@@ -71,7 +71,7 @@ def is_candidate_duplicate(first, second, *, max_minutes=30, max_miles_delta="5.
     b = Decimal(str(second["miles"]))
     if not a.is_finite() or not b.is_finite() or a < 0 or b < 0:
         raise ValueError("Invalid mileage")
-    return abs(a - b) <= Decimal(str(max_miles_delta))
+    return max_miles_delta is None or abs(a - b) <= Decimal(str(max_miles_delta))
 
 
 
@@ -94,27 +94,28 @@ def credited_route_overlaps(rows):
                     "delivered_at": row[f"{provider}_delivered_at"],
                     "miles": payload["canonical_miles"],
                 })
-            if jobs[0]["mileage_type"] == "real" and is_candidate_duplicate(*jobs):
+            if jobs[0]["mileage_type"] == "real" and is_candidate_duplicate(*jobs, max_miles_delta=None):
                 credited = Decimal(str(row["trucksbook_credited_miles"]))
                 if credited.is_finite() and credited > 0:
                     trucky_miles = Decimal(str(jobs[0]["miles"]))
-                    matches.setdefault(row["trucky_job_id"], {})[row["trucksbook_job_id"]] = max(
-                        Decimal(0), trucky_miles - credited
+                    matches.setdefault(row["trucky_job_id"], {})[row["trucksbook_job_id"]] = (
+                        ("trucky", trucky_miles) if trucky_miles > credited
+                        else ("trucksbook", credited)
                     )
         except (ValueError, TypeError, KeyError, InvalidOperation):
             continue
     return matches
 
 
-def unique_overlap_topups(matches):
-    """Preview only one-to-one pairs, using actual stored credit as the baseline."""
+def unique_overlap_winners(matches):
+    """Select one full mileage record per unambiguous pair; keep TrucksBook on ties."""
     from collections import Counter
 
     trucksbook_matches = Counter(job_id for options in matches.values() for job_id in options)
     return {
-        trucky_id: difference
+        trucky_id: winner
         for trucky_id, options in matches.items()
         if len(options) == 1
-        for trucksbook_id, difference in options.items()
+        for trucksbook_id, winner in options.items()
         if trucksbook_matches[trucksbook_id] == 1
     }

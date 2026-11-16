@@ -119,7 +119,7 @@ def trucksbook_speed_check(rows):
     """Truck-mode export arithmetic only; never authorize an import delta.
 
     Existing ETS2 limit: 100 km/h / displayed 62 mph. ATS uses the owner's
-    0–81 mph Real, 82–112 mph Race policy. Values in display gaps stay pending.
+    0–81 mph Real, above 81 mph through 112 mph Race policy.
     Names group this report only; registration ownership is checked separately.
     """
     from collections import defaultdict
@@ -134,7 +134,7 @@ def trucksbook_speed_check(rows):
         driver=totals[row['Name']];driver['jobs']+=1
         if row['Game']=='ATS':
             mph=speed if speed_unit=='mph' else speed/Decimal('1.609344')
-            bucket='ats_real' if mph<=81 else 'race_excluded' if 82<=mph<=112 else 'pending'
+            bucket='ats_real' if mph<=81 else 'race_excluded' if 81<mph<=112 else 'pending'
         else:
             limit=Decimal(62) if speed_unit=='mph' else Decimal(100)
             race_min=Decimal(63) if speed_unit=='mph' else Decimal(101)

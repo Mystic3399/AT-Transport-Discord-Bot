@@ -36,7 +36,7 @@ class ExportAdapterTests(unittest.TestCase):
         self.assertNotIn('max_speed_unit_unverified',row['evidence_issues'])
         self.assertFalse(row['ownership_verified'])
         self.assertFalse(row['eligible_for_award'])
-        for speed,kind in ((132,'race'),(131,None),(181,None)):
+        for speed,kind in ((132,'race'),(131,'race'),(181,None)):
             result=trucky_export_row({**TR,'Max Speed':speed},max_speed_unit='km/h')
             self.assertEqual(result['company_policy_classification'],kind)
         changed=trucky_export_row({**TR,'Max Speed':132},max_speed_unit='km/h')

@@ -249,7 +249,7 @@ def create_staging_app():
     return app
 
 
-def create_integrations_app(pool, on_trucky_linked=None, on_steam_verified=None):
+def create_integrations_app(pool, on_trucky_linked=None, on_steam_verified=None, on_steam_failed=None):
     """Expose health, Steam, and authenticated Trucky routes on bot service."""
     import steam_callback_v2
 
@@ -260,6 +260,8 @@ def create_integrations_app(pool, on_trucky_linked=None, on_steam_verified=None)
     app[steam_callback_v2.POOL_KEY] = pool
     if on_steam_verified is not None:
         app[steam_callback_v2.ON_STEAM_VERIFIED_KEY] = on_steam_verified
+    if on_steam_failed is not None:
+        app[steam_callback_v2.ON_STEAM_FAILED_KEY] = on_steam_failed
     if on_trucky_linked is not None:
         app[ON_TRUCKY_LINKED_KEY] = on_trucky_linked
     app.router.add_get("/healthz", health)

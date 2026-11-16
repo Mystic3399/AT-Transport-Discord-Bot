@@ -71,7 +71,7 @@ async def state(pool, user_id):
             if not any(r['provider'] == 'trucksbook' for r in links):
                 if await conn.fetchval("SELECT to_regclass('public.driver_links')"):
                     legacy = await conn.fetchrow(
-                        'SELECT trucksbook_user_id,trucksbook_name FROM driver_links WHERE discord_user_id=$1', user_id)
+                        "SELECT trucksbook_user_id,trucksbook_name FROM driver_links WHERE discord_user_id=$1 AND trucksbook_name<>('__unlinked_driver_'||discord_user_id::text||'__')", user_id)
 
     accounts = {}
     for provider in ('trucksbook', 'trucky'):

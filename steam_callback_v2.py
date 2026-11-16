@@ -19,6 +19,7 @@ import unified_driver_profiles
 
 POOL_KEY = web.AppKey("pool", object)
 ON_STEAM_VERIFIED_KEY = web.AppKey("on_steam_verified", object)
+ON_STEAM_FAILED_KEY = web.AppKey("on_steam_failed", object)
 
 
 async def callback(request):
@@ -45,7 +46,15 @@ async def callback(request):
                    (expires_at > NOW()) AS valid,consumed_at
             FROM unified_steam_auth_states WHERE state_hash=$1
         """, state_hash)
+    async def report_failure(reason):
+        notify=request.app.get(ON_STEAM_FAILED_KEY)
+        if record is not None and notify is not None:
+            try:
+                await notify(record["discord_user_id"],reason,state_hash+":"+reason)
+            except Exception as error:
+                print(f"STEAM FAILURE NOTICE RETRY: {type(error).__name__}",flush=True)
     if record is None or not record["valid"] or record["consumed_at"] is not None:
+        await report_failure("expired")
         raise web.HTTPBadRequest(text="Steam login expired or already used")
     expected = record["expected_return_to"]
     configured = os.getenv("AT_STEAM_CALLBACK_URL", '')
@@ -57,8 +66,12 @@ async def callback(request):
             or expected_parts.path != configured_parts.path
             or expected_parts.path != "/auth/steam/callback"):
         raise web.HTTPBadRequest(text="Unexpected callback origin or route")
+    if values.get("openid.mode")=="cancel":
+        await report_failure("cancelled")
+        raise web.HTTPBadRequest(text="Steam sign-in cancelled. Return to Discord and type !linksteam to try again.")
     if (values.get("openid.return_to") != expected
             or values.get("openid.return_to", "").count("state=") != 1):
+        await report_failure("failed")
         raise web.HTTPBadRequest(text="Steam callback mismatch")
     try:
         steam_id = await steam_openid_v2.verify_steam_callback(
@@ -69,8 +82,10 @@ async def callback(request):
             values.get("openid.response_nonce", "")
         )
     except (ValueError, asyncpg.UniqueViolationError):
+        await report_failure("failed")
         raise web.HTTPBadRequest(text="Steam verification failed or account already linked")
     except (aiohttp.ClientError, asyncio.TimeoutError):
+        await report_failure("unavailable")
         raise web.HTTPServiceUnavailable(text='Steam is temporarily unavailable; retry this sign-in')
     completion_pending = False
     if registration.enabled():
