@@ -2487,6 +2487,12 @@ async def sync_permanent_system_for_driver(
     guild, discord_user_id, trucksbook_name, real_miles, announce=False,
     refresh_displays=True,
 ):
+    if db_pool is None:
+        return {"new_achievements": [], "hall_changed": False, "status": "database_unavailable"}
+    async with db_pool.acquire() as connection:
+        if not await account_unlink.has_valid_tracking_link(connection, discord_user_id):
+            # Never infer an active achievement from a historical mileage row.
+            return {"new_achievements": [], "hall_changed": False, "status": "unlinked"}
     member = guild.get_member(discord_user_id) if guild else None
     result = await reconcile_permanent_records(
         discord_user_id,
@@ -3059,6 +3065,9 @@ async def reconcile_linked_trucky_career_records(guild):
     if drivers:
         trucky_hall_refresh_pending = True
     for driver in drivers:
+        async with db_pool.acquire() as connection:
+            if not await account_unlink.has_valid_tracking_link(connection, driver["discord_user_id"]):
+                continue
         await reconcile_permanent_records(
             driver["discord_user_id"], driver["trucksbook_name"], driver["real_miles"],
             guild.get_member(driver["discord_user_id"]) is not None,
@@ -8302,13 +8311,13 @@ async def sync_unified_driver_roles(guild, discord_user_id):
         return {"status": "database_unavailable", "role_name": None}
     async with db_pool.acquire() as connection:
         verified = await account_unlink.has_valid_tracking_link(connection, discord_user_id)
-        if not verified:
-            # Remove any stale active ranking roles while keeping career records.
-            return await sync_member_progression_role(guild, discord_user_id, 0)
-        real_miles = await connection.fetchval("""
-            SELECT real_miles FROM driver_progress WHERE discord_user_id=$1
-        """, discord_user_id)
-        if os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
+        if verified:
+            real_miles = await connection.fetchval("""
+                SELECT real_miles FROM driver_progress WHERE discord_user_id=$1
+            """, discord_user_id)
+        else:
+            real_miles = 0
+        if verified and os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES':
             from unified_production_ledger_adapter_v2 import read_credited_progression_totals
             credited = await read_credited_progression_totals(connection, discord_user_id)
             if credited is None:
