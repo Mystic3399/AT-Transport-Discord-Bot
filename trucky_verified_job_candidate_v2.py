@@ -43,12 +43,14 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
         return None
     # World of Trucks is an event tag, not a reason to discard Real Miles.
     # Keep this adapter read-only until provider API verification is complete.
-    from world_of_trucks_policy_v2 import classify_job_mileage
+    from world_of_trucks_policy_v2 import classify_job_mileage, authenticated_vehicle_type
     event_tag = job.get("event_tag")
     if event_tag not in (None, "WoTr"):
         return None  # Unknown event tags require provider schema review.
+    vehicle_type = authenticated_vehicle_type(job)
     classification = classify_job_mileage('trucky',statistics+(', WoTr' if event_tag=='WoTr' else ''),
-        game=game,max_speed=job.get('max_speed_kmh'),speed_unit='km/h')
+        game=game,max_speed=job.get('max_speed_kmh'),speed_unit='km/h',
+        vehicle_type=vehicle_type)
     if classification is None:
         return None
     try:
@@ -83,19 +85,25 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
                 'destination':job.get('destination_city_name'), 'cargo':job.get('cargo_name')}
     if all(isinstance(value,str) and value.strip() and len(value)<=300 for value in metadata.values()):
         result['job_metadata'] = metadata
-    if game=='ATS' or classification.mileage_type=='race':
+    if game=='ATS' or classification.mileage_type=='race' or vehicle_type is not None:
         policy = 'ets2_provider_classification'
         if game == 'ATS':
-            # Retain the evidence label for previously accepted immutable records.
-            policy = 'ats_maximum_speed_0_81_real_82_112_race'
-            if classification.mileage_type == 'race' and Decimal(str(job['max_speed_kmh'])) < 82 * Decimal('1.609344'):
+            # Keep immutable legacy labels unless authenticated car evidence is supplied.
+            policy = 'ats_car_real_through_85_race_above_85' if vehicle_type == 'car' else 'ats_maximum_speed_0_81_real_82_112_race'
+            if vehicle_type != 'car' and classification.mileage_type == 'race' and Decimal(str(job['max_speed_kmh'])) < 82 * Decimal('1.609344'):
                 policy = 'ats_maximum_speed_above_81_through_112_race'
+        elif vehicle_type == 'coach':
+            policy = 'ets2_coach_real_through_68_race_above_68'
+        elif vehicle_type == 'truck':
+            policy = 'ets2_truck_real_through_62_race_above_62'
         result['classification_evidence']={
             'game':game,'provider_stats_type':job['stats_type'],
             'policy':policy,
         }
-        if game=='ATS':
-            result['classification_evidence']['max_speed_kmh']=str(job['max_speed_kmh'])
+        if game=='ATS' or vehicle_type is not None:
+            result['classification_evidence']['max_speed_kmh']=str(job.get('max_speed_kmh'))
+        if vehicle_type is not None:
+            result['classification_evidence']['vehicle_type']=vehicle_type
     return result
 
 
