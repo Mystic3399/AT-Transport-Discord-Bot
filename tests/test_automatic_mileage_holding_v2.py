@@ -91,6 +91,17 @@ class ReleasePathTests(unittest.TestCase):
         self.assertIn('automatic_mileage_holding_v2',text)
         self.assertIn('record_real_job',text)
 
+    def test_old_credited_trucky_jobs_stay_credited_after_departure(self):
+        text=(ROOT/'trucky_linked_allocation_v2.py').read_text(encoding='utf-8')
+        self.assertIn('existing = {row',text)
+        self.assertIn("prior=existing.get(job_id)",text)
+        self.assertIn("prior['source_evidence_sha256']==previously_credited['source_sha256']",text)
+        prior_pos=text.index('if prior:')
+        no_owner_pos=text.index('if user is None:',prior_pos)
+        self.assertLess(prior_pos,no_owner_pos)
+        self.assertIn("reason='replayed'",text[prior_pos:no_owner_pos])
+        self.assertIn("counts['replayed'] += 1",text[prior_pos:no_owner_pos])
+
     def test_no_unverified_provider_autocredit(self):
         source=(ROOT/'trucky_linked_allocation_v2.py').read_text()
         self.assertIn("s.verified_at IS NOT NULL",source)
