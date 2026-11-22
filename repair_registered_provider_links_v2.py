@@ -78,4 +78,25 @@ async def repair_approved_provider_links(pool):
                     result["unchanged"] += 1
                 else:
                     result["repaired"] += 1
+    async with pool.acquire() as conn:
+        result["trucksbook_source_account_diagnostics"] = [dict(row) for row in await conn.fetch("""
+            WITH accounts AS (
+              SELECT DISTINCT provider_account_id AS account
+              FROM pending_provider_job_history_v2
+              WHERE provider='trucksbook' AND source_kind='verified_webhook_source'
+                AND provider_account_id IS NOT NULL
+            ), matches AS (
+              SELECT a.account,
+                EXISTS(SELECT 1 FROM driver_links d WHERE d.trucksbook_user_id::text=a.account) AS legacy,
+                EXISTS(SELECT 1 FROM driver_verifications v WHERE v.trucksbook_user_id::text=a.account AND v.status='completed') AS completed,
+                EXISTS(SELECT 1 FROM unified_provider_links l WHERE l.provider='trucksbook' AND l.provider_account_id=a.account AND l.verified_at IS NOT NULL) AS verified_link,
+                EXISTS(SELECT 1 FROM unified_provider_claims c WHERE c.provider='trucksbook' AND c.provider_account_id=a.account AND c.status='approved' AND c.ownership_confirmed) AS approved_claim,
+                EXISTS(SELECT 1 FROM unified_provider_claims c WHERE c.provider='trucksbook' AND c.provider_account_id=a.account AND c.status='pending') AS pending_claim
+              FROM accounts a
+            )
+            SELECT legacy,completed,verified_link,approved_claim,pending_claim,
+                   COUNT(*)::INT AS accounts FROM matches
+            GROUP BY legacy,completed,verified_link,approved_claim,pending_claim
+            ORDER BY accounts DESC
+        """)]
     return result
