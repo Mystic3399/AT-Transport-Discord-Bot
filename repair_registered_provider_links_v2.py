@@ -3,7 +3,6 @@
 Never promotes a self-entered ID, changes a driver balance, or overrides a
 conflicting owner. Safe to rerun before each automatic mileage allocation.
 """
-import json
 
 PROOF = {
     "trucksbook": "trucksbook_staff_reviewed_profile_steam_mapping",
@@ -60,7 +59,7 @@ async def repair_approved_provider_links(pool):
                 if conflict:
                     result["conflicts"] += 1
                     continue
-                updated = await conn.fetchval("""
+                # The unique (discord_user_id,provider) index can race a second\n                # account insert. Lock the owner before checking conflicts.\n                await conn.execute("SELECT pg_advisory_xact_lock($1)", int(user))\n                updated = await conn.fetchval("""
                     INSERT INTO unified_provider_links
                         (provider,provider_account_id,discord_user_id,
                          provider_display_name,verified_at,verified_by)
