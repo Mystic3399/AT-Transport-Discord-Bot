@@ -4300,6 +4300,94 @@ async def send_mileage_reconciliation(ctx, source_jobs, metadata):
     )
 
 
+@bot.command(name="heldmiles")
+@commands.guild_only()
+@commands.has_guild_permissions(manage_guild=True)
+@commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
+async def reviewed_held_mileage(ctx, driver: discord.Member, job_id: str, action: str = "PREVIEW"):
+    """Approve one retained Trucky job by exact ID; never accept arbitrary mileage."""
+    if ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    if not account_unlink.allowed(ctx.author, VERIFICATION_STAFF_ROLE_IDS):
+        await ctx.reply("Only A&T owners and authorised Management can approve held mileage.",
+                        mention_author=False)
+        return
+    if action.upper() not in ("PREVIEW", "CONFIRM"):
+        await ctx.reply("Use !heldmiles @Driver JOB_ID, then !heldmiles @Driver JOB_ID CONFIRM.",
+                        mention_author=False)
+        return
+    import held_mileage_approval_v2 as held
+    try:
+        if action.upper() == "PREVIEW":
+            report = await held.preview(
+                db_pool, guild_id=ctx.guild.id, channel_id=ctx.channel.id,
+                reviewer_id=ctx.author.id, discord_user_id=driver.id, job_id=job_id)
+            readiness = ("Ready for confirmed reconciliation" if report["activation_ready"]
+                         else "Production mileage activation has not been approved")
+            await ctx.reply(
+                f"HELD MILEAGE REVIEW #{report['preview_id']} - NOTHING CREDITED\n"
+                f"Driver: {driver.mention}\n"
+                f"Trucky job: {report['job_id']}\n"
+                f"Authenticated distance: {report['miles']} {report['mileage_type'].title()} Miles\n"
+                f"Current hold: {report['held_reason']}\n"
+                f"{readiness}.\n"
+                "Confirm within 15 minutes in the same channel using:\n"
+                f"!heldmiles {driver.mention} {job_id} CONFIRM\n"
+                "Final confirmation rechecks verified ownership, membership, job evidence, "
+                "existing credits, cross-provider duplication and database identity.",
+                allowed_mentions=discord.AllowedMentions.none())
+            return
+        report = await held.confirm(
+            db_pool, guild_id=ctx.guild.id, channel_id=ctx.channel.id,
+            reviewer_id=ctx.author.id, discord_user_id=driver.id, job_id=job_id)
+    except held.HeldMileageApprovalError as error:
+        await ctx.reply(f"No mileage added. {error}", mention_author=False)
+        return
+    except Exception as error:
+        print(f"HELD MILEAGE REVIEW ERROR: {type(error).__name__}", flush=True)
+        await ctx.reply("Held-mileage review failed. No unverified credits were approved.",
+                        mention_author=False)
+        return
+
+    if not report["credited"]:
+        await ctx.reply(
+            f"Job {job_id} remains held: {report['status']}. "
+            "No duplicate or uncertain mileage was granted. Review source identity "
+            "and route-comparison evidence before trying again.", mention_author=False)
+        return
+
+    # A valid credit commits before Discord API work; Discord outages cannot
+    # roll it back. Subsequent re-sync is idempotent.
+    role_status = "pending"
+    achievements = []
+    sync_pending = False
+    try:
+        rank = await sync_unified_driver_roles(ctx.guild, driver.id)
+        role_status = rank.get("status", "pending")
+        async with db_pool.acquire() as connection:
+            progress = await connection.fetchrow(
+                "SELECT trucksbook_name,real_miles FROM driver_progress WHERE discord_user_id=$1",
+                driver.id)
+        if progress:
+            result = await sync_permanent_system_for_driver(
+                ctx.guild, driver.id, progress["trucksbook_name"],
+                int(progress["real_miles"]), announce=True)
+            achievements = [a["name"] for a in result.get("new_achievements", [])]
+        await refresh_driver_leaderboard(ctx.guild)
+    except Exception as error:
+        sync_pending = True
+        print(f"HELD MILEAGE CAREER SYNC RETRY PENDING: {type(error).__name__}", flush=True)
+
+    await ctx.reply(
+        f"Held job credited: {driver.mention} / Trucky job {job_id}\n"
+        f"Credited: {report['miles']} {report['mileage_type'].title()} Miles\n"
+        f"Progression role: {role_status}"
+        + (f"\nNew achievements: {', '.join(achievements)}" if achievements else "")
+        + ("\nMileage was committed but Discord career sync needs retry."
+           if sync_pending else ""),
+        allowed_mentions=discord.AllowedMentions.none())
+
+
 @bot.command(name="truckybatchpreview")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
