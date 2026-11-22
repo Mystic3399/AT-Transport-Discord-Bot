@@ -7659,6 +7659,11 @@ async def register_driver(ctx):
     if member.bot:
         return
 
+    # Respond to slash commands before database checks and channel creation,
+    # which can otherwise exceed Discord's three-second interaction deadline.
+    if ctx.interaction is not None:
+        await ctx.defer(ephemeral=True)
+
     if db_pool is None:
         await onboarding_reply(
             "The A&T verification database is "
