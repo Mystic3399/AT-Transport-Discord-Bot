@@ -3178,6 +3178,12 @@ async def replay_saved_trucksbook_jobs():
             WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
               AND h.provider_account_id IS NOT NULL
               AND NOT EXISTS(SELECT 1 FROM processed_jobs p WHERE p.job_id=h.provider_job_id)
+              AND NOT EXISTS(SELECT 1 FROM pending_provider_job_history_v2 other
+                WHERE other.provider='trucksbook' AND other.provider_job_id=h.provider_job_id
+                  AND (other.provider_account_id IS DISTINCT FROM h.provider_account_id
+                       OR other.evidence->>'distance' IS DISTINCT FROM h.evidence->>'distance'
+                       OR other.evidence->>'unit' IS DISTINCT FROM h.evidence->>'unit'
+                       OR other.evidence->>'stats_type' IS DISTINCT FROM h.evidence->>'stats_type'))
             ORDER BY h.first_received_at DESC,h.provider_job_id
             LIMIT 2000
         """)
