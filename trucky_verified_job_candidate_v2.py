@@ -89,7 +89,7 @@ def normalize_verified_trucky_job(job, *, verified_provider_account_id, discord_
         policy = 'ets2_provider_classification'
         if game == 'ATS':
             # Keep immutable legacy labels unless authenticated car evidence is supplied.
-            policy = 'ats_car_real_through_85_race_above_85' if vehicle_type == 'car' else 'ats_maximum_speed_0_81_real_82_112_race'
+            policy = 'ats_car_real_through_87_race_above_87' if vehicle_type == 'car' else 'ats_maximum_speed_0_81_real_82_112_race'
             if vehicle_type != 'car' and classification.mileage_type == 'race' and Decimal(str(job['max_speed_kmh'])) < 82 * Decimal('1.609344'):
                 policy = 'ats_maximum_speed_above_81_through_112_race'
         elif vehicle_type == 'coach':
