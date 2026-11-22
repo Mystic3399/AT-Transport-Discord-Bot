@@ -206,3 +206,101 @@ class FreshCompanyMembershipRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await current_trucksbook_member(
             "553238",row,look,cache,now=NOW+timedelta(minutes=11)))
         self.assertEqual(look.await_count,2)
+
+
+class AccountedTrucksBookHistoricalBackfillTests(unittest.IsolatedAsyncioTestCase):
+    def evidence(self):
+        return {
+            'unit':'mi', 'distance':155, 'stats_type':'Real',
+            'source_message_at':(NOW-timedelta(days=14)).isoformat()
+        }
+
+    def facts(self, **overrides):
+        row=dict(real_miles=0,accounted_jobs_miles=0,
+                 unsupported_prior_jobs=0,trucky_links=0,
+                 other_ledger_credits=0,linked_combined_real=0,
+                 linked_race=0)
+        row.update(overrides)
+        return row
+
+    async def test_zero_balance_driver_can_restore_old_a_and_t_webhook(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import (
+            safely_restore_accounted_trucksbook_history)
+        conn=SimpleNamespace(fetchrow=AsyncMock(return_value=self.facts()))
+        self.assertTrue(await safely_restore_accounted_trucksbook_history(
+            conn,4123,self.evidence(),155))
+        conn.fetchrow.assert_awaited_once()
+
+    async def test_subsequent_old_job_still_eligible_after_first_restore(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import (
+            safely_restore_accounted_trucksbook_history)
+        conn=SimpleNamespace(fetchrow=AsyncMock(
+            return_value=self.facts(real_miles=155,accounted_jobs_miles=155)))
+        self.assertTrue(await safely_restore_accounted_trucksbook_history(
+            conn,4123,self.evidence(),155))
+
+    async def test_unexplained_legacy_or_foreign_provider_miles_never_awarded(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import (
+            safely_restore_accounted_trucksbook_history)
+        for change in (
+            dict(real_miles=170),
+            dict(real_miles=100,accounted_jobs_miles=110),
+            dict(trucky_links=1),
+            dict(other_ledger_credits=1),
+            dict(linked_combined_real=30),
+            dict(linked_race=100),
+            dict(unsupported_prior_jobs=1),
+        ):
+            with self.subTest(change=change):
+                conn=SimpleNamespace(fetchrow=AsyncMock(return_value=self.facts(**change)))
+                self.assertFalse(await safely_restore_accounted_trucksbook_history(
+                    conn,4123,self.evidence(),155))
+
+    async def test_source_requires_trusted_time_class_distance_and_user(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import (
+            safely_restore_accounted_trucksbook_history)
+        for observation in (
+            dict(self.evidence(),unit='km'),
+            dict(self.evidence(),stats_type='Race'),
+            dict(self.evidence(),distance=999),
+            dict(self.evidence(),source_message_at='unverified'),
+            dict(self.evidence(),source_message_at=(NOW+timedelta(days=1)).isoformat()),
+        ):
+            with self.subTest(observation=observation):
+                conn=SimpleNamespace(fetchrow=AsyncMock())
+                self.assertFalse(await safely_restore_accounted_trucksbook_history(
+                    conn,4123,observation,155))
+                conn.fetchrow.assert_not_awaited()
+
+    def test_locked_writer_reverifies_account_and_baseline(self):
+        import ast
+        from pathlib import Path
+        root=Path(__file__).resolve().parents[1]
+        tree=ast.parse((root/'bot.py').read_text(encoding='utf-8'))
+        writer=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                    and n.name=='record_real_job')
+        code=ast.unparse(writer)
+        self.assertIn('pg_advisory_xact_lock',code)
+        self.assertIn('historical_backfill_source',code)
+        self.assertIn('audit_account_matches',code)
+        self.assertIn('has_valid_tracking_link',code)
+        self.assertIn('safely_restore_accounted_trucksbook_history',code)
+        self.assertLess(code.index('pg_advisory_xact_lock'),
+                        code.index('safely_restore_accounted_trucksbook_history'))
+
+    def test_historical_replay_preserves_original_credit_and_progression(self):
+        import ast
+        from pathlib import Path
+        root=Path(__file__).resolve().parents[1]
+        tree=ast.parse((root/'bot.py').read_text(encoding='utf-8'))
+        replay=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                    and n.name=='replay_saved_trucksbook_jobs')
+        code=ast.unparse(replay)
+        self.assertIn('historical_backfill_source',code)
+        self.assertIn('record_real_job',code)
+        self.assertIn('sync_member_progression_role',code)
+        self.assertIn('sync_permanent_system_for_driver',code)
