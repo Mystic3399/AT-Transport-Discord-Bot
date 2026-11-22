@@ -3182,15 +3182,17 @@ async def replay_saved_trucksbook_jobs():
             LIMIT 2000
         """)
     # Different evidence versions or ownership accounts for one job are a hold.
-    from collections import defaultdict
+    from collections import defaultdict, Counter
     versions = defaultdict(list)
     for row in rows:
         versions[row["provider_job_id"]].append(row)
     credited = 0
     unresolved = 0
+    reasons = Counter()
     for job_id, group in versions.items():
         if len(group) != 1 or not auto.trusted_account_id(group[0]["provider_account_id"]):
             unresolved += 1
+            reasons['unverified_or_conflicting_source'] += 1
             continue
         row = group[0]
         evidence = json.loads(row["evidence"]) if isinstance(row["evidence"],str) else row["evidence"]
@@ -3198,6 +3200,7 @@ async def replay_saved_trucksbook_jobs():
                 or not is_real_statistics(evidence.get("stats_type"))
                 or type(evidence.get("distance")) is not int or evidence["distance"] <= 0):
             unresolved += 1
+            reasons['unsupported_or_invalid_source'] += 1
             continue
         account = row["provider_account_id"]
         async with db_pool.acquire() as conn:
@@ -3214,14 +3217,17 @@ async def replay_saved_trucksbook_jobs():
             """, account)
             if len(owners) != 1:
                 unresolved += 1
+                reasons['provider_link_not_verified'] += 1
                 continue
             user = int(owners[0]["discord_user_id"])
             if not await account_unlink.has_valid_tracking_link(conn,user):
                 unresolved += 1
+                reasons['inactive_driver'] += 1
                 continue
             if not await review.audit_account_matches(conn,dict(
                     discord_user_id=user, source_provider_account_id=account)):
                 unresolved += 1
+                reasons['source_account_disagrees'] += 1
                 continue
             baseline = await conn.fetchval("""
                 SELECT snapshotted_at FROM unified_v2_production_mileage_baselines
@@ -3229,6 +3235,7 @@ async def replay_saved_trucksbook_jobs():
             """, user)
         if not auto.valid_replay_window(evidence,baseline):
             unresolved += 1
+            reasons['historical_balance_cutoff_or_time_missing'] += 1
             continue
         name = evidence.get("candidate_driver_label") or "A&T Driver"
         result = await record_real_job(job_id,name,user,evidence["distance"])
@@ -3247,9 +3254,11 @@ async def replay_saved_trucksbook_jobs():
                 break
         elif result and result.get("status") not in ("duplicate",):
             unresolved += 1
-    if credited:
-        print(f"AUTO TRUCKSBOOK RECOVERY: {credited} verified jobs credited, "
-              f"{unresolved} held; no historic baseline guessed.",flush=True)
+            reasons[result.get('status','source_replay_pending')] += 1
+    if versions:
+        print("AUTO TRUCKSBOOK RECOVERY " + json.dumps({
+            'candidates':len(versions),'credited':credited,'held':unresolved,
+            'reasons':dict(reasons)},sort_keys=True),flush=True)
 
 
 @tasks.loop(minutes=4)
