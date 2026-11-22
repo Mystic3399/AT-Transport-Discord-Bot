@@ -3220,6 +3220,21 @@ async def replay_saved_trucksbook_jobs():
                 JOIN unified_driver_profiles p USING(discord_user_id)
                 WHERE l.provider='trucksbook' AND l.provider_account_id=$1
                   AND l.verified_at IS NOT NULL AND p.status='active'
+                UNION
+                SELECT d.discord_user_id FROM driver_links d
+                JOIN driver_verifications v USING(discord_user_id)
+                WHERE v.trucksbook_user_id::text=$1
+                  AND v.status='completed' AND v.completed_at IS NOT NULL
+                  AND d.trucksbook_user_id IS NULL
+                  AND LEFT(d.trucksbook_name,18)<>'__unlinked_driver_'
+                  AND NOT EXISTS(SELECT 1 FROM unified_driver_profiles p
+                    WHERE p.discord_user_id=d.discord_user_id AND p.status='suspended')
+                  AND NOT EXISTS(SELECT 1 FROM driver_links other
+                    WHERE other.trucksbook_user_id::text=$1)
+                  AND NOT EXISTS(SELECT 1 FROM unified_provider_links l
+                    WHERE l.provider='trucksbook'
+                      AND ((l.discord_user_id=d.discord_user_id AND l.provider_account_id<>$1)
+                        OR (l.discord_user_id<>d.discord_user_id AND l.provider_account_id=$1)))
             """, account)
             if len(owners) != 1:
                 unresolved += 1
