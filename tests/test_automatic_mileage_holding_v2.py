@@ -102,6 +102,19 @@ class ReleasePathTests(unittest.TestCase):
         self.assertIn("reason='replayed'",text[prior_pos:no_owner_pos])
         self.assertIn("counts['replayed'] += 1",text[prior_pos:no_owner_pos])
 
+    def test_staff_queue_breakdown_is_read_only_and_separates_providers(self):
+        source=(ROOT/'bot.py').read_text(encoding='utf-8')
+        node=next(n for n in ast.parse(source).body
+                  if isinstance(n,ast.AsyncFunctionDef)
+                     and n.name=='mileage_queue_status')
+        body=ast.unparse(node)
+        self.assertIn('details',body)
+        self.assertIn('trucksbook',body)
+        self.assertIn('trucky',body)
+        self.assertIn("state <> 'credited'",body)
+        self.assertNotIn('UPDATE driver_progress',body)
+        self.assertNotIn('INSERT INTO unified_v2_production_credit_ledger',body)
+
     def test_no_unverified_provider_autocredit(self):
         source=(ROOT/'trucky_linked_allocation_v2.py').read_text()
         self.assertIn("s.verified_at IS NOT NULL",source)
