@@ -7239,7 +7239,8 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
         """
         SELECT
             COALESCE(tb.provider_display_name,links.trucksbook_name,tr.provider_display_name,'A&T Driver') AS trucksbook_name,
-            (links.discord_user_id IS NOT NULL AND links.trucksbook_name<>('__unlinked_driver_'||links.discord_user_id::text||'__')) AS legacy_linked,
+            (links.trucksbook_user_id IS NOT NULL AND links.trucksbook_name<>('__unlinked_driver_'||links.discord_user_id::text||'__')) AS legacy_linked,
+            (tb.verified_at IS NOT NULL) AS tb_verified,
             tr.provider_account_id AS trucky_account_id,
             tr.provider_display_name AS trucky_display_name,
             tr.verified_at IS NOT NULL AS trucky_verified,
@@ -7273,7 +7274,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
                 MAX(accepted_distance)::BIGINT AS longest_job_distance
             FROM processed_jobs
             WHERE discord_user_id = driver.discord_user_id
-              AND LOWER(statistics) = 'real'
+              AND LOWER(statistics) LIKE 'real%'
               AND accepted_distance > 0
         ) AS jobs ON TRUE
         LEFT JOIN LATERAL (
@@ -7307,9 +7308,15 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     if row is None:
         return None
     accounts = []
-    if row.get('legacy_linked', True) or row['trucksbook_user_id']:
+    # A saved display name alone is not a verified provider account link.
+    # The tachograph tick should only appear with a concrete numeric ID
+    # supported by a legacy verified link or verified unified provider link.
+    if row['trucksbook_user_id'] or row['trucksbook_name'] != 'A&T Driver':
+        linked = bool(row.get('legacy_linked') or row.get('tb_verified'))
         accounts.append(dict(provider='TrucksBook',name=str(row['trucksbook_name']),
-                             account_id=row['trucksbook_user_id'],status='Linked'))
+                             account_id=row['trucksbook_user_id'],
+                             status=('Verified' if row.get('tb_verified') else
+                                     'Linked' if linked else 'ID verification required')))
     if row.get('trucky_account_id'):
         accounts.append(dict(provider='Trucky',name=str(row.get('trucky_display_name') or 'Trucky Driver'),
                              account_id=row['trucky_account_id'],
@@ -7330,7 +7337,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
             WITH credited_jobs AS (
                 SELECT p.accepted_distance::numeric AS miles
                 FROM processed_jobs p
-                WHERE p.discord_user_id=$1 AND LOWER(p.statistics)='real'
+                WHERE p.discord_user_id=$1 AND LOWER(p.statistics) LIKE 'real%'
                   AND p.accepted_distance>0
                   AND NOT EXISTS (
                       SELECT 1 FROM unified_v2_production_mileage_decisions d
