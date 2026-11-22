@@ -66,7 +66,7 @@ class AutomaticSourceProofTests(unittest.TestCase):
         self.assertIn("pending_race_cross_provider_review",body)
         self.assertIn("pending_race_cross_provider_evidence",body)
         self.assertIn("valid_temporal_trucksbook_observation",body)
-        self.assertIn("mileage_type = 'race'",body)
+        self.assertIn("mileage_type='race'",body)
 
     def test_automatic_replay_requires_snapshots_and_exact_accounts(self):
         tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
