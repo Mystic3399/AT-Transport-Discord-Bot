@@ -172,10 +172,14 @@ async def reconciled_repair_delta(conn, candidate):
           AND provider='trucky' AND mileage_type='real')""", candidate['discord_user_id'])
     if not overlap:
         return candidate['missing_distance'], None
-    if (os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES'
-            or candidate['recorded_distance'] != 0
+    # !mileageaudit is an explicit administrator-reviewed and -confirmed batch.
+    # Unlike the background worker it can invoke the existing verified
+    # journey matcher without enabling automatic reconciliation globally.
+    # The matcher's effects run in the audit savepoint (rolled back) and again
+    # in the confirmation transaction (committed atomically with the repair).
+    if (candidate['recorded_distance'] != 0
             or candidate['repair_kind'] not in ('missing_real', 'missing_wotr')):
-        return None, 'cross_provider_review_required'
+        return None, 'existing_job_requires_manual_route_review'
     from automatic_linked_mileage_v2 import reconcile_trucksbook
     delta, hold = await reconcile_trucksbook(
         conn, candidate['job_id'], candidate['discord_user_id'], candidate['actual_distance'],
@@ -189,6 +193,11 @@ async def create_mileage_audit_preview(pool,guild_id,channel_id,reviewer_id,job_
         async with conn.transaction(isolation='repeatable_read'):
             rows=await conn.fetch('''SELECT * FROM mileage_repair_candidates
                 WHERE applied_at IS NULL AND job_id=ANY($1::text[]) ORDER BY discord_user_id, job_id''',sorted(set(job_ids)))
+            # Required for the reviewed matcher even when the autonomous
+            # reconciliation worker is deliberately disabled. Purely additive.
+            if await conn.fetchval("SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"):
+                from automatic_linked_mileage_v2 import SCHEMA as MATCHING_SCHEMA
+                await conn.execute(MATCHING_SCHEMA)
             candidates=[];held=0
             holds={}; additions={}
             # Simulate the entire batch in application order. The savepoint
