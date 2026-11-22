@@ -181,6 +181,23 @@ async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False,
     async with conn.transaction():
         # Shared with legacy TrucksBook writer; serializes first-row creation.
         await conn.execute('SELECT pg_advisory_xact_lock($1)', user)
+        previous = await conn.fetchrow("""SELECT discord_user_id,provider_account_id,
+            mileage_type,miles,source_evidence_sha256 FROM unified_v2_production_credit_ledger
+            WHERE provider='trucky' AND provider_job_id=$1""", job_id)
+        if previous:
+            if (
+                previous['discord_user_id'] == user and previous['provider_account_id'] == account
+                and previous['mileage_type'] == candidate['mileage_type']
+                and previous['miles'] == candidate['miles']
+                and previous['source_evidence_sha256'] == candidate['source_sha256']
+            ):
+                await conn.execute(
+                    "UPDATE unified_v2_production_credit_ledger SET delivered_at=$2 "
+                    "WHERE provider='trucky' AND provider_job_id=$1 AND delivered_at IS NULL",
+                    job_id, candidate['delivered_at'],
+                )
+                return 'replayed'
+            return 'conflicting_job_pending'
         owner = await conn.fetchrow("""
             SELECT l.provider_account_id,s.steam_id64
             FROM unified_provider_links l
@@ -199,23 +216,6 @@ async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False,
             return 'account_link_pending'
         if account not in member_ids and user not in alternate_member_ids:
             return 'company_not_member'
-        previous = await conn.fetchrow("""SELECT discord_user_id,provider_account_id,
-            mileage_type,miles,source_evidence_sha256 FROM unified_v2_production_credit_ledger
-            WHERE provider='trucky' AND provider_job_id=$1""", job_id)
-        if previous:
-            if (
-                previous['discord_user_id'] == user and previous['provider_account_id'] == account
-                and previous['mileage_type'] == candidate['mileage_type']
-                and previous['miles'] == candidate['miles']
-                and previous['source_evidence_sha256'] == candidate['source_sha256']
-            ):
-                await conn.execute(
-                    "UPDATE unified_v2_production_credit_ledger SET delivered_at=$2 "
-                    "WHERE provider='trucky' AND provider_job_id=$1 AND delivered_at IS NULL",
-                    job_id, candidate['delivered_at'],
-                )
-                return 'replayed'
-            return 'conflicting_job_pending'
         totals = await conn.fetchrow("""SELECT combined_real_miles,trucky_race_miles
             FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1 FOR UPDATE""", user)
         existing_real = totals['combined_real_miles'] if totals else Decimal(0)
