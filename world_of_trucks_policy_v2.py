@@ -145,10 +145,8 @@ def classify_job_mileage(provider, statistics, *, game, max_speed=None, speed_un
     if game == "ETS2":
         limit = Decimal("68") if kind == "coach" else Decimal("62")
     else:
-        # Preserve the historical ATS 81-to-82 mph unclassified gap for
-        # non-car records. Never round up into Race without exact evidence.
-        if kind != "car" and Decimal("81") < mph < Decimal("82"):
-            return None
+        # Fractional maximum speeds are compared exactly, without rounding.
+        # ATS cars get their separate 85 mph limit only with vehicle evidence.
         limit = Decimal("85") if kind == "car" else Decimal("81")
 
     category = "Real" if mph <= limit else "Race"
