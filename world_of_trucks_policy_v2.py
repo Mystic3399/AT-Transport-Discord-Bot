@@ -106,7 +106,7 @@ def classify_job_mileage(provider, statistics, *, game, max_speed=None, speed_un
                          vehicle_type=None):
     """Apply A&T vehicle-specific Real/Race speed limits without rounding.
 
-    ETS2 truck: 62 mph; ETS2 coach: 68 mph; ATS car: 85 mph.
+    ETS2 truck: 62 mph; ETS2 coach: 68 mph; ATS car: 87 mph.
     Existing ATS unspecified/truck evidence retains the prior 81 mph rule.
     Untyped ETS2 jobs retain provider classifications until vehicle evidence
     exists; only authenticated explicit vehicle type can receive exceptions.
@@ -146,8 +146,8 @@ def classify_job_mileage(provider, statistics, *, game, max_speed=None, speed_un
         limit = Decimal("68") if kind == "coach" else Decimal("62")
     else:
         # Fractional maximum speeds are compared exactly, without rounding.
-        # ATS cars get their separate 85 mph limit only with vehicle evidence.
-        limit = Decimal("85") if kind == "car" else Decimal("81")
+        # ATS cars get their separate 87 mph limit only with vehicle evidence.
+        limit = Decimal("87") if kind == "car" else Decimal("81")
 
     category = "Real" if mph <= limit else "Race"
     wotr_suffix = ", WoTr" if parsed.world_of_trucks else ""
