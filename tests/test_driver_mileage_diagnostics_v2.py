@@ -84,7 +84,9 @@ class DriverEvidenceTests(unittest.IsolatedAsyncioTestCase):
         rows=await scan_zero_mile_driver_sources(conn)
         self.assertEqual(rows[0]['tb_id'],'531098')
         sql=conn.fetch.await_args.args[0]
-        self.assertIn('h.provider_account_id=l.tb_id',sql)
+        self.assertIn('h.provider_account_id=COALESCE(l.tb_id,l.claimed_tb_id)',sql)
+        self.assertIn('p.verified_at IS NOT NULL',sql)
+        self.assertIn('claim_verified',sql)
         self.assertIn("v.status='completed'",sql)
         self.assertIn("v.discord_user_id=ids.discord_user_id",sql)
         self.assertIn("($2::boolean OR",sql)
