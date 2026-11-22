@@ -4576,10 +4576,33 @@ async def trucky_logbook_audit(ctx):
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
 @commands.max_concurrency(1, per=commands.BucketType.guild, wait=False)
-async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"):
-    """Dry-run audit of TrucksBook embeds across readable guild channels."""
+async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured", *, detail: str = ""):
+    """Audit configured tracking channels and review approved Real/Trucky corrections."""
     if ctx.guild.id != GUILD_ID:
         return False
+    if str(message_limit).upper() == "HELD":
+        # Keep one management entry point for pending Trucky jobs. This does
+        # not start /register or infer ownership from a Discord tracker name.
+        mention = re.fullmatch(r"<@!?([0-9]{1,20})>", scope)
+        parts = detail.strip().split()
+        if not mention or len(parts) not in (1, 2) or not re.fullmatch(r"[1-9][0-9]{0,19}", parts[0]) or (len(parts) == 2 and parts[1].upper() != "CONFIRM"):
+            await ctx.reply(
+                "Use `!mileageaudit HELD @Driver JOB_ID` to preview, then "
+                "`!mileageaudit HELD @Driver JOB_ID CONFIRM` in this channel.",
+                mention_author=False,
+            )
+            return
+        driver_id = int(mention.group(1))
+        member = ctx.guild.get_member(driver_id)
+        if member is None:
+            try:
+                member = await ctx.guild.fetch_member(driver_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                await ctx.reply("Driver is not available in this Discord server.", mention_author=False)
+                return
+        action = "CONFIRM" if len(parts) == 2 else "PREVIEW"
+        await ctx.invoke(reviewed_held_mileage, driver=member, job_id=parts[0], action=action)
+        return
     if str(message_limit).upper()=='CONFIRM':
         await ctx.invoke(mileage_apply,confirmation='CONFIRM')
         return
@@ -4852,7 +4875,8 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         + f"Already credited Real: `{float(trucky_allocation['credited_real_miles']):,.2f}` miles / `{trucky_allocation['credited_real_jobs']}` jobs\n"
         + f"Already credited Race: `{float(trucky_allocation['credited_race_miles']):,.2f}` miles / `{trucky_allocation['credited_race_jobs']}` jobs\n"
         + f"Real jobs held for cross-provider/historical reconciliation: `{trucky_allocation['held_real_jobs']}`\n"
-        + "Held jobs remain stored. CONFIRM cannot release them or add them to the profile."
+        + "Held jobs remain stored. Batch CONFIRM does not release them. "
+        "Use !mileageaudit HELD @Driver JOB_ID to review a verified held job individually."
     )
     for offset in range(0,len(preview['drivers']),15):
         lines=[f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + **{d['addition']:,}** = {d['proposed_real_miles']:,} Real miles ({d['jobs']} jobs)"
@@ -4873,8 +4897,8 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
             f"**{inventory['accounts_without_link']} need account linking**. "
             "The attachment separates pending Real and Race miles by stable account ID. "
             "Names are review labels, not ownership proof. These are not approved additions; "
-            "Real miles may already be credited through TrucksBook. Drivers can complete `/register` "
-            "with Steam and either provider; existing mileage is retained.",
+            "Real miles may already be credited through TrucksBook. Account ownership must "
+            "be verified against existing tracking links before any credits are applied.",
             file=discord.File(BytesIO(json.dumps(inventory,indent=2).encode()),
                               filename='pending-provider-accounts.json'),
             allowed_mentions=discord.AllowedMentions.none())
