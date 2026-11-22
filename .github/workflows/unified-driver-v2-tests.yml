@@ -41,4 +41,5 @@ jobs:
             tests/test_held_mileage_approval_v2.py \
             tests/test_shared_driver_roles_v2.py \
             tests/test_trucky_race_overlap_guard_v2.py \
-            tests/test_mileage_audit_command_entry_v2.py
+            tests/test_mileage_audit_command_entry_v2.py \
+            tests/test_mileage_audit_confirmation_v2.py
