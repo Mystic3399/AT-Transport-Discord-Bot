@@ -234,10 +234,20 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
     """Return net legacy change for a new TB job, or a reason to hold it."""
     from decimal import ROUND_FLOOR
     rows = await conn.fetch("""
-        SELECT evidence FROM pending_provider_job_history_v2
+        SELECT evidence,provider_account_id FROM pending_provider_job_history_v2
         WHERE provider='trucksbook' AND provider_job_id=$1
           AND source_kind='verified_webhook_source'
         """, job_id)
+    if not rows:
+        return None, "route_evidence_pending"
+    # A source's author name is never proof. Its immutable provider account
+    # must match the driver's active or completed verified registration.
+    from mileage_audit_confirmation_v2 import audit_account_matches
+    for row in rows:
+        if not await audit_account_matches(conn,dict(
+                discord_user_id=user,
+                source_provider_account_id=row["provider_account_id"])):
+            return None, "unverified_trucksbook_account"
     incoming_versions = []
     try:
         for row in rows:
@@ -245,9 +255,33 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
                 job_id, user, row["evidence"], miles, allow_missing_cargo=True,
             ))
     except (ValueError, TypeError, KeyError, InvalidOperation):
-        return None, "route_evidence_pending"
+        incoming_versions = []
     if not incoming_versions:
-        return None, "route_evidence_pending"
+        # Trusted old logbook messages may omit cargo, city or game. Where
+        # complete route data is absent, avoid inventing it. The only safe
+        # automatic approval here is when EVERY authenticated message has a
+        # valid delivery timestamp, and every existing Trucky Real credit is
+        # more than two hours away.
+        from automatic_mileage_source_recovery_v2 import (
+            valid_temporal_trucksbook_observation,temporally_independent)
+        times = []
+        for row in rows:
+            evidence = (json.loads(row["evidence"])
+                        if isinstance(row["evidence"],str) else row["evidence"])
+            observed_at = valid_temporal_trucksbook_observation(evidence,miles)
+            if observed_at is None:
+                return None, "route_evidence_pending"
+            times.append(observed_at)
+        credits = await conn.fetch("""
+            SELECT provider_job_id,miles,delivered_at
+            FROM unified_v2_production_credit_ledger
+            WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real'
+        """,user)
+        if any(credit["delivered_at"] is None or not all(
+                temporally_independent(credit["delivered_at"],observed)
+                for observed in times) for credit in credits):
+            return None, "route_evidence_pending"
+        return Decimal(miles), None
     credits = await conn.fetch("""
         SELECT provider_job_id,miles,delivered_at FROM unified_v2_production_credit_ledger
         WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real'
