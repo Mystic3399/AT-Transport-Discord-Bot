@@ -135,6 +135,12 @@ async def scan_zero_mile_driver_sources(conn,limit=40,*,include_credited=False):
             COALESCE(d.trucksbook_name,p.provider_display_name) AS trucksbook_name,
             p.provider_account_id AS claimed_tb_id,
             (p.verified_at IS NOT NULL) AS claim_verified,
+            proof.status AS ownership_claim_status,
+            proof.ownership_confirmed AS ownership_confirmed,
+            proof.membership_confirmed AS membership_confirmed,
+            proof.ownership_evidence_kind AS ownership_evidence_kind,
+            (proof.reviewed_at IS NOT NULL AND proof.reviewed_by IS NOT NULL)
+              AS ownership_reviewed,
             COALESCE(d.trucksbook_user_id::text,
               CASE WHEN p.verified_at IS NOT NULL THEN p.provider_account_id END,
               CASE WHEN v.status='completed' AND v.completed_at IS NOT NULL
@@ -144,11 +150,15 @@ async def scan_zero_mile_driver_sources(conn,limit=40,*,include_credited=False):
           LEFT JOIN unified_provider_links p
             ON p.discord_user_id=ids.discord_user_id AND p.provider='trucksbook'
           LEFT JOIN driver_verifications v ON v.discord_user_id=ids.discord_user_id
+          LEFT JOIN unified_provider_claims proof ON proof.discord_user_id=ids.discord_user_id
+            AND proof.provider='trucksbook'
           WHERE (d.discord_user_id IS NULL
             OR d.trucksbook_name<>('__unlinked_driver_'||d.discord_user_id::text||'__'))
         )
         SELECT l.discord_user_id,l.trucksbook_name,l.tb_id,
                l.claimed_tb_id,l.claim_verified,
+               l.ownership_claim_status,l.ownership_confirmed,
+               l.membership_confirmed,l.ownership_evidence_kind,l.ownership_reviewed,
           COALESCE((SELECT real_miles FROM driver_progress
                     WHERE discord_user_id=l.discord_user_id),0) AS real_miles,
           (SELECT COUNT(*) FROM processed_jobs j
