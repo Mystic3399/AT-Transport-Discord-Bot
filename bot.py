@@ -1305,6 +1305,36 @@ async def record_real_job(
             ledger_exists = await connection.fetchval(
                 "SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL")
             credit_distance = accepted_distance
+            # Never automatically count a TrucksBook Real job alongside an
+            # already-credited Trucky Race delivery in the same time window.
+            # Historical Jobs without independently dated source proof stay held.
+            if ledger_exists and await connection.fetchval("""SELECT EXISTS(
+                SELECT 1 FROM unified_v2_production_credit_ledger
+                WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='race')
+                """,discord_user_id):
+                from automatic_mileage_source_recovery_v2 import valid_temporal_trucksbook_observation
+                source_rows = await connection.fetch("""
+                    SELECT evidence FROM pending_provider_job_history_v2
+                    WHERE provider='trucksbook' AND provider_job_id=$1
+                      AND source_kind='verified_webhook_source'
+                """, job_id)
+                if not source_rows:
+                    return {'status':'pending_race_cross_provider_evidence',
+                            'real_miles':None,'crossed_milestones':[]}
+                for source_row in source_rows:
+                    evidence = source_row['evidence']
+                    if isinstance(evidence,str):
+                        evidence=json.loads(evidence)
+                    observed_at = valid_temporal_trucksbook_observation(evidence,accepted_distance)
+                    if observed_at is None or await connection.fetchval("""
+                        SELECT EXISTS(SELECT 1 FROM unified_v2_production_credit_ledger
+                            WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='race'
+                              AND (delivered_at IS NULL OR delivered_at
+                                    BETWEEN $2::timestamptz - INTERVAL '120 minutes'
+                                        AND $2::timestamptz + INTERVAL '120 minutes'))
+                    """,discord_user_id,observed_at):
+                        return {'status':'pending_race_cross_provider_review',
+                                'real_miles':None,'crossed_milestones':[]}
             automatic = os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') == 'YES'
             has_trucky_credit = ledger_exists and await connection.fetchval("""SELECT EXISTS(
                 SELECT 1 FROM unified_v2_production_credit_ledger
