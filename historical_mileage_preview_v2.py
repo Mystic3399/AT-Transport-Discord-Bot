@@ -53,7 +53,8 @@ def _normalize(row, links):
     if row.get('discord_user_id', user)!=user:
         raise ValueError('conflicting_driver_identity')
     classification = (classify_job_mileage(provider,row.get('statistics'),game=row['game'],
-        max_speed=row.get('max_speed'),speed_unit=row.get('speed_unit'))
+        max_speed=row.get('max_speed'),speed_unit=row.get('speed_unit'),
+        vehicle_type=row.get('vehicle_type'))
         if 'game' in row else classify_event_mileage(provider,row.get('statistics')))
     if classification is None:
         raise ValueError('excluded_or_ambiguous_classification')
