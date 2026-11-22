@@ -3160,29 +3160,9 @@ tb_recovery_membership_cache = {}
 
 
 async def verify_current_trucksbook_recovery_membership(account, report):
-    """Fresh affirmative membership; never uses a display name or cached absence."""
-    if (not isinstance(report, dict) or report.get("discord") != "In server"
-            or report.get("trucksbook_link_conflict")
-            or not isinstance(account, str) or not account.isdecimal()
-            or int(account) <= 0):
-        return False
-    now = datetime.now(timezone.utc)
-    cached = tb_recovery_membership_cache.get(account)
-    if cached:
-        when, result = cached
-        # Positive checks are deliberately short-lived. A driver who leaves
-        # will not keep earning for hours on a stale six-hour membership poll.
-        seconds = 120 if result else 600
-        if (now - when).total_seconds() < seconds:
-            return result
-    try:
-        result = await fetch_trucksbook_profile(int(account))
-        active = (result.get("success") is True
-                  and result.get("belongs_to_at") is True)
-    except Exception:
-        active = False
-    tb_recovery_membership_cache[account] = (now, active)
-    return active
+    from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+    return await current_trucksbook_member(
+        account,report,fetch_trucksbook_profile,tb_recovery_membership_cache)
 
 
 async def replay_saved_trucksbook_jobs():
