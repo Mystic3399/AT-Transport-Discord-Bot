@@ -95,9 +95,18 @@ async def repair_approved_provider_links(pool):
                 EXISTS(SELECT 1 FROM unified_provider_claims c WHERE c.provider='trucksbook' AND c.provider_account_id=a.account AND c.status='pending') AS pending_claim
               FROM accounts a
             )
-            SELECT legacy,completed,verified_link,approved_claim,pending_claim,
-                   COUNT(*)::INT AS accounts FROM matches
-            GROUP BY legacy,completed,verified_link,approved_claim,pending_claim
+            SELECT m.legacy,m.completed,m.verified_link,m.approved_claim,m.pending_claim,
+                   COUNT(*)::INT AS accounts,
+                   COALESCE(SUM(j.job_count),0)::INT AS source_jobs
+            FROM matches m
+            JOIN LATERAL (
+              SELECT COUNT(*)::INT AS job_count
+              FROM pending_provider_job_history_v2 h
+              WHERE h.provider='trucksbook'
+                AND h.source_kind='verified_webhook_source'
+                AND h.provider_account_id=m.account
+            ) j ON TRUE
+            GROUP BY m.legacy,m.completed,m.verified_link,m.approved_claim,m.pending_claim
             ORDER BY accounts DESC
         """)]
     return result
