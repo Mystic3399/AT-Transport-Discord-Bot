@@ -27,14 +27,14 @@ class VehicleSpeedPolicyTests(unittest.TestCase):
                                            speed=speed).mileage_type, "race")
         self.assertIsNone(self.classify(game="ETS2", vehicle="coach", speed=Decimal("112.01")))
 
-    def test_ats_car_85_mph_inclusive(self):
-        for speed in (Decimal("81.01"), Decimal("84.9999"), Decimal("85")):
+    def test_ats_car_87_mph_inclusive(self):
+        for speed in (Decimal("81.01"), Decimal("85"), Decimal("86.9999"), Decimal("87")):
             self.assertEqual(self.classify(game="ATS", vehicle="car",
                                            speed=speed, stats="Race").mileage_type, "real")
-        for speed in (Decimal("85.0001"), Decimal("86"), Decimal("112")):
+        for speed in (Decimal("87.0001"), Decimal("88"), Decimal("112")):
             self.assertEqual(self.classify(game="ATS", vehicle="car", speed=speed).mileage_type, "race")
         self.assertIsNone(self.classify(game="ATS", vehicle="car", speed=Decimal("112.01")))
-        exact = Decimal("85") * Decimal("1.609344")
+        exact = Decimal("87") * Decimal("1.609344")
         self.assertEqual(classify_job_mileage(
             "trucky", "Race", game="ATS", max_speed=exact,
             speed_unit="km/h", vehicle_type="car").mileage_type, "real")
