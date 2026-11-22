@@ -53,23 +53,51 @@ async def race_overlap_hold(conn, candidate):
         LEFT JOIN pending_provider_job_history_v2 h
           ON h.provider='trucksbook' AND h.provider_job_id=p.job_id
          AND h.source_kind='verified_webhook_source'
+         AND (
+           EXISTS(SELECT 1 FROM driver_links d WHERE d.discord_user_id=p.discord_user_id
+             AND d.trucksbook_user_id::text=h.provider_account_id
+             AND d.trucksbook_name <> ('__unlinked_driver_'||d.discord_user_id::text||'__'))
+           OR EXISTS(SELECT 1 FROM unified_provider_links l
+             WHERE l.discord_user_id=p.discord_user_id AND l.provider='trucksbook'
+               AND l.provider_account_id=h.provider_account_id AND l.verified_at IS NOT NULL)
+         )
         WHERE p.discord_user_id=$1 AND LOWER(p.statistics) LIKE 'real%'
           AND p.accepted_distance>0
         ORDER BY p.job_id
     """, user)
+    from automatic_mileage_source_recovery_v2 import (
+        valid_temporal_trucksbook_observation,temporally_independent)
+    import json
     observations = {}
     for row in rows:
         if row["evidence"] is None:
             return "race_historical_route_coverage_pending"
+        evidence = (json.loads(row["evidence"]) if isinstance(row["evidence"],str)
+                    else row["evidence"])
         try:
-            comparison=trucksbook_comparison(row["job_id"],user,row["evidence"],
+            comparison=trucksbook_comparison(row["job_id"],user,evidence,
                                              row["accepted_distance"])
         except (KeyError, TypeError, ValueError):
-            return "race_historical_route_coverage_pending"
+            # Time-only evidence is useful solely to rule out a duplicate
+            # across a generous 2-hour uncertainty window. Without that
+            # proof, the Race credit remains held.
+            observed_at=valid_temporal_trucksbook_observation(
+                evidence,row["accepted_distance"])
+            if (observed_at is None or not temporally_independent(
+                    candidate["delivered_at"],observed_at)):
+                return "race_historical_route_coverage_pending"
+            observations.setdefault(row["job_id"], []).append(None)
+            continue
         observations.setdefault(row["job_id"], []).append(comparison)
     if len(observations) != count:
         return "race_historical_route_coverage_pending"
     for comparisons in observations.values():
+        # A source without route fields was accepted only with all-time
+        # separation proof above. Never infer its missing route details.
+        if any(job is None for job in comparisons):
+            if not all(job is None for job in comparisons):
+                return "race_conflicting_route_evidence"
+            continue
         # Conflicting retained versions are not evidence for an independent job.
         if len({(job["delivered_at"],str(job["metadata"])) for job in comparisons}) > 1:
             return "race_conflicting_route_evidence"
