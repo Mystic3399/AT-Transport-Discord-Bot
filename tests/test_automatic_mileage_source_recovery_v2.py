@@ -42,6 +42,12 @@ class AutomaticSourceProofTests(unittest.TestCase):
         self.assertIsNone(valid_temporal_trucksbook_observation(dict(ev,unit="km"),120))
         self.assertIsNone(valid_temporal_trucksbook_observation(dict(ev,stats_type="Race"),120))
 
+    def test_wotr_real_jobs_are_included_in_duplicate_matching(self):
+        text=(ROOT/"automatic_linked_mileage_v2.py").read_text(encoding="utf-8")
+        self.assertIn("LOWER(p.statistics) LIKE 'real%'",text)
+        self.assertIn("LOWER(statistics) LIKE 'real%'",text)
+        self.assertNotIn("LOWER(p.statistics)='real'",text)
+
     def test_history_scan_records_proof_not_direct_credit(self):
         tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
         scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
