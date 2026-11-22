@@ -86,6 +86,14 @@ async def reconcile_trucky(conn, candidate):
         FROM processed_jobs p JOIN pending_provider_job_history_v2 h
           ON h.provider='trucksbook' AND h.provider_job_id=p.job_id
           AND h.source_kind='verified_webhook_source'
+          AND (
+            EXISTS(SELECT 1 FROM driver_links d WHERE d.discord_user_id=p.discord_user_id
+              AND d.trucksbook_user_id::text=h.provider_account_id
+              AND d.trucksbook_name <> ('__unlinked_driver_'||d.discord_user_id::text||'__'))
+            OR EXISTS(SELECT 1 FROM unified_provider_links l
+              WHERE l.discord_user_id=p.discord_user_id AND l.provider='trucksbook'
+                AND l.provider_account_id=h.provider_account_id AND l.verified_at IS NOT NULL)
+          )
         WHERE p.discord_user_id=$1 AND LOWER(p.statistics)='real'
           AND p.accepted_distance>0
         """, user)
@@ -95,6 +103,8 @@ async def reconcile_trucky(conn, candidate):
     found = []
     comparable_jobs = set()
     uncertain_route = False
+    from automatic_mileage_source_recovery_v2 import (
+        valid_temporal_trucksbook_observation, temporally_independent)
     for job_id, versions in by_job.items():
         comparisons = []
         for version in versions:
@@ -105,10 +115,25 @@ async def reconcile_trucky(conn, candidate):
             except (ValueError, TypeError, KeyError, InvalidOperation):
                 comparisons = []
                 break
+        if not comparisons:
+            # Old genuine webhook posts may have only delivery time and miles.
+            # Never invent a route: prove time separation from EVERY authentic
+            # source version, or keep the whole job held for further evidence.
+            timestamps = [valid_temporal_trucksbook_observation(
+                (v["evidence"] if isinstance(v["evidence"],dict)
+                 else json.loads(v["evidence"])),v["accepted_distance"])
+                for v in versions]
+            if (any(value is None for value in timestamps) or not all(
+                    temporally_independent(incoming["delivered_at"],value)
+                    for value in timestamps)):
+                return None, "historical_route_coverage_pending"
+            comparable_jobs.add(job_id)
+            continue
         if any(not item["metadata"].get("cargo") for item in comparisons):
-            if any(abs(incoming["delivered_at"] - item["delivered_at"]) <= timedelta(minutes=30)
+            if any(not temporally_independent(incoming["delivered_at"],item["delivered_at"])
                    for item in comparisons):
                 return None, "route_evidence_pending"
+            comparable_jobs.add(job_id)
             continue
         if comparisons:
             comparable_jobs.add(job_id)
