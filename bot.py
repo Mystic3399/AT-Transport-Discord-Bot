@@ -3165,6 +3165,7 @@ async def replay_saved_trucksbook_jobs():
             or os.getenv("AT_V2_AUTOMATIC_LINKED_RECONCILIATION") != "YES"):
         return
     import automatic_mileage_source_recovery_v2 as auto
+    import automatic_mileage_holding_v2 as holding
     import mileage_audit_confirmation_v2 as review
     from trucky_linked_allocation_v2 import activation_allowed
     from unified_production_mileage_gate_v2 import read_only_database_fingerprint
@@ -3199,10 +3200,12 @@ async def replay_saved_trucksbook_jobs():
     unresolved = 0
     reasons = Counter()
     affected_users = {}
+    queued = {}
     for job_id, group in versions.items():
         if len(group) != 1 or not auto.trusted_account_id(group[0]["provider_account_id"]):
             unresolved += 1
             reasons['unverified_or_conflicting_source'] += 1
+            queued[job_id]=(None,None,'unknown',None,'source_conflict')
             continue
         row = group[0]
         evidence = json.loads(row["evidence"]) if isinstance(row["evidence"],str) else row["evidence"]
@@ -3211,6 +3214,7 @@ async def replay_saved_trucksbook_jobs():
                 or type(evidence.get("distance")) is not int or evidence["distance"] <= 0):
             unresolved += 1
             reasons['unsupported_or_invalid_source'] += 1
+            queued[job_id]=(row["provider_account_id"],None,'unknown',None,'invalid_source')
             continue
         account = row["provider_account_id"]
         async with db_pool.acquire() as conn:
@@ -3243,24 +3247,38 @@ async def replay_saved_trucksbook_jobs():
             if len(owners) != 1:
                 unresolved += 1
                 reasons['provider_link_not_verified'] += 1
+                queued[job_id]=(account,None,'real',evidence['distance'],'unverified_owner')
                 continue
             user = int(owners[0]["discord_user_id"])
             if not await account_unlink.has_valid_tracking_link(conn,user):
                 unresolved += 1
                 reasons['inactive_driver'] += 1
+                queued[job_id]=(account,user,'real',evidence['distance'],'inactive_driver')
                 continue
             if not await review.audit_account_matches(conn,dict(
                     discord_user_id=user, source_provider_account_id=account)):
                 unresolved += 1
                 reasons['source_account_disagrees'] += 1
+                queued[job_id]=(account,None,'real',evidence['distance'],'source_account_disagrees')
                 continue
             baseline = await conn.fetchval("""
                 SELECT snapshotted_at FROM unified_v2_production_mileage_baselines
                 WHERE discord_user_id=$1
             """, user)
+        # Current A&T membership on either tracker is necessary before credit.
+        # A departed driver keeps the same durable pending source job.
+        report = driver_membership_snapshot_v2.get(user)
+        if not report or report.get("company") != "Active company driver":
+            unresolved += 1
+            reasons['company_membership_unconfirmed'] += 1
+            queued[job_id]=(account,user,'real',evidence['distance'],
+                            'company_membership_unconfirmed')
+            continue
         if not auto.valid_replay_window(evidence,baseline):
             unresolved += 1
             reasons['historical_balance_cutoff_or_time_missing'] += 1
+            queued[job_id]=(account,user,'real',evidence['distance'],
+                            'historical_balance_cutoff_or_time_missing')
             continue
         name = evidence.get("candidate_driver_label") or "A&T Driver"
         result = await record_real_job(job_id,name,user,evidence["distance"])
@@ -3269,11 +3287,27 @@ async def replay_saved_trucksbook_jobs():
             # Defer Discord API updates until the batch has settled. Several
             # jobs for one driver must not PATCH the same leaderboard repeatedly.
             affected_users[user] = name
+            queued[job_id]=(account,user,'real',evidence['distance'],'credited')
             if credited >= 50:
                 break
         elif result and result.get("status") not in ("duplicate",):
             unresolved += 1
-            reasons[result.get('status','source_replay_pending')] += 1
+            reason=result.get('status','source_replay_pending')
+            reasons[reason] += 1
+            queued[job_id]=(account,user,'real',evidence['distance'],reason)
+        elif result and result.get("status") == "duplicate":
+            queued[job_id]=(account,user,'real',evidence['distance'],'credited')
+        else:
+            unresolved += 1
+            reasons['source_replay_pending'] += 1
+            queued[job_id]=(account,user,'real',evidence['distance'],'source_replay_pending')
+    # The holding area cannot award mileage; it only records what the
+    # verified ledger/replay worker decided. A later link or membership check
+    # reevaluates these rows without any owner command.
+    async with db_pool.acquire() as conn:
+        for item_job_id,(account,driver,kind,miles,reason) in queued.items():
+            await holding.store_state(conn,'trucksbook',item_job_id,account,
+                    driver_id=driver,mileage_type=kind,miles=miles,reason=reason)
     guild = bot.get_guild(GUILD_ID)
     if affected_users and guild is not None:
         for user, name in affected_users.items():
@@ -3293,7 +3327,9 @@ async def replay_saved_trucksbook_jobs():
     if versions:
         print("AUTO TRUCKSBOOK RECOVERY " + json.dumps({
             'candidates':len(versions),'credited':credited,'held':unresolved,
-            'affected_drivers':len(affected_users),'reasons':dict(reasons)},
+            'affected_drivers':len(affected_users),'held_in_queue':sum(
+                1 for value in queued.values() if value[-1]!='credited'),
+            'reasons':dict(reasons)},
             sort_keys=True),flush=True)
 
 
@@ -3474,6 +3510,10 @@ async def on_ready():
             if os.getenv("AT_V2_PENDING_HISTORY_ENABLED") == "YES":
                 import pending_driver_history_v2
                 await pending_driver_history_v2.install_schema(db_pool)
+            if not isolated_staging:
+                import automatic_mileage_holding_v2
+                async with db_pool.acquire() as conn:
+                    await conn.execute(automatic_mileage_holding_v2.SCHEMA)
             if isolated_staging:
                 import unified_staging_shadow_receipts_v2
                 await unified_staging_shadow_receipts_v2.install_schema(db_pool)
