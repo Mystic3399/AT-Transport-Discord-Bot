@@ -59,6 +59,19 @@ class RaceOverlapTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await race_overlap_hold(
             FakeConn(1,150,0,[trucksbook_row(hours=3)]),candidate()))
 
+    async def test_source_without_route_can_prove_only_distant_nonduplicate(self):
+        distant={"job_id":"100","accepted_distance":150,"evidence":dict(
+            stats_type="Real",distance=150,unit="mi",
+            source_message_at=(NOW-timedelta(hours=5)).isoformat())}
+        self.assertIsNone(await race_overlap_hold(
+            FakeConn(1,150,0,[distant]),candidate()))
+        near={"job_id":"100","accepted_distance":150,"evidence":dict(
+            stats_type="Real",distance=150,unit="mi",
+            source_message_at=(NOW-timedelta(minutes=30)).isoformat())}
+        self.assertEqual(await race_overlap_hold(
+            FakeConn(1,150,0,[near]),candidate()),
+            "race_historical_route_coverage_pending")
+
     async def test_source_game_does_not_match(self):
         other=dict(provider="trucksbook",discord_user_id=42,
                    delivered_at=NOW,metadata=dict(game="ETS2",origin="Seattle",
