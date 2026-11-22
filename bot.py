@@ -7241,6 +7241,9 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
             COALESCE(tb.provider_display_name,links.trucksbook_name,tr.provider_display_name,'A&T Driver') AS trucksbook_name,
             (links.trucksbook_user_id IS NOT NULL AND links.trucksbook_name<>('__unlinked_driver_'||links.discord_user_id::text||'__')) AS legacy_linked,
             (tb.verified_at IS NOT NULL) AS tb_verified,
+            (tb.provider_account_id IS NOT NULL OR
+             (links.discord_user_id IS NOT NULL
+              AND links.trucksbook_name<>('__unlinked_driver_'||links.discord_user_id::text||'__'))) AS has_tb_name,
             tr.provider_account_id AS trucky_account_id,
             tr.provider_display_name AS trucky_display_name,
             tr.verified_at IS NOT NULL AS trucky_verified,
@@ -7311,7 +7314,7 @@ async def fetch_driver_profile_stats(connection, discord_user_id):
     # A saved display name alone is not a verified provider account link.
     # The tachograph tick should only appear with a concrete numeric ID
     # supported by a legacy verified link or verified unified provider link.
-    if row['trucksbook_user_id'] or row['trucksbook_name'] != 'A&T Driver':
+    if row.get('has_tb_name'):
         linked = bool(row.get('legacy_linked') or row.get('tb_verified'))
         accounts.append(dict(provider='TrucksBook',name=str(row['trucksbook_name']),
                              account_id=row['trucksbook_user_id'],
