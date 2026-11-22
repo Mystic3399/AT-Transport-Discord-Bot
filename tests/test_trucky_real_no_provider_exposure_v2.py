@@ -15,9 +15,10 @@ def job(**changes):
                 miles=Decimal('240.8'),**changes)
 
 def facts(**changes):
-    return dict(profile_real=0,trucky_real=Decimal(0),trucksbook_jobs=0,
-                trucksbook_observations=0,trucksbook_claims=0,
-                race_overlap=0,**changes)
+    values=dict(profile_real=0,trucky_real=Decimal(0),trucksbook_jobs=0,
+                trucksbook_observations=0,trucksbook_claims=0,race_overlap=0)
+    values.update(changes)
+    return values
 
 class AutomaticNoTrucksBookExposure(unittest.IsolatedAsyncioTestCase):
     async def test_real_job_missing_route_can_be_credited_only_with_zero_prior_exposure(self):
