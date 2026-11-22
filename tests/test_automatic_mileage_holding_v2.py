@@ -115,6 +115,27 @@ class ReleasePathTests(unittest.TestCase):
         self.assertNotIn('UPDATE driver_progress',body)
         self.assertNotIn('INSERT INTO unified_v2_production_credit_ledger',body)
 
+    def test_staff_awards_command_reads_only_committed_credit_ledger(self):
+        source=(ROOT/'bot.py').read_text(encoding='utf-8')
+        node=next(n for n in ast.parse(source).body
+                  if isinstance(n,ast.AsyncFunctionDef)
+                     and n.name=='mileage_queue_status')
+        body=ast.unparse(node)
+        self.assertIn("awards",body)
+        self.assertIn("credited_at >= NOW() - INTERVAL '24 hours'".replace(' >= ','>='),body)
+        self.assertIn('canonical_credit_key LIKE',body)
+        self.assertIn('SUM(miles)',body)
+        self.assertIn('group by mileage_type'.upper(),body.upper())
+        self.assertNotIn('UPDATE driver_progress',body)
+        self.assertNotIn('INSERT INTO unified_v2_production_credit_ledger',body)
+
+    def test_allocator_reports_exact_committed_credits_not_pending_miles(self):
+        text=(ROOT/'trucky_linked_allocation_v2.py').read_text(encoding='utf-8')
+        self.assertIn('ledger_awards_last_24h',text)
+        self.assertIn("credited_this_run",text)
+        self.assertIn('COALESCE(SUM(miles),0)',text)
+        self.assertIn("canonical_credit_key LIKE 'accepted-link-trucky:%'",text)
+
     def test_no_unverified_provider_autocredit(self):
         source=(ROOT/'trucky_linked_allocation_v2.py').read_text()
         self.assertIn("s.verified_at IS NOT NULL",source)
