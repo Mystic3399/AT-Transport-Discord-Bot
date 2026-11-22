@@ -4845,6 +4845,34 @@ async def mileage_queue_status(ctx, view: str = "summary"):
     if ctx.guild.id != GUILD_ID or db_pool is None:
         return
     import automatic_mileage_holding_v2 as holding
+    if view.lower() in ('awards','credited'):
+        # The ledger, not a preview or queue status, proves an awarded mile.
+        # The query reports newly committed automatic Trucky credits only.
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT mileage_type,COUNT(*)::BIGINT AS jobs,
+                       COALESCE(SUM(miles),0) AS miles,
+                       COUNT(DISTINCT discord_user_id)::BIGINT AS drivers
+                FROM unified_v2_production_credit_ledger
+                WHERE provider='trucky'
+                  AND canonical_credit_key LIKE 'accepted-link-trucky:%'
+                  AND credited_at>=NOW()-INTERVAL '24 hours'
+                GROUP BY mileage_type
+            """)
+        amounts={x['mileage_type']:x for x in rows}
+        def line(kind):
+            item=amounts.get(kind)
+            return (f"**{int(item['jobs']):,} jobs / {item['miles']:,.2f} miles**"
+                    if item else "**0 jobs / 0.00 miles**")
+        await ctx.reply(
+            "✅ **Verified automatic Trucky credits — last 24 hours**\n"
+            f"Real: {line('real')}\n"
+            f"Race: {line('race')}\n"
+            "Only committed ledger credits are counted; pending mileage is excluded. "
+            "TrucksBook historical repair credits are separate.",
+            mention_author=False,allowed_mentions=discord.AllowedMentions.none()
+        )
+        return
     if view.lower() in ('details','breakdown'):
         async with db_pool.acquire() as conn:
             reasons = await conn.fetch("""
@@ -4884,7 +4912,7 @@ async def mileage_queue_status(ctx, view: str = "summary"):
                         mention_author=False,allowed_mentions=discord.AllowedMentions.none())
         return
     if view.lower() not in ('summary',''):
-        await ctx.reply("Use `!mileagequeue` or `!mileagequeue details`.",mention_author=False)
+        await ctx.reply("Use `!mileagequeue`, `!mileagequeue details` or `!mileagequeue awards`.",mention_author=False)
         return
     async with db_pool.acquire() as conn:
         rows = await holding.holding_summary(conn)
