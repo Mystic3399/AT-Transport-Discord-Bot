@@ -36,7 +36,7 @@ class AutomaticNoTrucksBookExposure(unittest.IsolatedAsyncioTestCase):
             dict(trucksbook_observations=1),
             dict(trucksbook_claims=1),
             dict(race_overlap=1),
-            dict(profile_real=20,trucky_real=Decimal('20.4')),
+            dict(profile_real=21,trucky_real=Decimal('20.4')),
         ]
         for variant in variants:
             with self.subTest(variant=variant):
