@@ -3195,6 +3195,7 @@ async def replay_saved_trucksbook_jobs():
     credited = 0
     unresolved = 0
     reasons = Counter()
+    affected_users = {}
     for job_id, group in versions.items():
         if len(group) != 1 or not auto.trusted_account_id(group[0]["provider_account_id"]):
             unresolved += 1
@@ -3262,24 +3263,35 @@ async def replay_saved_trucksbook_jobs():
         result = await record_real_job(job_id,name,user,evidence["distance"])
         if result and result.get("status") == "added":
             credited += 1
-            guild = bot.get_guild(GUILD_ID)
-            if guild is not None:
-                try:
-                    await sync_member_progression_role(guild,user,result["real_miles"])
-                    await sync_permanent_system_for_driver(
-                        guild,user,name,result["real_miles"],announce=True)
-                    await refresh_driver_leaderboard(guild)
-                except Exception as error:
-                    print(f"AUTO TB CAREER SYNC RETRY: {type(error).__name__}",flush=True)
+            # Defer Discord API updates until the batch has settled. Several
+            # jobs for one driver must not PATCH the same leaderboard repeatedly.
+            affected_users[user] = name
             if credited >= 50:
                 break
         elif result and result.get("status") not in ("duplicate",):
             unresolved += 1
             reasons[result.get('status','source_replay_pending')] += 1
+    guild = bot.get_guild(GUILD_ID)
+    if affected_users and guild is not None:
+        for user, name in affected_users.items():
+            try:
+                async with db_pool.acquire() as conn:
+                    current = await conn.fetchval(
+                        "SELECT real_miles FROM driver_progress WHERE discord_user_id=$1",user)
+                await sync_member_progression_role(guild,user,int(current or 0))
+                await sync_permanent_system_for_driver(
+                    guild,user,name,int(current or 0),announce=True)
+            except Exception as error:
+                print(f"AUTO TB CAREER SYNC RETRY: {type(error).__name__}",flush=True)
+        try:
+            await refresh_driver_leaderboard(guild)
+        except Exception as error:
+            print(f"AUTO TB LEADERBOARD RETRY: {type(error).__name__}",flush=True)
     if versions:
         print("AUTO TRUCKSBOOK RECOVERY " + json.dumps({
             'candidates':len(versions),'credited':credited,'held':unresolved,
-            'reasons':dict(reasons)},sort_keys=True),flush=True)
+            'affected_drivers':len(affected_users),'reasons':dict(reasons)},
+            sort_keys=True),flush=True)
 
 
 @tasks.loop(minutes=4)
