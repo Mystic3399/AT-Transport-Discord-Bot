@@ -78,3 +78,38 @@ def temporally_independent(incoming_at, provider_post_at, *, minutes=120):
     return (isinstance(incoming_at,datetime) and incoming_at.tzinfo is not None
             and isinstance(provider_post_at,datetime) and provider_post_at.tzinfo is not None
             and abs(incoming_at-provider_post_at) > timedelta(minutes=minutes))
+
+
+async def current_trucksbook_member(account, report, fetch_profile, cache, *,
+                                    now=None):
+    """Affirm current A&T membership for an independently linked exact ID.
+
+    A six-hour company snapshot can be stale. This short bounded lookup only
+    resolves account/company membership; the caller independently verifies
+    Steam/Discord ownership, credit ledger, duplicate jobs and Real policy.
+    """
+    if (not isinstance(report,dict) or report.get("discord") != "In server"
+            or report.get("trucksbook_link_conflict")
+            or not isinstance(account,str)
+            or not account.isascii() or not account.isdecimal()
+            or int(account)<=0):
+        return False
+    moment=now if now is not None else datetime.now(timezone.utc)
+    if moment.tzinfo is None:
+        raise ValueError("Timezone-aware membership lookup timestamp required")
+    cached=cache.get(account)
+    if cached is not None:
+        checked,member=cached
+        if (isinstance(checked,datetime) and checked.tzinfo is not None
+                and timedelta(0) <= moment-checked <
+                    timedelta(seconds=120 if member else 600)):
+            return bool(member)
+    try:
+        profile=await fetch_profile(int(account))
+        member=(isinstance(profile,dict)
+                and profile.get("success") is True
+                and profile.get("belongs_to_at") is True)
+    except Exception:
+        member=False
+    cache[account]=(moment,member)
+    return member
