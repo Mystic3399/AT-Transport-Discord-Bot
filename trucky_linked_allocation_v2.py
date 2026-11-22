@@ -338,6 +338,15 @@ async def allocate_saved_linked_history(pool, *, alternate_member_ids=frozenset(
     groups = defaultdict(list)
     for row in rows:
         groups[row['provider_job_id']].append(dict(row))
+    # Account-level diagnostics are derived from the same verified-link join
+    # used for allocation. Never print IDs or infer ownership from names.
+    linked_accounts = {str(row['provider_account_id']) for row in rows
+                       if row['discord_user_id'] is not None}
+    unlinked_accounts = {str(row['provider_account_id']) for row in rows
+                         if row['discord_user_id'] is None}
+    link_diagnostics = {'verified_linked_accounts': len(linked_accounts),
+                        'unlinked_source_accounts': len(unlinked_accounts),
+                        'source_accounts_with_mixed_link_state': len(linked_accounts & unlinked_accounts)}
     # An old immutable credit remains earned when its driver later departs.
     # Read those ledger facts in bulk so the pending queue never relabels
     # already-paid history as newly unpaid just because membership changed.
@@ -443,4 +452,5 @@ async def allocate_saved_linked_history(pool, *, alternate_member_ids=frozenset(
             'ledger_awards_last_24h': verified_awards,
             'registration_changed': False,
             'queued_unverified': counts.get('account_link_pending',0)+counts.get('company_not_member',0),
-            'roles_changed': False, 'company_mods_unlocked': False}
+            'roles_changed': False, 'company_mods_unlocked': False,
+            'source_link_diagnostics': link_diagnostics}
