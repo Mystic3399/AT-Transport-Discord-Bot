@@ -113,3 +113,55 @@ async def current_trucksbook_member(account, report, fetch_profile, cache, *,
         member=False
     cache[account]=(moment,member)
     return member
+
+
+async def safely_restore_accounted_trucksbook_history(conn, user, evidence, miles):
+    """Allow old A&T webhook jobs only when every existing mile is explained.
+
+    This is the TrucksBook-only driver recovery case: the source is retained
+    from a configured A&T TrucksBook webhook, independently linked by exact
+    provider account elsewhere, with present A&T membership. None of those
+    identity facts may be inferred from a name. Called AGAIN under the
+    per-driver writer lock, so concurrent jobs recheck the balance invariant.
+    """
+    if type(user) is not int or user<=0:
+        return False
+    if valid_temporal_trucksbook_observation(evidence, miles) is None:
+        return False
+    from decimal import Decimal, InvalidOperation
+    facts=await conn.fetchrow("""
+      SELECT COALESCE((SELECT real_miles FROM driver_progress
+                       WHERE discord_user_id=$1),0) AS real_miles,
+             COALESCE((SELECT SUM(accepted_distance) FROM processed_jobs
+                       WHERE discord_user_id=$1
+                         AND LOWER(statistics) LIKE 'real%'
+                         AND accepted_distance>0),0) AS accounted_jobs_miles,
+             (SELECT COUNT(*) FROM processed_jobs
+              WHERE discord_user_id=$1 AND
+                (LOWER(statistics) NOT LIKE 'real%' OR accepted_distance<=0))
+                AS unsupported_prior_jobs,
+             (SELECT COUNT(*) FROM unified_provider_links
+              WHERE discord_user_id=$1 AND provider='trucky') AS trucky_links,
+             (SELECT COUNT(*) FROM unified_v2_production_credit_ledger
+              WHERE discord_user_id=$1) AS other_ledger_credits,
+             COALESCE((SELECT combined_real_miles FROM
+               unified_v2_production_mileage_totals WHERE discord_user_id=$1),0)
+                 AS linked_combined_real,
+             COALESCE((SELECT trucky_race_miles FROM
+               unified_v2_production_mileage_totals WHERE discord_user_id=$1),0)
+                 AS linked_race
+    """,user)
+    if not facts:
+        return False
+    if any(int(facts[key]) for key in (
+            "unsupported_prior_jobs", "trucky_links", "other_ledger_credits")):
+        return False
+    try:
+        real=Decimal(str(facts["real_miles"]))
+        jobs=Decimal(str(facts["accounted_jobs_miles"]))
+        combined=Decimal(str(facts["linked_combined_real"]))
+        race=Decimal(str(facts["linked_race"]))
+    except (TypeError,ValueError,InvalidOperation,KeyError):
+        return False
+    return (all(x.is_finite() and x>=0 for x in (real,jobs,combined,race))
+            and real==jobs and combined==0 and race==0)
