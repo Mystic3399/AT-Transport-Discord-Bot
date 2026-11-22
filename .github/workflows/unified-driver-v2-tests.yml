@@ -26,7 +26,7 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install pytest
       - name: Compile modules
-        run: python -m compileall -q world_of_trucks_policy_v2.py unified_real_mileage_audit_v2.py unified_real_mileage_db_audit_v2.py company_mods_eligibility_v2.py company_mods_mileage_audit_v2.py trucky_verified_job_candidate_v2.py trucky_race_evidence_review_v2.py pending_race_mileage_v2.py pending_driver_history_v2.py historical_mileage_preview_v2.py mileage_audit_confirmation_v2.py trucky_jobs_api_v2.py held_mileage_approval_v2.py trucky_race_overlap_guard_v2.py account_unlink.py trucky_linked_allocation_v2.py bot.py automatic_mileage_source_recovery_v2.py automatic_linked_mileage_v2.py
+        run: python -m compileall -q world_of_trucks_policy_v2.py unified_real_mileage_audit_v2.py unified_real_mileage_db_audit_v2.py company_mods_eligibility_v2.py company_mods_mileage_audit_v2.py trucky_verified_job_candidate_v2.py trucky_race_evidence_review_v2.py pending_race_mileage_v2.py pending_driver_history_v2.py historical_mileage_preview_v2.py mileage_audit_confirmation_v2.py trucky_jobs_api_v2.py held_mileage_approval_v2.py trucky_race_overlap_guard_v2.py account_unlink.py trucky_linked_allocation_v2.py bot.py automatic_mileage_source_recovery_v2.py automatic_linked_mileage_v2.py automatic_mileage_holding_v2.py driver_membership_v2.py
       - name: Run isolated mileage and WoTr regression tests
         run: |
           python -m pytest -q \
@@ -43,4 +43,6 @@ jobs:
             tests/test_trucky_race_overlap_guard_v2.py \
             tests/test_mileage_audit_command_entry_v2.py \
             tests/test_mileage_audit_confirmation_v2.py \
-            tests/test_automatic_mileage_source_recovery_v2.py
+            tests/test_automatic_mileage_source_recovery_v2.py \
+            tests/test_automatic_mileage_holding_v2.py \
+            tests/test_driver_membership_v2.py
