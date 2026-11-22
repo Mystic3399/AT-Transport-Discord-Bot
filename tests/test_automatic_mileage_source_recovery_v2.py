@@ -146,3 +146,63 @@ class VerifiedTimeOnlyReconciliationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("driver_verifications",body)
         self.assertIn("v.status='completed'",body)
         self.assertIn("v.completed_at IS NOT NULL",body)
+
+
+class FreshCompanyMembershipRecovery(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_verified_active_company_account_can_retry_now(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+        cache={}
+        look=AsyncMock(return_value={"success":True,"belongs_to_at":True})
+        row={"discord":"In server","trucksbook_link_conflict":False}
+        self.assertTrue(await current_trucksbook_member("553238",row,look,cache,now=NOW))
+        look.assert_awaited_once_with(553238)
+        self.assertTrue(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW+timedelta(seconds=119)))
+        self.assertEqual(look.await_count,1)
+        self.assertTrue(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW+timedelta(seconds=125)))
+        self.assertEqual(look.await_count,2)
+
+    async def test_departed_discord_or_unverified_owner_cannot_retry(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+        look=AsyncMock(return_value={"success":True,"belongs_to_at":True})
+        for row in (None,{},{"discord":"Not in server"},
+                    {"discord":"In server","trucksbook_link_conflict":True}):
+            self.assertFalse(await current_trucksbook_member("553238",row,look,{}))
+        for account in ("", "0", "A&T Mystic3399", " 553238"):
+            self.assertFalse(await current_trucksbook_member(
+                account,{"discord":"In server"},look,{}))
+        look.assert_not_awaited()
+
+    async def test_missing_positive_membership_never_credits(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+        row={"discord":"In server","trucksbook_link_conflict":False}
+        for value in (None,{},{"success":True,"belongs_to_at":False},
+                      {"success":False,"belongs_to_at":True}):
+            look=AsyncMock(return_value=value)
+            self.assertFalse(await current_trucksbook_member(
+                "553238",row,look,{},now=NOW))
+        async def broken(_):
+            raise RuntimeError("API not available")
+        self.assertFalse(await current_trucksbook_member(
+            "553238",row,broken,{},now=NOW))
+
+    async def test_negative_status_refreshes_after_ten_minutes(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+        cache={}
+        look=AsyncMock(side_effect=[
+            {"success":True,"belongs_to_at":False},
+            {"success":True,"belongs_to_at":True}])
+        row={"discord":"In server"}
+        self.assertFalse(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW))
+        self.assertFalse(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW+timedelta(minutes=9)))
+        self.assertEqual(look.await_count,1)
+        self.assertTrue(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW+timedelta(minutes=11)))
+        self.assertEqual(look.await_count,2)
