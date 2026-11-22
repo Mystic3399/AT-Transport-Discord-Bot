@@ -4606,6 +4606,10 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
     if str(message_limit).upper()=='CONFIRM':
         await ctx.invoke(mileage_apply,confirmation='CONFIRM')
         return
+    # Full evidence reports are opt-in; the default fits on one mobile screen.
+    show_details = str(message_limit).upper() == "DETAILS"
+    if show_details:
+        message_limit = "0"
     target_driver_id=None
     driver_match=re.fullmatch(r'<@!?([0-9]{1,20})>',str(message_limit))
     if driver_match and int(driver_match[1])>0:
@@ -4625,19 +4629,16 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
         return
 
     if scope not in ("configured", "all"):
-        await ctx.reply("Use `!mileageaudit` for the four mileage channels, or "
-                        "`!mileageaudit 0 all` for a full-server audit.", mention_author=False)
+        await ctx.reply("Use `!mileageaudit` for configured tracking channels, "
+                        "or `!mileageaudit DETAILS` for the full report.", mention_author=False)
         return
     audit_channels = [channel for channel in ctx.guild.text_channels
                       if scope == "all" or channel.id in MILEAGE_AUDIT_CHANNEL_IDS]
     unavailable_channels = (0 if scope == "all" else len(
         set(MILEAGE_AUDIT_CHANNEL_IDS) - {c.id for c in audit_channels}
     ))
-    await ctx.reply(
-        "🔎 Starting a " + ("server-wide" if scope == "all" else "four-channel mileage")
-        + " dry-run audit. No mileage will be changed.",
-        mention_author=False,
-    )
+    # Avoid a second multi-message progress post for an ordinary audit.
+    # Detailed scanning is still visible in service logs.
 
     scanned = 0
     matched = 0
@@ -4846,71 +4847,88 @@ async def mileage_audit(ctx, message_limit: str = "0", scope: str = "configured"
     race=await read_pending_race(db_pool,target_driver_id)
     from mileage_audit_confirmation_v2 import audit_confirmation_guidance, read_trucky_allocation_audit
     trucky_allocation=await read_trucky_allocation_audit(db_pool,target_driver_id)
-    await ctx.send(
-        "✅ **Dry-run audit complete — no mileage changed.**\n"
-        f"Mileage channels scanned: `{channels_scanned:,}`\n"
-        f"Configured channels unavailable: `{unavailable_channels:,}`\n"
-        f"Channels skipped (permissions/API): `{channels_skipped:,}`\n"
-        f"Webhook jobs inspected: `{scanned:,}`\n"
-        f"Previously processed Real jobs matched: `{matched:,}`\n"
-        f"Candidates found/updated this run: `{staged:,}`\n"
-        f"Webhook jobs absent from processed_jobs: `{missing_from_database:,}`\n"
-        f"Missing Real, WoTr jobs staged: `{missing_event_jobs_staged:,}`\n"
-        f"Missing Real jobs staged (incident / verified history): `{missing_real_jobs_staged:,}`\n"
-        f"Jobs skipped — driver not linked: `{unlinked_event_jobs:,}`\n"
-        f"Pending corrections: `{int(totals['jobs']):,}` jobs across "
-        f"`{int(totals['drivers']):,}` drivers\n"
-        f"Gross pending Real Miles before evidence and duplicate checks: `{int(totals['missing_miles']):,}`\n"
-        f"Missing Race Miles (Trucky, stored pending): `{race['verified_pending_miles']:,.2f}` across `{race['verified_pending_jobs']:,}` jobs\n"
-        f"Race miles stored without verified ownership: `{race['unverified_miles']:,.2f}` across `{race['unverified_jobs']:,}` jobs\n"
-        f"Race observations held for classification/conflicts: `{race['classification_pending_jobs']+race['conflicting_jobs']:,}` jobs\n"
-        f"Historical Real jobs held for baseline review: `{historical_real_held_jobs:,}` / `{historical_real_held_miles:,}` miles\n\n"
-        f"**CONFIRM will apply: `{preview['addition']:,}` net Real Miles across `{preview['jobs']:,}` reviewed jobs.**\n"
-        f"Held for source, ownership or cross-provider evidence: `{preview['held_jobs']:,}` jobs.\n"
-        "Unexplained balances are already in existing totals and are not added again.\n"
-        + audit_confirmation_guidance(preview)
-    )
-    await ctx.send(
-        "**Trucky credits reviewed alongside TrucksBook**\n"
-        + f"Already credited Real: `{float(trucky_allocation['credited_real_miles']):,.2f}` miles / `{trucky_allocation['credited_real_jobs']}` jobs\n"
-        + f"Already credited Race: `{float(trucky_allocation['credited_race_miles']):,.2f}` miles / `{trucky_allocation['credited_race_jobs']}` jobs\n"
-        + f"Real jobs held for cross-provider/historical reconciliation: `{trucky_allocation['held_real_jobs']}`\n"
-        + "Held jobs remain stored. Batch CONFIRM does not release them. "
-        "Use !mileageaudit HELD @Driver JOB_ID to review a verified held job individually."
-    )
-    for offset in range(0,len(preview['drivers']),15):
-        lines=[f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + **{d['addition']:,}** = {d['proposed_real_miles']:,} Real miles ({d['jobs']} jobs)"
-               for d in preview['drivers'][offset:offset+15]]
-        await ctx.send('**Reviewed additions by driver**\n'+'\n'.join(lines),allowed_mentions=discord.AllowedMentions.none())
-    if preview.get('job_rows') or preview.get('held_reasons'):
-        await ctx.send(f"Reviewed batch #{preview['preview_id']} — exact job-level additions:",
-            file=discord.File(BytesIO(json.dumps({'preview_id':preview['preview_id'],
-                'drivers':preview['drivers'],'jobs':preview['job_rows'],
-                'held_reasons':preview['held_reasons'],
-                'mileage_changed':False},indent=2).encode()),filename='mileageaudit-preview.json'),
-            allowed_mentions=discord.AllowedMentions.none())
+    from collections import Counter
+    hold_counts = Counter(preview["held_reasons"].values())
+    hold_labels = {
+        "missing_or_mismatched_trucksbook_link": "Account link missing or mismatched",
+        "unapproved_webhook_source": "Unverified tracker source",
+        "route_evidence_pending": "Missing route or delivery evidence",
+        "cross_provider_review_required": "Cross-provider check needed",
+        "existing_job_requires_manual_route_review": "Existing job requires route review",
+        "ambiguous_journey": "Possible duplicate journey",
+        "conflicting_route_evidence": "Conflicting tracker routes",
+        "duplicate_provider_job": "Already counted via another provider",
+        "historical_balance_pending": "Older mileage needs baseline check",
+        "historical_route_coverage_pending": "Older jobs lack route coverage",
+    }
+    issue_lines = [f"• {hold_labels.get(reason, reason.replace('_', ' ').capitalize())}: **{count} jobs**"
+                   for reason, count in hold_counts.most_common(4)]
+    if len(hold_counts) > 4:
+        issue_lines.append(f"• Other reasons: **{sum(hold_counts.values()) - sum(v for _,v in hold_counts.most_common(4))} jobs**")
+    if not issue_lines:
+        issue_lines = ["• No repairs currently blocked in this preview"]
+    missing_channels = sorted(set(MILEAGE_AUDIT_CHANNEL_IDS) - {c.id for c in audit_channels})
+    result_lines = [
+        "🚛 **A&T Mileage Audit**",
+        f"Source channels read: **{channels_scanned}**",
+        f"Jobs checked: **{scanned:,}** | Already recorded: **{matched:,}**",
+        f"Possible missing mileage: **{int(totals['jobs']):,} jobs / {int(totals['missing_miles']):,} miles** (not automatically payable)",
+        f"✅ **Safe to approve: {preview['jobs']:,} jobs / {preview['addition']:,} Real Miles**",
+        f"⏸ **Needs review: {preview['held_jobs']:,} jobs**",
+        *issue_lines,
+        f"Unlinked jobs skipped: **{unlinked_event_jobs}**",
+    ]
+    if preview["jobs"]:
+        result_lines.append("**Next:** `!mileageaudit CONFIRM` within 20 minutes, in this channel.")
+    else:
+        result_lines.append("**No mileage will be added by CONFIRM.** Check the reasons above.")
+    if missing_channels:
+        result_lines.append(f"Note: {len(missing_channels)} older configured channel IDs were not found; the {channels_scanned} accessible channels were still audited.")
+    result_lines.append("For the job-by-job files: `!mileageaudit DETAILS`")
+    await ctx.send("\n".join(result_lines), allowed_mentions=discord.AllowedMentions.none())
 
-    inventory=await read_pending_account_inventory(db_pool,target_driver_id)
-    if inventory['accounts']:
+    if show_details:
         await ctx.send(
-            f"Stored Trucky evidence: **{len(inventory['accounts'])} accounts**, "
-            f"**{inventory['accounts_without_link']} need account linking**. "
-            "The attachment separates pending Real and Race miles by stable account ID. "
-            "Names are review labels, not ownership proof. These are not approved additions; "
-            "Real miles may already be credited through TrucksBook. Account ownership must "
-            "be verified against existing tracking links before any credits are applied.",
-            file=discord.File(BytesIO(json.dumps(inventory,indent=2).encode()),
-                              filename='pending-provider-accounts.json'),
-            allowed_mentions=discord.AllowedMentions.none())
+            "**Detailed provider reconciliation**\n"
+            f"Trucky already credited: {float(trucky_allocation['credited_real_miles']):,.2f} Real / "
+            f"{float(trucky_allocation['credited_race_miles']):,.2f} Race miles\n"
+            f"Trucky Real still held: {trucky_allocation['held_real_jobs']} jobs\n"
+            f"Race without proven ownership: {race['unverified_miles']:,.2f} miles "
+            f"across {race['unverified_jobs']} jobs\n"
+            "Held or unidentified jobs are not awarded automatically."
+        )
+        for offset in range(0, len(preview["drivers"]), 15):
+            lines = [f"<@{d['discord_user_id']}>: {d['current_real_miles']:,} + "
+                     f"{d['addition']:,} Real Miles ({d['jobs']} jobs)"
+                     for d in preview["drivers"][offset:offset+15]]
+            await ctx.send("**Approved preview by driver**\n" + "\n".join(lines),
+                           allowed_mentions=discord.AllowedMentions.none())
+        await ctx.send(
+            f"Reviewed batch #{preview['preview_id']} — full eligibility details:",
+            file=discord.File(BytesIO(json.dumps({
+                "preview_id":preview["preview_id"], "drivers":preview["drivers"],
+                "jobs":preview["job_rows"], "held_reasons":preview["held_reasons"],
+                "mileage_changed":False,
+            }, indent=2).encode()), filename="mileageaudit-preview.json"),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+        inventory=await read_pending_account_inventory(db_pool,target_driver_id)
+        if inventory["accounts"]:
+            await ctx.send(
+                f"Trucky account inventory: {len(inventory['accounts'])} accounts; "
+                f"{inventory['accounts_without_link']} need a verified existing account link.",
+                file=discord.File(BytesIO(json.dumps(inventory,indent=2).encode()),
+                                  filename="pending-provider-accounts.json"),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        await send_mileage_reconciliation(ctx, source_jobs, {
+            "scope": scope, "message_limit_per_channel": message_limit,
+            "channels_scanned": channels_scanned, "channels_skipped": channels_skipped,
+            "configured_channels_unavailable": unavailable_channels,
+            "webhook_jobs_inspected": scanned,
+        })
 
-    await send_mileage_reconciliation(ctx, source_jobs, {
-        "scope": scope, "message_limit_per_channel": message_limit,
-        "channels_scanned": channels_scanned, "channels_skipped": channels_skipped,
-        "configured_channels_unavailable": unavailable_channels,
-        "webhook_jobs_inspected": scanned,
-    })
-
-    if unresolved_links:
+    if unresolved_links and show_details:
         # Read-only evidence for staff: do not change ownership or credit guessed links.
         async with db_pool.acquire() as connection:
             saved_links = await connection.fetch(
