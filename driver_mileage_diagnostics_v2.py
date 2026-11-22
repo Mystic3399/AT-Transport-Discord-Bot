@@ -53,13 +53,16 @@ async def inspect_driver(conn,discord_id):
                    COUNT(DISTINCT h.provider_job_id) FILTER (
                      WHERE p.job_id IS NULL
                        AND LOWER(COALESCE(h.evidence->>'stats_type','')) LIKE 'real%'
-                   )::BIGINT AS uncredited_real_sources
+                   )::BIGINT AS uncredited_real_sources,
+                   COUNT(DISTINCT h.provider_job_id) FILTER (
+                     WHERE p.job_id IS NOT NULL AND p.discord_user_id<>$2
+                   )::BIGINT AS processed_to_other_driver
             FROM pending_provider_job_history_v2 h
             LEFT JOIN processed_jobs p ON p.job_id=h.provider_job_id
             WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
               AND h.provider_account_id=ANY($1::text[])
             GROUP BY h.provider_account_id ORDER BY h.provider_account_id
-        """,candidates)
+        """,candidates,discord_id)
         holds=await conn.fetch("""
             SELECT provider_account_id,state,reason_code,COUNT(*)::BIGINT AS jobs
             FROM automatic_mileage_holding_v2
@@ -98,6 +101,8 @@ def format_driver_report(member_id,facts,company_confirmed=None):
         lines.append(f"Source history for ID {row['provider_account_id']}: "
                      f"**{fmt(row['source_jobs'])} captured / "
                      f"{fmt(row['uncredited_real_sources'])} uncredited Real job(s)**")
+        if row.get('processed_to_other_driver'):
+            lines.append(f"⚠️ **{fmt(row['processed_to_other_driver'])} job(s) attributed to another Discord driver.**")
     for row in facts.get('holds_by_id',[])[:4]:
         reason=str(row['reason_code']).replace('_',' ')
         lines.append(f"• Held: **{fmt(row['jobs'])}** — {reason}")
