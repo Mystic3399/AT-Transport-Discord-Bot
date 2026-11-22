@@ -5039,6 +5039,118 @@ async def mileage_driver_diagnostic(ctx, member: discord.Member):
                     allowed_mentions=discord.AllowedMentions.none())
 
 
+@bot.command(name="driveraudit")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+@commands.cooldown(1, 15, commands.BucketType.guild)
+async def specific_driver_mileage_audit(ctx, driver: discord.Member):
+    """Read-only exact provider-ID audit for a missing-mileage driver."""
+    if ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    user = int(driver.id)
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+              (SELECT trucksbook_user_id::text FROM driver_links
+               WHERE discord_user_id=$1) AS legacy_account,
+              (SELECT trucksbook_name FROM driver_links
+               WHERE discord_user_id=$1) AS legacy_name,
+              (SELECT provider_account_id FROM unified_provider_links
+               WHERE provider='trucksbook' AND discord_user_id=$1) AS unified_account,
+              (SELECT verified_at FROM unified_provider_links
+               WHERE provider='trucksbook' AND discord_user_id=$1) AS unified_verified_at,
+              (SELECT provider_account_id FROM unified_provider_links
+               WHERE provider='trucky' AND discord_user_id=$1) AS trucky_account,
+              COALESCE((SELECT real_miles FROM driver_progress
+               WHERE discord_user_id=$1),0) AS real_miles,
+              (SELECT COUNT(*) FROM processed_jobs
+               WHERE discord_user_id=$1 AND accepted_distance>0
+                 AND LOWER(statistics) LIKE 'real%') AS real_jobs
+        """,user)
+        legacy = row['legacy_account'] if row else None
+        unified = row['unified_account'] if row else None
+        suspended = (row and row['legacy_name']
+                     and row['legacy_name'] == f'__unlinked_driver_{user}__')
+        conflict = bool(legacy and unified and str(legacy)!=str(unified))
+        account = None if conflict or suspended else str(legacy or unified or '') or None
+        source = None
+        pending = []
+        name_only = 0
+        if account:
+            source = await conn.fetchrow("""
+                SELECT COUNT(DISTINCT h.provider_job_id)::BIGINT AS jobs,
+                  COUNT(DISTINCT h.provider_job_id)
+                    FILTER (WHERE p.job_id IS NULL)::BIGINT AS unprocessed_jobs
+                FROM pending_provider_job_history_v2 h
+                LEFT JOIN processed_jobs p ON p.job_id=h.provider_job_id
+                WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
+                  AND h.provider_account_id=$1
+            """,account)
+            pending = await conn.fetch("""
+                SELECT reason_code,COUNT(*)::BIGINT AS jobs
+                FROM automatic_mileage_holding_v2
+                WHERE provider='trucksbook' AND provider_account_id=$1
+                  AND state<>'credited'
+                GROUP BY reason_code ORDER BY COUNT(*) DESC LIMIT 4
+            """,account)
+        # A display name is never used to award jobs. Report discrepancies
+        # so admins can distinguish a wrong provider ID from no jobs at all.
+        if row and row['legacy_name'] and not suspended:
+            name_only = await conn.fetchval("""
+                SELECT COUNT(DISTINCT provider_job_id)::BIGINT
+                FROM pending_provider_job_history_v2
+                WHERE provider='trucksbook' AND source_kind='verified_webhook_source'
+                  AND LOWER(BTRIM(evidence->>'candidate_driver_label'))=LOWER(BTRIM($1))
+                  AND provider_account_id IS DISTINCT FROM $2
+            """,row['legacy_name'],account)
+    if conflict:
+        account_caption = "Conflicting legacy and unified TrucksBook IDs — no automatic assignment"
+    elif suspended:
+        account_caption = "Previously unlinked — retained jobs cannot be awarded"
+    elif account:
+        kind = ("unified verified" if row['unified_verified_at'] is not None
+                else "legacy numeric link" if legacy else "unverified account reference")
+        account_caption = f"`{account}` ({kind})"
+    else:
+        account_caption = "No saved numeric TrucksBook account ID"
+    report = driver_membership_snapshot_v2.get(user) or {}
+    lines = [
+        f"🚛 **A&T Driver Mileage Check — {discord.utils.escape_markdown(driver.display_name)}**",
+        f"TrucksBook account: {account_caption}",
+        f"Recorded Real Miles: **{int(row['real_miles'] or 0):,}** | "
+        f"Recorded Real Jobs: **{int(row['real_jobs'] or 0):,}**",
+        f"Trucky account: **{'linked' if row['trucky_account'] else 'not linked'}**",
+        f"A&T membership: **{report.get('company','not checked')}** "
+        "(last periodic check)",
+    ]
+    if account:
+        lines.append(
+            f"Trusted TrucksBook source jobs matching this exact ID: "
+            f"**{int(source['jobs'] or 0):,}** "
+            f"({int(source['unprocessed_jobs'] or 0):,} not in processed jobs)"
+        )
+    if name_only:
+        lines.append(
+            f"⚠️ **{int(name_only):,} source job(s) match the saved name but NOT the ID.** "
+            "These are NOT assigned; names do not prove ownership."
+        )
+    for reason in pending:
+        lines.append(f"• Pending {reason['reason_code'].replace('_',' ')}: "
+                     f"**{int(reason['jobs']):,}**")
+    if not account:
+        lines.append("No history can be paid without a verified numeric account match.")
+    elif not source or not source['jobs']:
+        lines.append("No trusted delivery records currently match this exact account ID.")
+    elif source['unprocessed_jobs']:
+        lines.append("Stored uncredited deliveries exist. Automatic recovery retries "
+                     "only those passing membership, source and duplicate checks.")
+    else:
+        lines.append("All retained source jobs for this account appear in processed_jobs; "
+                     "check whether the saved Real balance needs a separate ledger audit.")
+    await ctx.reply("\n".join(lines),mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none())
+
+
 @bot.command(name="mileageaudit")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
