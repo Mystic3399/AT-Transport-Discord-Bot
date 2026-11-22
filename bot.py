@@ -3429,7 +3429,14 @@ async def ingest_trucky_company_jobs():
         try:
             from trucky_linked_allocation_v2 import allocate_saved_linked_history
             await replay_saved_trucksbook_jobs()
-            linked_credits = await allocate_saved_linked_history(db_pool)
+            # Eligibility is membership on either A&T tracker, tied to the
+            # same Discord driver. A names-only match cannot release a job.
+            alternate_members = frozenset(int(uid) for uid, status
+                in driver_membership_snapshot_v2.items()
+                if status.get("trucksbook") == "member"
+                   and status.get("discord") == "In server")
+            linked_credits = await allocate_saved_linked_history(
+                db_pool, alternate_member_ids=alternate_members)
             if linked_credits['status'] != 'disabled':
                 print('TRUCKY LINKED ALLOCATION ' + json.dumps(linked_credits,sort_keys=True),flush=True)
             guild = bot.get_guild(GUILD_ID)
@@ -4826,6 +4833,41 @@ async def trucky_logbook_audit(ctx):
         f"{trucky_winners} Trucky, {len(winners) - trucky_winners} TrucksBook (including ties).\n"
         f"No authenticated vault or credit record: {len(audited_ids - vault_ids - credited_ids)}",
         allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@bot.command(name="mileagequeue")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+@commands.cooldown(1, 20, commands.BucketType.guild)
+async def mileage_queue_status(ctx):
+    """Compact overview of source jobs automatically waiting for verification."""
+    if ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    import automatic_mileage_holding_v2 as holding
+    async with db_pool.acquire() as conn:
+        rows = await holding.holding_summary(conn)
+    by_state={}
+    for row in rows:
+        by_state[row["state"]]=by_state.get(row["state"],0)+int(row["jobs"])
+    waiting_link=by_state.get('awaiting_account_link',0)
+    waiting_member=by_state.get('awaiting_company_membership',0)
+    evidence=sum(by_state.get(kind,0) for kind in (
+        'awaiting_source_evidence','awaiting_duplicate_evidence',
+        'awaiting_historical_baseline','provider_conflict'))
+    credited=by_state.get('credited',0)
+    excluded=by_state.get('excluded',0)
+    await ctx.reply(
+        "🚛 **A&T Automatic Mileage Queue**\n"
+        f"✅ Automatically processed: **{credited:,} jobs**\n"
+        f"🔗 Waiting for verified account link: **{waiting_link:,}**\n"
+        f"👷 Waiting for A&T membership: **{waiting_member:,}**\n"
+        f"📋 Waiting for independent source/duplicate evidence: **{evidence:,}**\n"
+        f"🚫 Invalid/excluded: **{excluded:,}**\n"
+        "Linked, eligible deliveries are retried automatically. No CONFIRM is needed. "
+        "The queue stores uncredited jobs until ownership, current A&T membership "
+        "and nonduplicate delivery evidence can be established.",
+        mention_author=False
     )
 
 
