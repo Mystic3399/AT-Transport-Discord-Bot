@@ -77,3 +77,57 @@ class AutomaticSourceProofTests(unittest.TestCase):
                          "audit_account_matches","has_valid_tracking_link",
                          "read_only_database_fingerprint","record_real_job"):
             self.assertIn(required,code)
+
+
+class VerifiedTimeOnlyReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_automatically_credits_independent_verified_real_without_route(self):
+        from decimal import Decimal
+        from unittest.mock import AsyncMock,patch
+        from automatic_linked_mileage_v2 import reconcile_trucksbook
+        source={"evidence":dict(stats_type="Real",distance=140,unit="mi",
+                source_message_at=(NOW-timedelta(hours=6)).isoformat()),
+                "provider_account_id":"553238"}
+        credits=[{"provider_job_id":"200", "miles":Decimal("190"),
+                  "delivered_at":NOW}]
+        conn=SimpleNamespace(fetch=AsyncMock(side_effect=[[source],credits]))
+        with patch("mileage_audit_confirmation_v2.audit_account_matches",
+                   new_callable=AsyncMock,return_value=True) as link:
+            self.assertEqual(await reconcile_trucksbook(conn,"100",42,140),
+                             (Decimal(140),None))
+            link.assert_awaited_once()
+
+    async def test_nearby_real_credit_cannot_be_duplicated_without_route(self):
+        from decimal import Decimal
+        from unittest.mock import AsyncMock,patch
+        from automatic_linked_mileage_v2 import reconcile_trucksbook
+        source={"evidence":dict(stats_type="Real",distance=140,unit="mi",
+                source_message_at=(NOW-timedelta(minutes=20)).isoformat()),
+                "provider_account_id":"553238"}
+        credits=[{"provider_job_id":"200", "miles":Decimal("190"),
+                  "delivered_at":NOW}]
+        conn=SimpleNamespace(fetch=AsyncMock(side_effect=[[source],credits]))
+        with patch("mileage_audit_confirmation_v2.audit_account_matches",
+                   new_callable=AsyncMock,return_value=True):
+            self.assertEqual(await reconcile_trucksbook(conn,"100",42,140),
+                             (None,"route_evidence_pending"))
+
+    async def test_unverified_account_cannot_use_temporal_fallback(self):
+        from unittest.mock import AsyncMock,patch
+        from automatic_linked_mileage_v2 import reconcile_trucksbook
+        source={"evidence":dict(stats_type="Real",distance=140,unit="mi",
+                source_message_at=(NOW-timedelta(hours=6)).isoformat()),
+                "provider_account_id":"553238"}
+        conn=SimpleNamespace(fetch=AsyncMock(return_value=[source]))
+        with patch("mileage_audit_confirmation_v2.audit_account_matches",
+                   new_callable=AsyncMock,return_value=False):
+            self.assertEqual(await reconcile_trucksbook(conn,"100",42,140),
+                             (None,"unverified_trucksbook_account"))
+
+    def test_legacy_completed_registration_is_considered_for_auto_ownership(self):
+        tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
+        scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                  and n.name=="replay_saved_trucksbook_jobs")
+        body=ast.unparse(scan)
+        self.assertIn("driver_verifications",body)
+        self.assertIn("v.status='completed'",body)
+        self.assertIn("v.completed_at IS NOT NULL",body)
