@@ -3154,6 +3154,37 @@ async def deliver_automatic_linked_progression(guild):
         await refresh_hall_of_fame_display()
 
 
+# A short-lived cache for positive A&T TrucksBook membership on the exact
+# verified provider account. Unknown/nonmember lookups never release miles.
+tb_recovery_membership_cache = {}
+
+
+async def verify_current_trucksbook_recovery_membership(account, report):
+    """Fresh affirmative membership; never uses a display name or cached absence."""
+    if (not isinstance(report, dict) or report.get("discord") != "In server"
+            or report.get("trucksbook_link_conflict")
+            or not isinstance(account, str) or not account.isdecimal()
+            or int(account) <= 0):
+        return False
+    now = datetime.now(timezone.utc)
+    cached = tb_recovery_membership_cache.get(account)
+    if cached:
+        when, result = cached
+        # Positive checks are deliberately short-lived. A driver who leaves
+        # will not keep earning for hours on a stale six-hour membership poll.
+        seconds = 120 if result else 600
+        if (now - when).total_seconds() < seconds:
+            return result
+    try:
+        result = await fetch_trucksbook_profile(int(account))
+        active = (result.get("success") is True
+                  and result.get("belongs_to_at") is True)
+    except Exception:
+        active = False
+    tb_recovery_membership_cache[account] = (now, active)
+    return active
+
+
 async def replay_saved_trucksbook_jobs():
     """Automatically restore proven new, uncredited TrucksBook Real deliveries.
 
@@ -3268,7 +3299,16 @@ async def replay_saved_trucksbook_jobs():
         # Current A&T membership on either tracker is necessary before credit.
         # A departed driver keeps the same durable pending source job.
         report = driver_membership_snapshot_v2.get(user)
-        if not report or report.get("company") != "Active company driver":
+        current_member = (report is not None
+                          and report.get("discord") == "In server"
+                          and report.get("company") == "Active company driver")
+        if not current_member:
+            # The periodic membership snapshot may be up to six hours old.
+            # A fresh positive check against the EXACT independently verified
+            # TrucksBook account can safely release a now-active driver.
+            current_member = await verify_current_trucksbook_recovery_membership(
+                account, report)
+        if not current_member:
             unresolved += 1
             reasons['company_membership_unconfirmed'] += 1
             queued[job_id]=(account,user,'real',evidence['distance'],
