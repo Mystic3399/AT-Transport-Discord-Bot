@@ -117,3 +117,57 @@ def format_driver_report(member_id,facts,company_confirmed=None):
                      "Source-history counts are NOT approved missing miles.")
     lines.append("*Diagnostic only: no balances, links, jobs or roles changed.*")
     return "\n".join(lines)
+
+
+async def scan_zero_mile_driver_sources(conn,limit=40):
+    """Read-only startup inventory of linked drivers whose cards show zero.
+
+    The source count uses exact numeric provider IDs and does not reassign
+    display-name matches. The result is diagnostic, not payable mileage.
+    """
+    rows=await conn.fetch("""
+        WITH ids AS (
+          SELECT discord_user_id FROM driver_links
+          UNION SELECT discord_user_id FROM unified_provider_links
+          WHERE provider='trucksbook'
+        ), linked AS (
+          SELECT ids.discord_user_id,d.trucksbook_name,
+            COALESCE(d.trucksbook_user_id::text,
+              CASE WHEN p.verified_at IS NOT NULL THEN p.provider_account_id END,
+              CASE WHEN v.status='completed' AND v.completed_at IS NOT NULL
+                   THEN v.trucksbook_user_id::text END) AS tb_id
+          FROM ids
+          LEFT JOIN driver_links d USING(discord_user_id)
+          LEFT JOIN unified_provider_links p
+            ON p.discord_user_id=ids.discord_user_id AND p.provider='trucksbook'
+          LEFT JOIN driver_verifications v USING(discord_user_id)
+          WHERE (d.discord_user_id IS NULL
+            OR d.trucksbook_name<>('__unlinked_driver_'||d.discord_user_id::text||'__'))
+        )
+        SELECT l.discord_user_id,l.trucksbook_name,l.tb_id,
+          COALESCE((SELECT real_miles FROM driver_progress
+                    WHERE discord_user_id=l.discord_user_id),0) AS real_miles,
+          (SELECT COUNT(*) FROM processed_jobs j
+           WHERE j.discord_user_id=l.discord_user_id
+             AND LOWER(j.statistics) LIKE 'real%') AS processed_jobs,
+          (SELECT COUNT(DISTINCT h.provider_job_id)
+           FROM pending_provider_job_history_v2 h
+           WHERE h.provider='trucksbook'
+             AND h.source_kind='verified_webhook_source'
+             AND h.provider_account_id=l.tb_id) AS source_jobs,
+          (SELECT COUNT(DISTINCT h.provider_job_id)
+           FROM pending_provider_job_history_v2 h
+           WHERE h.provider='trucksbook'
+             AND h.source_kind='verified_webhook_source'
+             AND h.provider_account_id=l.tb_id
+             AND LOWER(COALESCE(h.evidence->>'stats_type','')) LIKE 'real%'
+             AND NOT EXISTS(SELECT 1 FROM processed_jobs j
+                            WHERE j.job_id=h.provider_job_id))
+            AS uncredited_real_sources
+        FROM linked l
+        WHERE COALESCE((SELECT real_miles FROM driver_progress
+                        WHERE discord_user_id=l.discord_user_id),0)=0
+        ORDER BY uncredited_real_sources DESC,l.discord_user_id
+        LIMIT $1
+    """,limit)
+    return [dict(row) for row in rows]
