@@ -304,3 +304,23 @@ class AccountedTrucksBookHistoricalBackfillTests(unittest.IsolatedAsyncioTestCas
         self.assertIn('record_real_job',code)
         self.assertIn('sync_member_progression_role',code)
         self.assertIn('sync_permanent_system_for_driver',code)
+
+
+class LinkedProfileZeroMileageDiagnostics(unittest.TestCase):
+    def test_admin_driveraudit_uses_exact_account_history_not_display_name_for_credit(self):
+        import ast
+        from pathlib import Path
+        root=Path(__file__).resolve().parents[1]
+        tree=ast.parse((root/'bot.py').read_text(encoding='utf-8'))
+        command=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                     and n.name=='specific_driver_mileage_audit')
+        code=ast.unparse(command)
+        self.assertIn('has_guild_permissions(administrator=True)',code)
+        self.assertIn('legacy_account',code)
+        self.assertIn('unified_account',code)
+        self.assertIn("provider_account_id = $1".replace(' = ','='),code)
+        self.assertIn('candidate_driver_label',code)
+        self.assertIn('unprocessed_jobs',code)
+        self.assertNotIn('record_real_job(',code)
+        self.assertNotIn('UPDATE driver_progress',code)
+        self.assertNotIn('INSERT INTO processed_jobs',code)
