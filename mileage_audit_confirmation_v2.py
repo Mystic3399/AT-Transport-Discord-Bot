@@ -129,6 +129,30 @@ async def audit_account_matches(conn, candidate, *, lock=False):
     if verified_owner is not None:
         return verified_owner == user
 
+    # Staff-reviewed Steam/profile ownership can survive a missing mirrored
+    # unified_provider_links row. Never accept a bare self-entered ID.
+    if await conn.fetchval("""
+        SELECT EXISTS (
+          SELECT 1 FROM unified_provider_claims c
+          JOIN unified_driver_profiles p USING (discord_user_id)
+          WHERE c.discord_user_id=$1 AND c.provider='trucksbook'
+            AND c.provider_account_id=$2 AND c.status='approved'
+            AND c.ownership_confirmed=TRUE AND c.membership_confirmed=TRUE
+            AND c.ownership_evidence_kind='trucksbook_staff_reviewed_profile_steam_mapping'
+            AND c.reviewed_at IS NOT NULL AND c.reviewed_by IS NOT NULL
+            AND p.status='active'
+            AND NOT EXISTS (
+              SELECT 1 FROM unified_provider_links l
+              WHERE l.provider='trucksbook'
+                AND (l.provider_account_id=$2 AND l.discord_user_id<>$1
+                  OR l.discord_user_id=$1 AND l.provider_account_id<>$2))
+            AND NOT EXISTS (
+              SELECT 1 FROM driver_links d
+              WHERE d.trucksbook_user_id::text=$2 AND d.discord_user_id<>$1)
+        )
+    """, user, account):
+        return True
+
     # Some older registrations recorded the ID on the completed verification
     # but left it blank on the active legacy link. Require both records.
     if not await conn.fetchval("""
