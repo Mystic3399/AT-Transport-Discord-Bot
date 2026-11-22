@@ -94,7 +94,7 @@ async def reconcile_trucky(conn, candidate):
               WHERE l.discord_user_id=p.discord_user_id AND l.provider='trucksbook'
                 AND l.provider_account_id=h.provider_account_id AND l.verified_at IS NOT NULL)
           )
-        WHERE p.discord_user_id=$1 AND LOWER(p.statistics)='real'
+        WHERE p.discord_user_id=$1 AND LOWER(p.statistics) LIKE 'real%'
           AND p.accepted_distance>0
         """, user)
     by_job = {}
@@ -180,7 +180,7 @@ async def reconcile_trucky(conn, candidate):
         SELECT b.snapshotted_at,
                COALESCE((SELECT real_miles FROM driver_progress WHERE discord_user_id=$1),0) AS total,
                COALESCE((SELECT SUM(accepted_distance) FROM processed_jobs
-                   WHERE discord_user_id=$1 AND LOWER(statistics)='real'
+                   WHERE discord_user_id=$1 AND LOWER(statistics) LIKE 'real%'
                      AND NOT EXISTS (SELECT 1 FROM unified_v2_production_mileage_decisions d
                          WHERE d.provider='trucksbook' AND d.provider_job_id=processed_jobs.job_id
                            AND d.discord_user_id=$1 AND d.decision='duplicate_provider_job'
@@ -191,7 +191,7 @@ async def reconcile_trucky(conn, candidate):
         LEFT JOIN unified_v2_production_mileage_baselines b ON b.discord_user_id=u.id
         """, user)
     processed_count = await conn.fetchval(
-        "SELECT COUNT(*) FROM processed_jobs WHERE discord_user_id=$1 AND LOWER(statistics)='real' AND accepted_distance>0",
+        "SELECT COUNT(*) FROM processed_jobs WHERE discord_user_id=$1 AND LOWER(statistics) LIKE 'real%' AND accepted_distance>0",
         user)
     if processed_count != len(comparable_jobs) and (
             baseline["snapshotted_at"] is None or candidate["delivered_at"] <= baseline["snapshotted_at"]):
