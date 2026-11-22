@@ -68,6 +68,14 @@ class AutomaticSourceProofTests(unittest.TestCase):
         self.assertIn("valid_temporal_trucksbook_observation",body)
         self.assertIn("mileage_type='race'",body)
 
+    def test_auto_replay_updates_leaderboard_once_per_batch(self):
+        tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
+        scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                  and n.name=="replay_saved_trucksbook_jobs")
+        code=ast.unparse(scan)
+        self.assertEqual(code.count("await refresh_driver_leaderboard(guild)"),1)
+        self.assertIn("affected_users",code)
+
     def test_automatic_replay_requires_snapshots_and_exact_accounts(self):
         tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
         scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
