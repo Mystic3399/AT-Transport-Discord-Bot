@@ -38,7 +38,9 @@ async def repair_approved_provider_links(pool):
                 if c["ownership_evidence_kind"] != PROOF.get(provider):
                     continue
                 result["eligible"] += 1
-                # Serialize per-owner repair before checking unique constraints.\n                await conn.execute("SELECT pg_advisory_xact_lock($1)", int(user))\n                # Prevent a cross-table mismatch from being silently overwritten.
+                # Serialize per-owner repair before checking unique constraints.
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", int(user))
+                # Prevent a cross-table mismatch from being silently overwritten.
                 conflict = await conn.fetchval("""
                     SELECT EXISTS(
                         SELECT 1 FROM unified_provider_links l
@@ -59,7 +61,7 @@ async def repair_approved_provider_links(pool):
                 if conflict:
                     result["conflicts"] += 1
                     continue
-                # The unique (discord_user_id,provider) index can race a second\n                # account insert. Lock the owner before checking conflicts.\n                await conn.execute("SELECT pg_advisory_xact_lock($1)", int(user))\n                updated = await conn.fetchval("""
+                updated = await conn.fetchval("""
                     INSERT INTO unified_provider_links
                         (provider,provider_account_id,discord_user_id,
                          provider_display_name,verified_at,verified_by)
