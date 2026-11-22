@@ -119,7 +119,7 @@ def format_driver_report(member_id,facts,company_confirmed=None):
     return "\n".join(lines)
 
 
-async def scan_zero_mile_driver_sources(conn,limit=40):
+async def scan_zero_mile_driver_sources(conn,limit=40,*,include_credited=False):
     """Read-only startup inventory of linked drivers whose cards show zero.
 
     The source count uses exact numeric provider IDs and does not reassign
@@ -165,9 +165,9 @@ async def scan_zero_mile_driver_sources(conn,limit=40):
                             WHERE j.job_id=h.provider_job_id))
             AS uncredited_real_sources
         FROM linked l
-        WHERE COALESCE((SELECT real_miles FROM driver_progress
-                        WHERE discord_user_id=l.discord_user_id),0)=0
-        ORDER BY uncredited_real_sources DESC,l.discord_user_id
+        WHERE ($2::boolean OR COALESCE((SELECT real_miles FROM driver_progress
+                        WHERE discord_user_id=l.discord_user_id),0)=0)
+        ORDER BY uncredited_real_sources DESC,real_miles ASC,l.discord_user_id
         LIMIT $1
-    """,limit)
+    """,limit,include_credited)
     return [dict(row) for row in rows]
