@@ -3508,6 +3508,11 @@ async def ingest_trucky_company_jobs():
             print('TRUCKY_HISTORY_SWEEP ' + json.dumps(sweep,sort_keys=True),flush=True)
         try:
             from trucky_linked_allocation_v2 import allocate_saved_linked_history
+            from repair_registered_provider_links_v2 import repair_approved_provider_links
+            repair = await repair_approved_provider_links(db_pool)
+            if repair["repaired"] or repair["conflicts"]:
+                print("REGISTERED PROVIDER LINK REPAIR " +
+                      json.dumps(repair,sort_keys=True),flush=True)
             await replay_saved_trucksbook_jobs()
             # Eligibility is membership on either A&T tracker, tied to the
             # same Discord driver. A names-only match cannot release a job.
