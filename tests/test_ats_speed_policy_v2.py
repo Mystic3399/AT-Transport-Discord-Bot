@@ -15,8 +15,11 @@ class ATSSpeedPolicyTests(unittest.TestCase):
                 self.assertEqual(result.mileage_type if result else None,'race' if provider=='trucky' else None)
 
     def test_no_rounding_or_inferred_units(self):
-        for value,unit in [('81.5','mph'),('81.999','mph'),('112.001','mph'),(113,'mph'),(130,None),('NaN','mph'),(-1,'mph'),(True,'mph')]:
+        for value,unit in [('112.001','mph'),(113,'mph'),(130,None),('NaN','mph'),(-1,'mph'),(True,'mph')]:
             self.assertIsNone(classify_job_mileage('trucky','Real',game='ATS',max_speed=value,speed_unit=unit))
+        for value in ('81.0001','81.5','81.999'):
+            self.assertEqual(classify_job_mileage(
+                'trucky','Real',game='ATS',max_speed=value,speed_unit='mph').mileage_type, 'race')
         for mph in (81,82):
             self.assertEqual(classify_job_mileage('trucky','Real',game='ATS',max_speed=Decimal(mph)*Decimal('1.609344'),speed_unit='km/h').mileage_type,'real' if mph==81 else 'race')
 
