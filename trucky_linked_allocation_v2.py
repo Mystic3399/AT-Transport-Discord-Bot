@@ -203,11 +203,10 @@ async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False,
             FROM unified_provider_links l
             JOIN unified_steam_links s USING(discord_user_id)
             JOIN unified_driver_profiles p USING(discord_user_id)
-            JOIN unified_registration_sessions r USING(discord_user_id)
             WHERE l.provider='trucky' AND l.provider_account_id=$1
-              AND l.discord_user_id=$2 AND s.verified_at IS NOT NULL
-              AND p.status='active' AND r.status='approved'
-            FOR SHARE OF l,s,p,r
+              AND l.discord_user_id=$2 AND l.verified_at IS NOT NULL
+              AND s.verified_at IS NOT NULL AND p.status='active'
+            FOR SHARE OF l,s,p
         """, account, user)
         # A driver is eligible when currently in A&T on EITHER provider.
         # A verified TrucksBook company membership must belong to the same
