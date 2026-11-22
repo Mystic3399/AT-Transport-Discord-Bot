@@ -11,7 +11,7 @@ from unified_distance_units import KM_TO_MILES
 from world_of_trucks_policy_v2 import classify_job_mileage
 
 CONFLICT_KEYS=('game_id','status','stats_type','driven_distance_km','distance_unit',
-               'completed_at','max_speed_kmh')
+               'completed_at','max_speed_kmh','vehicle_type')
 
 def merge_history_observations(rows):
     """Missing new fields are not conflicts; changed explicit evidence is."""
@@ -60,7 +60,8 @@ def summarize_pending_trucky_mileage(rows,verified_accounts,*,credited_jobs=(),t
         stats={'real_miles':'Real','race_miles':'Race'}.get(e.get('stats_type'))
         game={1:'ETS2',2:'ATS'}.get(e.get('game_id')) if type(e.get('game_id')) is int else None
         if e.get('status')!='completed' or stats is None:continue
-        kind=classify_job_mileage('trucky',stats,game=game,max_speed=e.get('max_speed_kmh'),speed_unit='km/h')
+        kind=classify_job_mileage('trucky',stats,game=game,max_speed=e.get('max_speed_kmh'),
+            speed_unit='km/h',vehicle_type=e.get('vehicle_type'))
         if kind is None:
             result['classification_pending_jobs']+=1;continue
         if kind.mileage_type!=mileage_type:continue
