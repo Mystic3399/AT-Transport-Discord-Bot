@@ -3554,11 +3554,12 @@ async def audit_zero_mile_driver_sources_once():
     import driver_mileage_diagnostics_v2
     try:
         async with db_pool.acquire() as conn:
-            rows = await driver_mileage_diagnostics_v2.scan_zero_mile_driver_sources(conn)
-        print("ZERO MILE DRIVER SOURCE DIAGNOSIS " + json.dumps(
+            rows = await driver_mileage_diagnostics_v2.scan_zero_mile_driver_sources(
+                conn,include_credited=True)
+        print("LINKED DRIVER SOURCE SNAPSHOT " + json.dumps(
             {'drivers':len(rows),'accounts':rows},sort_keys=True,default=str),flush=True)
     except Exception as error:
-        print(f"ZERO MILE DRIVER SOURCE DIAGNOSIS RETRY: {type(error).__name__}",
+        print(f"LINKED DRIVER SOURCE SNAPSHOT RETRY: {type(error).__name__}",
               flush=True)
 
 
