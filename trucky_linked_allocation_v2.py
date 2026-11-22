@@ -172,7 +172,8 @@ async def preview_historical_real_batch(pool, discord_user_id, job_ids, approval
     return results
 
 
-async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False):
+async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False,
+                            alternate_member_ids=frozenset()):
     """One transaction per job. Caller must have checked the runtime boundary."""
     user = candidate['discord_user_id']
     account = candidate['provider_account_id']
@@ -191,8 +192,13 @@ async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False):
               AND p.status='active' AND r.status='approved'
             FOR SHARE OF l,s,p,r
         """, account, user)
-        if owner is None or account not in member_ids:
+        # A driver is eligible when currently in A&T on EITHER provider.
+        # A verified TrucksBook company membership must belong to the same
+        # Discord driver as this verified Trucky account, never a name match.
+        if owner is None:
             return 'account_link_pending'
+        if account not in member_ids and user not in alternate_member_ids:
+            return 'company_not_member'
         previous = await conn.fetchrow("""SELECT discord_user_id,provider_account_id,
             mileage_type,miles,source_evidence_sha256 FROM unified_v2_production_credit_ledger
             WHERE provider='trucky' AND provider_job_id=$1""", job_id)
@@ -301,7 +307,7 @@ async def _record_decision(conn, candidate, decision, reason):
         candidate['provider_job_id'], candidate['discord_user_id'], decision, reason, candidate['source_sha256'])
 
 
-async def allocate_saved_linked_history(pool):
+async def allocate_saved_linked_history(pool, *, alternate_member_ids=frozenset()):
     """Reassociates old vault jobs automatically after registration; bounded credits.
 
     Unlinked jobs stay in the same durable vault, with separate Real/Race audit
@@ -316,28 +322,53 @@ async def allocate_saved_linked_history(pool):
         if actual != os.environ.get('AT_V2_LINKED_MILEAGE_DATABASE_SHA256'):
             return {'status': 'database_identity_blocked', 'mileage_awarded': False}
         await conn.execute(SCHEMA)
+        from automatic_mileage_holding_v2 import SCHEMA as HOLDING_SCHEMA
+        await conn.execute(HOLDING_SCHEMA)
         if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') == 'YES':
             from automatic_linked_mileage_v2 import SCHEMA as AUTOMATIC_SCHEMA
             await conn.execute(AUTOMATIC_SCHEMA)
         rows = await conn.fetch("""SELECT h.provider,h.provider_job_id,h.provider_account_id,
                 h.source_kind,h.evidence,l.discord_user_id
             FROM pending_provider_job_history_v2 h
-            JOIN unified_provider_links l ON l.provider=h.provider AND l.provider_account_id=h.provider_account_id
+            LEFT JOIN unified_provider_links l
+              ON l.provider=h.provider AND l.provider_account_id=h.provider_account_id
+             AND l.verified_at IS NOT NULL
             WHERE h.provider='trucky' AND h.source_kind='authenticated_api'
             ORDER BY h.provider_job_id,h.payload_sha256""")
+    from automatic_mileage_holding_v2 import store_state
     groups = defaultdict(list)
     for row in rows:
         groups[row['provider_job_id']].append(dict(row))
     counts = defaultdict(int)
     credits = 0
     for versions in groups.values():
-        users = {v['discord_user_id'] for v in versions}
-        candidate = vault_candidate(versions, next(iter(users))) if len(users) == 1 else None
+        job_id = versions[0]['provider_job_id']
+        owners = {v['discord_user_id'] for v in versions if v['discord_user_id'] is not None}
+        accounts = {v['provider_account_id'] for v in versions}
+        account = next(iter(accounts)) if len(accounts)==1 else None
+        user = next(iter(owners)) if len(owners)==1 else None
+        if len(accounts) != 1 or len(owners) > 1:
+            counts['invalid_or_conflicting_pending'] += 1
+            async with pool.acquire() as conn:
+                await store_state(conn,'trucky',job_id,None,driver_id=None,
+                                  reason='multiple_provider_owners')
+            continue
+        if user is None:
+            reason = ('company_not_member' if account not in members else
+                      'account_link_pending')
+            counts[reason] += 1
+            async with pool.acquire() as conn:
+                await store_state(conn,'trucky',job_id,account,reason=reason)
+            continue
+        candidate = vault_candidate(versions, user)
         if candidate is None:
             counts['invalid_or_conflicting_pending'] += 1
+            async with pool.acquire() as conn:
+                await store_state(conn,'trucky',job_id,account,driver_id=user,
+                                  reason='invalid_or_conflicting_pending')
             continue
-        # Inspect ALL observations, including any conflicting account that no
-        # longer has a saved link. A join alone must not hide that conflict.
+        # Inspect all saved versions, including accounts that no longer have
+        # a link; an ambiguous owner/job can never be settled by a new link.
         async with pool.acquire() as conn:
             all_versions = await conn.fetch("""SELECT provider,provider_job_id,provider_account_id,source_kind,evidence
                 FROM pending_provider_job_history_v2 WHERE provider='trucky'
@@ -345,8 +376,14 @@ async def allocate_saved_linked_history(pool):
             candidate = vault_candidate([dict(v) for v in all_versions], candidate['discord_user_id'])
             if candidate is None:
                 counts['invalid_or_conflicting_pending'] += 1
+                await store_state(conn,'trucky',job_id,account,
+                                  reason='invalid_or_conflicting_pending')
                 continue
-            outcome = await _settle_candidate(conn, candidate, members)
+            outcome = await _settle_candidate(
+                conn,candidate,members,alternate_member_ids=alternate_member_ids)
+            await store_state(conn,'trucky',job_id,account,
+                      driver_id=user,mileage_type=candidate['mileage_type'],
+                      miles=candidate['miles'],reason=outcome)
         counts[outcome] += 1
         if outcome.startswith('credited_'):
             credits += 1
@@ -354,4 +391,5 @@ async def allocate_saved_linked_history(pool):
                 break
     return {'status': 'linked_history_processed', 'counts': dict(counts),
             'mileage_awarded': credits > 0, 'registration_changed': False,
+            'queued_unverified': counts.get('account_link_pending',0)+counts.get('company_not_member',0),
             'roles_changed': False, 'company_mods_unlocked': False}
