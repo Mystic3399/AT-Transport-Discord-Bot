@@ -21,6 +21,15 @@ async def inspect_driver(conn,discord_id):
           (SELECT trucksbook_user_id::text FROM driver_verifications
            WHERE discord_user_id=$1 AND status='completed'
              AND completed_at IS NOT NULL) AS completed_tb_id,
+          (SELECT status FROM unified_provider_claims
+           WHERE discord_user_id=$1 AND provider='trucksbook') AS ownership_claim_status,
+          (SELECT ownership_confirmed FROM unified_provider_claims
+           WHERE discord_user_id=$1 AND provider='trucksbook') AS ownership_confirmed,
+          (SELECT ownership_evidence_kind FROM unified_provider_claims
+           WHERE discord_user_id=$1 AND provider='trucksbook') AS ownership_evidence_kind,
+          (SELECT reviewed_at IS NOT NULL AND reviewed_by IS NOT NULL
+           FROM unified_provider_claims
+           WHERE discord_user_id=$1 AND provider='trucksbook') AS ownership_reviewed,
           (SELECT status FROM driver_verifications
            WHERE discord_user_id=$1) AS verification_status,
           COALESCE((SELECT real_miles FROM driver_progress
@@ -88,6 +97,8 @@ def format_driver_report(member_id,facts,company_confirmed=None):
         f"TrucksBook ID(s): **{', '.join(linked) if linked else 'Not saved/verified'}**",
         f"Saved numeric link: **{'Yes' if facts.get('numeric_tb_id_present') else 'No (name-only record)'}**",
         f"Registration verification: **{facts.get('verification_status') or 'Not recorded'}**",
+        f"TrucksBook ownership claim: **{facts.get('ownership_claim_status') or 'Not recorded'}**",
+        f"Independent ownership evidence: **{'Recorded (not automatically credit-authorising)' if facts.get('ownership_confirmed') and facts.get('ownership_reviewed') else 'Not established'}**",
         f"Real total on card: **{fmt(facts.get('profile_real'))} mi**",
         f"Processed TrucksBook Real/WoTr: **{fmt(facts.get('processed_real_jobs'))} jobs / {fmt(facts.get('processed_real_miles'))} mi**",
         f"Trucky credited: **{Decimal(str(facts.get('credited_trucky_real') or 0)):,.2f} Real / {Decimal(str(facts.get('credited_trucky_race') or 0)):,.2f} Race mi**",
