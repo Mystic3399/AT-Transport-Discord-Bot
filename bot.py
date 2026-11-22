@@ -3261,6 +3261,31 @@ async def replay_saved_trucksbook_jobs():
                 WHERE l.provider='trucksbook' AND l.provider_account_id=$1
                   AND l.verified_at IS NOT NULL AND p.status='active'
                 UNION
+                SELECT c.discord_user_id FROM unified_provider_claims c
+                JOIN unified_provider_links l
+                  ON l.discord_user_id=c.discord_user_id
+                 AND l.provider=c.provider
+                 AND l.provider_account_id=c.provider_account_id
+                JOIN unified_driver_profiles p
+                  ON p.discord_user_id=c.discord_user_id
+                WHERE c.provider='trucksbook' AND c.provider_account_id=$1
+                  AND c.status='approved'
+                  AND c.ownership_confirmed=TRUE
+                  AND c.membership_confirmed=TRUE
+                  AND c.ownership_evidence_kind='trucksbook_staff_reviewed_profile_steam_mapping'
+                  AND c.reviewed_at IS NOT NULL AND c.reviewed_by IS NOT NULL
+                  AND l.verified_at IS NOT NULL AND p.status='active'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM driver_links d
+                    WHERE d.discord_user_id=c.discord_user_id
+                      AND d.trucksbook_user_id IS NOT NULL
+                      AND d.trucksbook_user_id::text<>$1)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM unified_provider_links other
+                    WHERE other.provider='trucksbook'
+                      AND other.provider_account_id=$1
+                      AND other.discord_user_id<>c.discord_user_id)
+                UNION
                 SELECT d.discord_user_id FROM driver_links d
                 JOIN driver_verifications v USING(discord_user_id)
                 WHERE v.trucksbook_user_id::text=$1
