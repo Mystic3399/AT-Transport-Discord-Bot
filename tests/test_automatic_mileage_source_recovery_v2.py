@@ -68,6 +68,12 @@ class AutomaticSourceProofTests(unittest.TestCase):
         self.assertIn("valid_temporal_trucksbook_observation",body)
         self.assertIn("mileage_type='race'",body)
 
+    def test_background_leaderboard_updates_do_not_spam_discord(self):
+        text=(ROOT/"bot.py").read_text(encoding="utf-8")
+        self.assertIn("@tasks.loop(minutes=10)\\nasync def leaderboard_rollover_task",text)
+        self.assertIn("await asyncio.sleep(600)",text)
+        self.assertIn("WHERE LOWER(statistics) LIKE 'real%'",text)
+
     def test_auto_replay_updates_leaderboard_once_per_batch(self):
         tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
         scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
