@@ -111,7 +111,7 @@ class ReleasePathTests(unittest.TestCase):
         self.assertIn('details',body)
         self.assertIn('trucksbook',body)
         self.assertIn('trucky',body)
-        self.assertIn("state <> 'credited'",body)
+        self.assertIn("state<>'credited'",body)
         self.assertNotIn('UPDATE driver_progress',body)
         self.assertNotIn('INSERT INTO unified_v2_production_credit_ledger',body)
 
