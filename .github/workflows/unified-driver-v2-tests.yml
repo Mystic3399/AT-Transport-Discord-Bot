@@ -45,4 +45,5 @@ jobs:
             tests/test_mileage_audit_confirmation_v2.py \
             tests/test_automatic_mileage_source_recovery_v2.py \
             tests/test_automatic_mileage_holding_v2.py \
-            tests/test_driver_membership_v2.py
+            tests/test_driver_membership_v2.py \
+            tests/test_trucky_real_no_provider_exposure_v2.py
