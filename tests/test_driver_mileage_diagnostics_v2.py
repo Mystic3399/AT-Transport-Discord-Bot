@@ -72,6 +72,35 @@ class DriverEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('has_tb_name',snippet)
         self.assertIn('ID verification required',snippet)
 
+    async def test_startup_scan_never_guesses_or_writes_provider_ownership(self):
+        from driver_mileage_diagnostics_v2 import scan_zero_mile_driver_sources
+        class Conn:
+            fetch=AsyncMock(return_value=[{
+                'discord_user_id':42,'trucksbook_name':'A&T Luke plant',
+                'tb_id':'531098','real_miles':0,'source_jobs':3,
+                'uncredited_real_sources':3,'processed_jobs':0
+            }])
+        conn=Conn()
+        rows=await scan_zero_mile_driver_sources(conn)
+        self.assertEqual(rows[0]['tb_id'],'531098')
+        sql=conn.fetch.await_args.args[0]
+        self.assertIn('h.provider_account_id=l.tb_id',sql)
+        self.assertIn("v.status='completed'",sql)
+        self.assertNotIn('UPDATE',sql)
+        self.assertNotIn('INSERT',sql)
+        self.assertNotIn('trucksbook_name=',sql)
+
+    def test_startup_zero_mile_audit_is_diagnostic_only(self):
+        code=(ROOT/'bot.py').read_text()
+        fn=next(n for n in ast.parse(code).body
+                if isinstance(n,ast.AsyncFunctionDef)
+                   and n.name=='audit_zero_mile_driver_sources_once')
+        snippet=ast.unparse(fn)
+        self.assertIn('scan_zero_mile_driver_sources',snippet)
+        self.assertIn('ZERO MILE DRIVER SOURCE DIAGNOSIS',snippet)
+        self.assertNotIn('record_real_job',snippet)
+        self.assertNotIn('UPDATE driver_links',snippet)
+
     def test_admin_command_is_read_only_and_uses_explicit_mention(self):
         code=(ROOT/'bot.py').read_text()
         fn=next(n for n in ast.parse(code).body if isinstance(n,ast.AsyncFunctionDef)
