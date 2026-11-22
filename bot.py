@@ -3122,43 +3122,183 @@ async def deliver_automatic_linked_progression(guild):
 
 
 async def replay_saved_trucksbook_jobs():
-    """Retry stored notices through the same credit function as live delivery."""
-    if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
+    """Automatically restore proven new, uncredited TrucksBook Real deliveries.
+
+    Backfilled historical messages are not new credit by themselves: a saved
+    preexisting balance snapshot, current numeric account ownership and the
+    existing duplicate matcher must all independently allow the award.
+    """
+    if (db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING") == "YES"
+            or os.getenv("AT_V2_AUTOMATIC_LINKED_RECONCILIATION") != "YES"):
         return
-    import json
-    async with db_pool.acquire() as connection:
-        rows = await connection.fetch("""
+    import automatic_mileage_source_recovery_v2 as auto
+    import mileage_audit_confirmation_v2 as review
+    from trucky_linked_allocation_v2 import activation_allowed
+    from unified_production_mileage_gate_v2 import read_only_database_fingerprint
+    if not activation_allowed():
+        return
+    async with db_pool.acquire() as conn:
+        actual = await read_only_database_fingerprint(conn)
+        if actual != os.getenv("AT_V2_LINKED_MILEAGE_DATABASE_SHA256"):
+            print("AUTO TB REPLAY: database identity not approved",flush=True)
+            return
+        rows = await conn.fetch("""
             SELECT h.provider_job_id,h.provider_account_id,h.evidence
             FROM pending_provider_job_history_v2 h
             WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
+              AND h.provider_account_id IS NOT NULL
               AND NOT EXISTS(SELECT 1 FROM processed_jobs p WHERE p.job_id=h.provider_job_id)
-            ORDER BY h.first_received_at,h.provider_job_id
-            """)
-    processed = 0
+            ORDER BY h.first_received_at DESC,h.provider_job_id
+            LIMIT 2000
+        """)
+    # Different evidence versions or ownership accounts for one job are a hold.
+    from collections import defaultdict
+    versions = defaultdict(list)
     for row in rows:
-        evidence = json.loads(row['evidence']) if isinstance(row['evidence'],str) else row['evidence']
-        if (evidence.get('unit') != 'mi' or not is_real_statistics(evidence.get('stats_type'))
-                or type(evidence.get('distance')) is not int or evidence['distance'] <= 0):
+        versions[row["provider_job_id"]].append(row)
+    credited = 0
+    unresolved = 0
+    for job_id, group in versions.items():
+        if len(group) != 1 or not auto.trusted_account_id(group[0]["provider_account_id"]):
+            unresolved += 1
             continue
-        name = evidence.get('candidate_driver_label') or ''
-        account = row['provider_account_id']
-        driver = await find_driver_link(name, int(account) if account else None)
-        if driver is None:
+        row = group[0]
+        evidence = json.loads(row["evidence"]) if isinstance(row["evidence"],str) else row["evidence"]
+        if (not isinstance(evidence,dict) or evidence.get("unit") != "mi"
+                or not is_real_statistics(evidence.get("stats_type"))
+                or type(evidence.get("distance")) is not int or evidence["distance"] <= 0):
+            unresolved += 1
             continue
-        result = await record_real_job(row['provider_job_id'], name, driver, evidence['distance'])
-        if result and result.get('status') == 'added':
+        account = row["provider_account_id"]
+        async with db_pool.acquire() as conn:
+            owners = await conn.fetch("""
+                SELECT d.discord_user_id
+                FROM driver_links d
+                WHERE d.trucksbook_user_id::text=$1
+                  AND d.trucksbook_name <> ('__unlinked_driver_'||d.discord_user_id::text||'__')
+                UNION
+                SELECT l.discord_user_id FROM unified_provider_links l
+                JOIN unified_driver_profiles p USING(discord_user_id)
+                WHERE l.provider='trucksbook' AND l.provider_account_id=$1
+                  AND l.verified_at IS NOT NULL AND p.status='active'
+            """, account)
+            if len(owners) != 1:
+                unresolved += 1
+                continue
+            user = int(owners[0]["discord_user_id"])
+            if not await account_unlink.has_valid_tracking_link(conn,user):
+                unresolved += 1
+                continue
+            if not await review.audit_account_matches(conn,dict(
+                    discord_user_id=user, source_provider_account_id=account)):
+                unresolved += 1
+                continue
+            baseline = await conn.fetchval("""
+                SELECT snapshotted_at FROM unified_v2_production_mileage_baselines
+                WHERE discord_user_id=$1
+            """, user)
+        if not auto.valid_replay_window(evidence,baseline):
+            unresolved += 1
+            continue
+        name = evidence.get("candidate_driver_label") or "A&T Driver"
+        result = await record_real_job(job_id,name,user,evidence["distance"])
+        if result and result.get("status") == "added":
+            credited += 1
             guild = bot.get_guild(GUILD_ID)
             if guild is not None:
                 try:
-                    await sync_member_progression_role(guild, driver, result['real_miles'])
+                    await sync_member_progression_role(guild,user,result["real_miles"])
                     await sync_permanent_system_for_driver(
-                        guild, driver, name, result['real_miles'], announce=True,
-                    )
+                        guild,user,name,result["real_miles"],announce=True)
+                    await refresh_driver_leaderboard(guild)
                 except Exception as error:
-                    print(f"REPLAYED TRUCKSBOOK CAREER SYNC ERROR: {type(error).__name__}", flush=True)
-            processed += 1
-            if processed >= 100:
+                    print(f"AUTO TB CAREER SYNC RETRY: {type(error).__name__}",flush=True)
+            if credited >= 50:
                 break
+        elif result and result.get("status") not in ("duplicate",):
+            unresolved += 1
+    if credited:
+        print(f"AUTO TRUCKSBOOK RECOVERY: {credited} verified jobs credited, "
+              f"{unresolved} held; no historic baseline guessed.",flush=True)
+
+
+@tasks.loop(minutes=4)
+async def capture_configured_mileage_history():
+    """Backfill original tracking messages into source evidence, not mileage.
+
+    Exactly the existing configured channels/webhook IDs are allowed. A cursor
+    advances only after all observed messages in its batch are safely stored.
+    The Trucky API remains the only source for Trucky Real and Race mileage.
+    """
+    if db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
+    from automatic_mileage_source_recovery_v2 import SCHEMA as SOURCE_SCHEMA
+    from pending_driver_history_v2 import retain_trucksbook_source_observation
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    async with db_pool.acquire() as conn:
+        await conn.execute(SOURCE_SCHEMA)
+    scanned = retained = 0
+    for channel_id in MILEAGE_AUDIT_CHANNEL_IDS:
+        channel = guild.get_channel(channel_id)
+        if channel is None or not isinstance(channel,discord.TextChannel):
+            continue
+        permissions = channel.permissions_for(guild.me)
+        if not permissions.view_channel or not permissions.read_message_history:
+            continue
+        async with db_pool.acquire() as conn:
+            cursor = await conn.fetchval("""
+                SELECT last_message_id FROM automatic_mileage_channel_cursors_v2
+                WHERE guild_id=$1 AND channel_id=$2
+            """, guild.id,channel.id)
+        options = dict(limit=300,oldest_first=True)
+        if cursor:
+            options["after"] = discord.Object(id=int(cursor))
+        newest = int(cursor or 0)
+        try:
+            async for message in channel.history(**options):
+                for embed in message.embeds:
+                    if not audit_source_allowed(message.webhook_id):
+                        continue
+                    parsed = extract_trucksbook_job_from_embed(embed)
+                    if (parsed is None or parsed.get("unit") != "mi"
+                            or explicit_audit_miles(embed) != parsed.get("accepted_distance")):
+                        continue
+                    data = embed.to_dict()
+                    account = trucksbook_author_user_id(data)
+                    if account is None:
+                        continue
+                    result = await retain_trucksbook_source_observation(
+                        db_pool, webhook_id=message.webhook_id,
+                        guild_id=guild.id, expected_guild_id=GUILD_ID,
+                        configured_webhook_id=os.getenv("TRUCKSBOOK_WEBHOOK_ID","").strip(),
+                        configured_webhook_ids=os.getenv("TRUCKSBOOK_HISTORY_WEBHOOK_IDS","").strip(),
+                        parsed_job=parsed,observed_account_id=account,
+                        source_message_at=message.created_at,
+                        driver_label=(data.get("author") or {}).get("name"))
+                    retained += int(result.get("status") == "evidence_retained")
+                scanned += 1
+                newest = max(newest,message.id)
+        except (discord.HTTPException,discord.Forbidden) as error:
+            print(f"AUTO MILEAGE SOURCE SKIPPED {channel.id}: {type(error).__name__}",flush=True)
+            continue
+        except Exception as error:
+            print(f"AUTO MILEAGE SOURCE RETRY {channel.id}: {type(error).__name__}",flush=True)
+            continue
+        if newest > int(cursor or 0):
+            async with db_pool.acquire() as conn:
+                await conn.execute("""
+                    INSERT INTO automatic_mileage_channel_cursors_v2
+                      (guild_id,channel_id,last_message_id)
+                    VALUES($1,$2,$3)
+                    ON CONFLICT(guild_id,channel_id) DO UPDATE SET
+                      last_message_id=GREATEST(automatic_mileage_channel_cursors_v2.last_message_id,EXCLUDED.last_message_id),
+                      updated_at=NOW()
+                """,guild.id,channel.id,newest)
+    if scanned:
+        print(f"AUTO MILEAGE HISTORY: {scanned} messages inspected; "
+              f"{retained} verified job observations retained.",flush=True)
 
 
 @tasks.loop(seconds=60)
@@ -3279,6 +3419,8 @@ async def on_ready():
         if (not isolated_staging and os.getenv('AT_V2_TRUCKY_API_INGEST_ENABLED') == 'YES'
                 and not ingest_trucky_company_jobs.is_running()):
             ingest_trucky_company_jobs.start()
+        if not isolated_staging and not capture_configured_mileage_history.is_running():
+            capture_configured_mileage_history.start()
         if (not isolated_staging and os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES'
                 and not deliver_v2_progression.is_running()):
             deliver_v2_progression.start()
