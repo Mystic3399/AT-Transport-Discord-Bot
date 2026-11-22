@@ -104,9 +104,9 @@ class VerifiedManualJourneyReviewTests(unittest.IsolatedAsyncioTestCase):
         conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[True, True]))
         candidate = dict(discord_user_id=42, job_id="123456", missing_distance=140,
                          recorded_distance=0, actual_distance=140, repair_kind="missing_real")
-        with patch.dict('os.environ', {'AT_V2_AUTOMATIC_LINKED_RECONCILIATION': 'NO'}), \\
-             patch('automatic_linked_mileage_v2.reconcile_trucksbook',
-                   new_callable=AsyncMock, return_value=(Decimal('140'), None)) as matcher:
+        with (patch.dict('os.environ', {'AT_V2_AUTOMATIC_LINKED_RECONCILIATION': 'NO'}),
+              patch('automatic_linked_mileage_v2.reconcile_trucksbook',
+                    new_callable=AsyncMock, return_value=(Decimal('140'), None)) as matcher):
             result = await reconciled_repair_delta(conn, candidate)
         self.assertEqual(result, (140, None))
         matcher.assert_awaited_once_with(conn, '123456', 42, 140)
