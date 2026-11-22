@@ -3546,6 +3546,27 @@ async def before_website_totals():
     await bot.wait_until_ready()
 
 
+@tasks.loop(count=1)
+async def audit_zero_mile_driver_sources_once():
+    """One-shot read-only proof of account IDs behind zero-mile cards."""
+    if db_pool is None or os.getenv("AT_V2_ISOLATED_STAGING") == "YES":
+        return
+    import driver_mileage_diagnostics_v2
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await driver_mileage_diagnostics_v2.scan_zero_mile_driver_sources(conn)
+        print("ZERO MILE DRIVER SOURCE DIAGNOSIS " + json.dumps(
+            {'drivers':len(rows),'accounts':rows},sort_keys=True,default=str),flush=True)
+    except Exception as error:
+        print(f"ZERO MILE DRIVER SOURCE DIAGNOSIS RETRY: {type(error).__name__}",
+              flush=True)
+
+
+@audit_zero_mile_driver_sources_once.before_loop
+async def before_zero_mile_driver_sources_once():
+    await bot.wait_until_ready()
+
+
 @bot.event
 async def on_ready():
     global db_pool, unified_schema_ready, staging_trucky_probe_ran
@@ -3597,6 +3618,8 @@ async def on_ready():
             ingest_trucky_company_jobs.start()
         if not isolated_staging and not capture_configured_mileage_history.is_running():
             capture_configured_mileage_history.start()
+        if not isolated_staging and not audit_zero_mile_driver_sources_once.is_running():
+            audit_zero_mile_driver_sources_once.start()
         if (not isolated_staging and os.getenv('AT_V2_PROGRESSION_ENABLED') == 'YES'
                 and not deliver_v2_progression.is_running()):
             deliver_v2_progression.start()
