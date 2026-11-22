@@ -339,6 +339,17 @@ async def allocate_saved_linked_history(pool, *, alternate_member_ids=frozenset(
     groups = defaultdict(list)
     for row in rows:
         groups[row['provider_job_id']].append(dict(row))
+    # An old immutable credit remains earned when its driver later departs.
+    # Read those ledger facts in bulk so the pending queue never relabels
+    # already-paid history as newly unpaid just because membership changed.
+    async with pool.acquire() as conn:
+        ledgers = await conn.fetch("""
+            SELECT provider_job_id,discord_user_id,provider_account_id,
+                   mileage_type,miles,source_evidence_sha256
+            FROM unified_v2_production_credit_ledger
+            WHERE provider='trucky' AND provider_job_id = ANY($1::text[])
+        """, list(groups))
+    existing = {row['provider_job_id']:dict(row) for row in ledgers}
     counts = defaultdict(int)
     credits = 0
     for versions in groups.values():
@@ -352,6 +363,27 @@ async def allocate_saved_linked_history(pool, *, alternate_member_ids=frozenset(
             async with pool.acquire() as conn:
                 await store_state(conn,'trucky',job_id,None,driver_id=None,
                                   reason='multiple_provider_owners')
+            continue
+        prior=existing.get(job_id)
+        if prior:
+            previously_credited=vault_candidate(versions,int(prior['discord_user_id']))
+            if previously_credited is None or not (
+                prior['provider_account_id']==account
+                and prior['mileage_type']==previously_credited['mileage_type']
+                and prior['miles']==previously_credited['miles']
+                and prior['source_evidence_sha256']==previously_credited['source_sha256']
+            ):
+                counts['conflicting_job_pending'] += 1
+                async with pool.acquire() as conn:
+                    await store_state(conn,'trucky',job_id,account,
+                                      reason='conflicting_job_pending')
+                continue
+            async with pool.acquire() as conn:
+                await store_state(conn,'trucky',job_id,account,
+                    driver_id=int(prior['discord_user_id']),
+                    mileage_type=previously_credited['mileage_type'],
+                    miles=previously_credited['miles'],reason='replayed')
+            counts['replayed'] += 1
             continue
         if user is None:
             reason = ('company_not_member' if account not in members else
