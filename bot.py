@@ -4960,6 +4960,28 @@ async def mileage_queue_status(ctx, view: str = "summary"):
     )
 
 
+@bot.command(name="mileagedriver")
+@commands.guild_only()
+@commands.has_guild_permissions(administrator=True)
+@commands.cooldown(1, 15, commands.BucketType.guild)
+async def mileage_driver_diagnostic(ctx, member: discord.Member):
+    """Read-only tracking-account and missing-credit diagnosis for one driver."""
+    if ctx.guild.id != GUILD_ID or db_pool is None:
+        return
+    import driver_mileage_diagnostics_v2 as diag
+    async with db_pool.acquire() as conn:
+        facts=await diag.inspect_driver(conn, member.id)
+    accounts=facts.get('tb_accounts') or []
+    current=None
+    if len(accounts)==1:
+        result=await fetch_trucksbook_profile(int(accounts[0]))
+        if result.get("success") is True:
+            current=(result.get("belongs_to_at") is True)
+    report=diag.format_driver_report(member.id,facts,company_confirmed=current)
+    await ctx.reply(report,mention_author=False,
+                    allowed_mentions=discord.AllowedMentions.none())
+
+
 @bot.command(name="mileageaudit")
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
