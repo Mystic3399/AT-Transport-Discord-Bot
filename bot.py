@@ -1763,6 +1763,12 @@ async def sync_member_permanent_roles(guild, discord_user_id, real_miles, *, com
     member = guild.get_member(discord_user_id)
     if member is None:
         return {"status": "member_missing"}
+    if db_pool is None:
+        return {"status": "database_unavailable"}
+    async with db_pool.acquire() as connection:
+        if not await account_unlink.has_valid_tracking_link(connection, discord_user_id):
+            # Retain earned achievement roles but never re-award them after unlink.
+            return {"status": "unlinked"}
 
     add_roles = []
     for threshold, role_id, _ in ACHIEVEMENT_ROLES:
@@ -2123,6 +2129,10 @@ async def sync_competition_role(guild, period_type, role_id):
             period_type,
         )
     winner = guild.get_member(int(winner_id)) if winner_id else None
+    if winner is not None:
+        async with db_pool.acquire() as connection:
+            if not await account_unlink.has_valid_tracking_link(connection, winner.id):
+                winner = None  # Historical winner stays recorded; live title is withheld.
     remove_from = [member for member in role.members if member != winner]
     for member in remove_from:
         try:
@@ -2644,6 +2654,20 @@ async def sync_member_progression_role(
                 "role_name": None,
             }
 
+    # Every role writer, including startup, webhooks, manual recovery and
+    # milestone replay, must re-check the current link before granting ranks.
+    if db_pool is None:
+        return {"status": "database_unavailable", "role_name": None}
+    async with db_pool.acquire() as connection:
+        active_link = await account_unlink.has_valid_tracking_link(connection, discord_user_id)
+    if not active_link:
+        ladder_ids = {role_id for _, role_id, _ in PROGRESSION_ROLES if role_id}
+        remove = [role for role in member.roles if role.id in ladder_ids]
+        if remove:
+            await member.remove_roles(*remove, reason="A&T tracking accounts unlinked")
+        return {"status": "unlinked_roles_removed" if remove else "unlinked",
+                "role_name": None}
+
     (
         required_miles,
         target_role_id,
@@ -2758,10 +2782,9 @@ async def sync_all_driver_roles(
 
         try:
             result = (
-                await sync_member_progression_role(
+                await sync_unified_driver_roles(
                     guild,
                     discord_user_id,
-                    real_miles,
                 )
             )
 
@@ -7135,6 +7158,14 @@ class UnlinkConfirmation(discord.ui.View):
             return
         await interaction.edit_original_response(content=f"Accounts unlinked for <@{self.user_id}>. Earned mileage, jobs, badges and truck/flag preferences are retained. The driver can use /register to reconnect.",embed=None,view=None,allowed_mentions=discord.AllowedMentions.none())
         self.stop()
+        # Drop stale live ranks immediately, or restore the correct rank if a
+        # separate valid tracking provider remains linked.
+        try:
+            await sync_unified_driver_roles(interaction.guild, self.user_id)
+            await sync_competition_role(interaction.guild, "weekly", WEEKLY_CHAMPION_ROLE_ID)
+            await sync_competition_role(interaction.guild, "monthly", DRIVER_OF_THE_MONTH_ROLE_ID)
+        except Exception as error:
+            print(f"UNLINK ROLE CLEANUP RETRY PENDING: {type(error).__name__}", flush=True)
         try:
             await log_verification(interaction.guild,"🔗 Management account unlink",f"Manager: <@{self.actor_id}>\nDriver: <@{self.user_id}>\nAccount selection: **{self.scope}**\nCareer history retained. Audit snapshot saved.")
             await refresh_unified_registration(self.user_id)
@@ -8270,17 +8301,10 @@ async def sync_unified_driver_roles(guild, discord_user_id):
     if db_pool is None:
         return {"status": "database_unavailable", "role_name": None}
     async with db_pool.acquire() as connection:
-        verified = await connection.fetchval("""
-            SELECT EXISTS(
-                SELECT 1 FROM unified_provider_links
-                WHERE discord_user_id=$1 AND verified_at IS NOT NULL
-            ) OR EXISTS(
-                SELECT 1 FROM driver_links
-                WHERE discord_user_id=$1
-            )
-        """, discord_user_id)
+        verified = await account_unlink.has_valid_tracking_link(connection, discord_user_id)
         if not verified:
-            return {"status": "unverified", "role_name": None}
+            # Remove any stale active ranking roles while keeping career records.
+            return await sync_member_progression_role(guild, discord_user_id, 0)
         real_miles = await connection.fetchval("""
             SELECT real_miles FROM driver_progress WHERE discord_user_id=$1
         """, discord_user_id)
