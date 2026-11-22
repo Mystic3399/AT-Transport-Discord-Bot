@@ -70,6 +70,67 @@ async def mark_suppressed(conn, provider, job_id, user, reason):
         """, provider, job_id, user, reason, digest)
 
 
+async def safely_independent_trucky_real_without_trucksbook(conn, candidate):
+    """Prove there is NO earlier TrucksBook mileage to duplicate.
+
+    Used only for an authenticated, owned Trucky Real job after the caller's
+    membership gates. No guessed route, unknown historical balance or recent
+    potentially matching Trucky Race credit may pass. This is a positive
+    all-zero check, not a waiver for incomplete provider evidence.
+    """
+    if candidate.get("mileage_type") != "real":
+        return False
+    delivered = candidate.get("delivered_at")
+    if (not isinstance(delivered, datetime) or delivered.tzinfo is None
+            or delivered > datetime.now(timezone.utc) - timedelta(minutes=30)):
+        return False
+    user = candidate["discord_user_id"]
+    facts = await conn.fetchrow("""
+        SELECT
+          COALESCE((SELECT real_miles FROM driver_progress
+                    WHERE discord_user_id=$1),0) AS profile_real,
+          COALESCE((SELECT SUM(miles)
+                    FROM unified_v2_production_credit_ledger
+                    WHERE provider='trucky' AND discord_user_id=$1
+                      AND mileage_type='real'),0) AS trucky_real,
+          (SELECT COUNT(*) FROM processed_jobs
+           WHERE discord_user_id=$1 AND LOWER(statistics) LIKE 'real%'
+             AND accepted_distance>0) AS trucksbook_jobs,
+          (SELECT COUNT(*) FROM pending_provider_job_history_v2 h
+           WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
+             AND (
+               EXISTS(SELECT 1 FROM driver_links d
+                      WHERE d.discord_user_id=$1
+                        AND d.trucksbook_user_id::text=h.provider_account_id)
+               OR EXISTS(SELECT 1 FROM unified_provider_links l
+                      WHERE l.discord_user_id=$1 AND l.provider='trucksbook'
+                        AND l.provider_account_id=h.provider_account_id)
+             )) AS trucksbook_observations,
+          (SELECT COUNT(*) FROM unified_provider_claims c
+           WHERE c.discord_user_id=$1 AND c.provider='trucksbook'
+             AND c.status IN ('pending','approved')) AS trucksbook_claims,
+          (SELECT COUNT(*) FROM unified_v2_production_credit_ledger
+           WHERE provider='trucky' AND discord_user_id=$1
+             AND mileage_type='race'
+             AND (delivered_at IS NULL OR
+                  delivered_at BETWEEN $2::timestamptz - INTERVAL '120 minutes'
+                                   AND $2::timestamptz + INTERVAL '120 minutes'))
+           AS race_overlap
+    """,user,delivered)
+    if not facts:
+        return False
+    recorded = Decimal(str(facts["profile_real"]))
+    prior_trucky = Decimal(str(facts["trucky_real"]))
+    if not recorded.is_finite() or not prior_trucky.is_finite():
+        return False
+    return (
+        recorded == prior_trucky.to_integral_value(rounding="ROUND_FLOOR")
+        and all(int(facts[k]) == 0 for k in (
+            "trucksbook_jobs","trucksbook_observations",
+            "trucksbook_claims","race_overlap"))
+    )
+
+
 async def reconcile_trucky(conn, candidate):
     """Return the credited TrucksBook amount being replaced, or a hold reason."""
     user = candidate["discord_user_id"]
@@ -78,6 +139,11 @@ async def reconcile_trucky(conn, candidate):
         candidate["provider_job_id"])
     if paired:
         return None, "duplicate_provider_job"
+    # A verified Trucky-only Real journey cannot double-count TrucksBook
+    # when independent live ledger/baseline facts prove no TB exposure at all.
+    # This can safely release old jobs even if the API omitted cargo/route.
+    if await safely_independent_trucky_real_without_trucksbook(conn, candidate):
+        return Decimal(0), None
     if not candidate.get("job_metadata"):
         return None, "route_evidence_pending"
     incoming = dict(candidate, metadata=candidate["job_metadata"])
