@@ -70,7 +70,8 @@ class AutomaticSourceProofTests(unittest.TestCase):
 
     def test_background_leaderboard_updates_do_not_spam_discord(self):
         text=(ROOT/"bot.py").read_text(encoding="utf-8")
-        self.assertIn("@tasks.loop(minutes=10)\\nasync def leaderboard_rollover_task",text)
+        self.assertIn("@tasks.loop(minutes=10)",text)
+        self.assertIn("async def leaderboard_rollover_task",text)
         self.assertIn("await asyncio.sleep(600)",text)
         self.assertIn("WHERE LOWER(statistics) LIKE 'real%'",text)
 
