@@ -421,7 +421,27 @@ async def allocate_saved_linked_history(pool, *, alternate_member_ids=frozenset(
             credits += 1
             if credits >= 100:
                 break
+    # Read from committed ledger, never assume previewed/queued miles were paid.
+    # Include previously recovered jobs from this day even on subsequent polls.
+    async with pool.acquire() as conn:
+        paid = await conn.fetch("""
+            SELECT mileage_type,COUNT(*)::BIGINT AS jobs,
+                   COALESCE(SUM(miles),0) AS miles
+            FROM unified_v2_production_credit_ledger
+            WHERE provider='trucky'
+              AND canonical_credit_key LIKE 'accepted-link-trucky:%'
+              AND credited_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY mileage_type
+        """)
+    verified_awards = {
+        row['mileage_type']: {'jobs':int(row['jobs']),
+                              'miles':str(row['miles'])}
+        for row in paid
+    }
     return {'status': 'linked_history_processed', 'counts': dict(counts),
-            'mileage_awarded': credits > 0, 'registration_changed': False,
+            'mileage_awarded': credits > 0,
+            'credited_this_run': credits,
+            'ledger_awards_last_24h': verified_awards,
+            'registration_changed': False,
             'queued_unverified': counts.get('account_link_pending',0)+counts.get('company_not_member',0),
             'roles_changed': False, 'company_mods_unlocked': False}
