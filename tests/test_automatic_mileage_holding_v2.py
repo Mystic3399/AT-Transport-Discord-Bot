@@ -141,3 +141,15 @@ class ReleasePathTests(unittest.TestCase):
         self.assertIn("s.verified_at IS NOT NULL",source)
         self.assertIn("r.status='approved'",source)
         self.assertIn('account not in member_ids and user not in alternate_member_ids',source)
+
+
+class RecoveryHoldReasonRegressionTests(unittest.TestCase):
+    def test_conflicting_source_is_not_generic_evidence_pending(self):
+        from automatic_mileage_holding_v2 import holding_state
+        self.assertEqual(holding_state("source_conflict"), "provider_conflict")
+        self.assertEqual(holding_state("unverified_or_conflicting_source"), "provider_conflict")
+
+    def test_invalid_source_is_excluded_not_retried_as_missing_evidence(self):
+        from automatic_mileage_holding_v2 import holding_state
+        self.assertEqual(holding_state("unsupported_or_invalid_source"), "excluded")
+        self.assertEqual(holding_state("invalid_source"), "excluded")
