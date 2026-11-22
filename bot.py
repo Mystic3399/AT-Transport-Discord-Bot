@@ -1284,6 +1284,9 @@ async def record_real_job(
     trucksbook_name,
     discord_user_id,
     accepted_distance,
+    *,
+    historical_backfill_source=None,
+    historical_provider_account_id=None,
 ):
     if (os.getenv('AT_V2_ISOLATED_STAGING') == 'YES'
             or os.getenv('AT_V2_PRODUCTION_MILEAGE_ENABLED') == 'YES'):
@@ -1302,6 +1305,24 @@ async def record_real_job(
             # Shared lock with accepted-link Trucky allocation. This also
             # protects retries after disabling that worker or a restart.
             await connection.execute('SELECT pg_advisory_xact_lock($1)', discord_user_id)
+            if historical_backfill_source is not None:
+                # Recheck authoritative account + fully explained legacy totals
+                # INSIDE the writer transaction, after acquiring the same
+                # per-driver lock used by live and Trucky jobs.
+                import mileage_audit_confirmation_v2 as review
+                from automatic_mileage_source_recovery_v2 import (
+                    safely_restore_accounted_trucksbook_history)
+                if (not historical_provider_account_id
+                        or not await review.audit_account_matches(
+                            connection,dict(discord_user_id=discord_user_id,
+                              source_provider_account_id=historical_provider_account_id))
+                        or not await account_unlink.has_valid_tracking_link(
+                            connection,discord_user_id)
+                        or not await safely_restore_accounted_trucksbook_history(
+                            connection,discord_user_id,
+                            historical_backfill_source,accepted_distance)):
+                    return {'status':'historical_baseline_still_unexplained',
+                            'real_miles':None,'crossed_milestones':[]}
             ledger_exists = await connection.fetchval(
                 "SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL")
             credit_distance = accepted_distance
@@ -3294,14 +3315,27 @@ async def replay_saved_trucksbook_jobs():
             queued[job_id]=(account,user,'real',evidence['distance'],
                             'company_membership_unconfirmed')
             continue
+        historical_backfill_source = None
         if not auto.valid_replay_window(evidence,baseline):
-            unresolved += 1
-            reasons['historical_balance_cutoff_or_time_missing'] += 1
-            queued[job_id]=(account,user,'real',evidence['distance'],
-                            'historical_balance_cutoff_or_time_missing')
-            continue
+            # For a TrucksBook-only driver with no unexplained old balance,
+            # old verified webhook jobs are provably missing from recorded
+            # processed_jobs. Recheck this condition under writer lock below.
+            async with db_pool.acquire() as conn:
+                accounted = await auto.safely_restore_accounted_trucksbook_history(
+                    conn,user,evidence,evidence['distance'])
+            if accounted:
+                historical_backfill_source = evidence
+            else:
+                unresolved += 1
+                reasons['historical_balance_cutoff_or_time_missing'] += 1
+                queued[job_id]=(account,user,'real',evidence['distance'],
+                                'historical_balance_cutoff_or_time_missing')
+                continue
         name = evidence.get("candidate_driver_label") or "A&T Driver"
-        result = await record_real_job(job_id,name,user,evidence["distance"])
+        result = await record_real_job(
+            job_id,name,user,evidence["distance"],
+            historical_backfill_source=historical_backfill_source,
+            historical_provider_account_id=account if historical_backfill_source else None)
         if result and result.get("status") == "added":
             credited += 1
             # Defer Discord API updates until the batch has settled. Several
