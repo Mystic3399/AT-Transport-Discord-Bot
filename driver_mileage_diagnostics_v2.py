@@ -140,7 +140,7 @@ async def scan_zero_mile_driver_sources(conn,limit=40):
           LEFT JOIN driver_links d USING(discord_user_id)
           LEFT JOIN unified_provider_links p
             ON p.discord_user_id=ids.discord_user_id AND p.provider='trucksbook'
-          LEFT JOIN driver_verifications v USING(discord_user_id)
+          LEFT JOIN driver_verifications v ON v.discord_user_id=ids.discord_user_id
           WHERE (d.discord_user_id IS NULL
             OR d.trucksbook_name<>('__unlinked_driver_'||d.discord_user_id::text||'__'))
         )
