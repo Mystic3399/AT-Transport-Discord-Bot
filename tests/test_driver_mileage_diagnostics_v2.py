@@ -87,6 +87,8 @@ class DriverEvidenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('h.provider_account_id=l.tb_id',sql)
         self.assertIn("v.status='completed'",sql)
         self.assertIn("v.discord_user_id=ids.discord_user_id",sql)
+        self.assertIn("($2::boolean OR",sql)
+        self.assertFalse(conn.fetch.await_args.args[2])
         self.assertNotIn('UPDATE',sql)
         self.assertNotIn('INSERT',sql)
         self.assertNotIn('trucksbook_name=',sql)
@@ -98,7 +100,7 @@ class DriverEvidenceTests(unittest.IsolatedAsyncioTestCase):
                    and n.name=='audit_zero_mile_driver_sources_once')
         snippet=ast.unparse(fn)
         self.assertIn('scan_zero_mile_driver_sources',snippet)
-        self.assertIn('ZERO MILE DRIVER SOURCE DIAGNOSIS',snippet)
+        self.assertIn('LINKED DRIVER SOURCE SNAPSHOT',snippet)
         self.assertNotIn('record_real_job',snippet)
         self.assertNotIn('UPDATE driver_links',snippet)
 
