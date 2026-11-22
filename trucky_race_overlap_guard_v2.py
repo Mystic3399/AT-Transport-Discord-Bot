@@ -73,6 +73,9 @@ async def race_overlap_hold(conn, candidate):
         # Conflicting retained versions are not evidence for an independent job.
         if len({(job["delivered_at"],str(job["metadata"])) for job in comparisons}) > 1:
             return "race_conflicting_route_evidence"
-        if any(possible_same_journey(candidate, job) for job in comparisons):
-            return "race_potential_duplicate"
+        try:
+            if any(possible_same_journey(candidate, job) for job in comparisons):
+                return "race_potential_duplicate"
+        except (ValueError, TypeError, KeyError):
+            return "race_route_evidence_pending"
     return None
