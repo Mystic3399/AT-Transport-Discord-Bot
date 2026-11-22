@@ -2015,7 +2015,7 @@ async def fetch_period_rankings(connection, guild, period_start, period_end):
         WITH eligible_jobs AS (
             SELECT discord_user_id, trucksbook_name, accepted_distance, processed_at
             FROM processed_jobs p
-            WHERE LOWER(statistics) = 'real' AND accepted_distance > 0
+            WHERE LOWER(statistics) LIKE 'real%' AND accepted_distance > 0
               AND processed_at >= $1 AND processed_at < $2
               AND discord_user_id = ANY($3::BIGINT[])
             {exclude_superseded}
@@ -2390,7 +2390,7 @@ async def deliver_pending_real_milestones(guild):
             break
 
 
-@tasks.loop(minutes=1)
+@tasks.loop(minutes=10)
 async def leaderboard_rollover_task():
     try:
         await maintain_driver_leaderboard()
@@ -2406,6 +2406,9 @@ async def leaderboard_rollover_task():
 @leaderboard_rollover_task.before_loop
 async def before_leaderboard_rollover_task():
     await bot.wait_until_ready()
+    # Startup already rendered the leaderboard. Avoid immediate duplicate
+    # message edits and keep Discord's upload/attachment rate limits clear.
+    await asyncio.sleep(600)
 
 
 async def refresh_hall_of_fame_display():
