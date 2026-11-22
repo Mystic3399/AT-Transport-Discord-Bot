@@ -58,7 +58,6 @@ async def read_trucky_allocation_audit(pool, discord_user_id=None):
                       AND ($1::bigint IS NULL OR d.discord_user_id=$1)
                     ORDER BY d.provider_job_id,d.decision_id DESC
                 ) latest WHERE decision='pending_reconciliation'
-                  AND reason_code='historical_or_trucksbook_overlap'
                   AND NOT EXISTS(SELECT 1 FROM unified_v2_production_credit_ledger l
                     WHERE l.provider='trucky' AND l.provider_job_id=latest.provider_job_id)""", discord_user_id)
     return result
