@@ -86,6 +86,7 @@ class DriverEvidenceTests(unittest.IsolatedAsyncioTestCase):
         sql=conn.fetch.await_args.args[0]
         self.assertIn('h.provider_account_id=l.tb_id',sql)
         self.assertIn("v.status='completed'",sql)
+        self.assertIn("v.discord_user_id=ids.discord_user_id",sql)
         self.assertNotIn('UPDATE',sql)
         self.assertNotIn('INSERT',sql)
         self.assertNotIn('trucksbook_name=',sql)
