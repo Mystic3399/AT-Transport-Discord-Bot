@@ -52,6 +52,16 @@ class AutomaticSourceProofTests(unittest.TestCase):
         self.assertIn("retain_trucksbook_source_observation",body)
         self.assertNotIn("record_real_job(",body)
 
+    def test_legacy_writer_blocks_double_credit_with_trucky_race(self):
+        tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
+        scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                  and n.name=="record_real_job")
+        body=ast.unparse(scan)
+        self.assertIn("pending_race_cross_provider_review",body)
+        self.assertIn("pending_race_cross_provider_evidence",body)
+        self.assertIn("valid_temporal_trucksbook_observation",body)
+        self.assertIn("mileage_type = 'race'",body)
+
     def test_automatic_replay_requires_snapshots_and_exact_accounts(self):
         tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
         scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
