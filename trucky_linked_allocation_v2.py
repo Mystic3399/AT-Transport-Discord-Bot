@@ -172,7 +172,7 @@ async def preview_historical_real_batch(pool, discord_user_id, job_ids, approval
     return results
 
 
-async def _settle_candidate(conn, candidate, member_ids):
+async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False):
     """One transaction per job. Caller must have checked the runtime boundary."""
     user = candidate['discord_user_id']
     account = candidate['provider_account_id']
@@ -231,7 +231,7 @@ async def _settle_candidate(conn, candidate, member_ids):
             # Even without a saved TB link, an existing unexplained balance is
             # historical evidence, never permission to add a second total.
             if overlap or int(legacy or 0) != int(existing_real.to_integral_value(rounding=ROUND_FLOOR)):
-                if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
+                if not reviewed and os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
                     await _record_decision(conn, candidate, 'pending_reconciliation', 'historical_or_trucksbook_overlap')
                     return 'pending_reconciliation'
                 from automatic_linked_mileage_v2 import reconcile_trucky
