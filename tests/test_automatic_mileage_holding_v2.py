@@ -122,7 +122,7 @@ class ReleasePathTests(unittest.TestCase):
                      and n.name=='mileage_queue_status')
         body=ast.unparse(node)
         self.assertIn("awards",body)
-        self.assertIn("credited_at >= NOW() - INTERVAL '24 hours'".replace(' >= ','>='),body)
+        self.assertIn("credited_at>=NOW()-INTERVAL '24 hours'",body)
         self.assertIn('canonical_credit_key LIKE',body)
         self.assertIn('SUM(miles)',body)
         self.assertIn('group by mileage_type'.upper(),body.upper())
