@@ -4840,11 +4840,52 @@ async def trucky_logbook_audit(ctx):
 @commands.guild_only()
 @commands.has_guild_permissions(administrator=True)
 @commands.cooldown(1, 20, commands.BucketType.guild)
-async def mileage_queue_status(ctx):
-    """Compact overview of source jobs automatically waiting for verification."""
+async def mileage_queue_status(ctx, view: str = "summary"):
+    """Compact overview or private evidence reasons; never modifies mileage."""
     if ctx.guild.id != GUILD_ID or db_pool is None:
         return
     import automatic_mileage_holding_v2 as holding
+    if view.lower() in ('details','breakdown'):
+        async with db_pool.acquire() as conn:
+            reasons = await conn.fetch("""
+                SELECT provider,reason_code,state,COUNT(*)::BIGINT AS jobs
+                FROM automatic_mileage_holding_v2
+                WHERE state<>'credited'
+                GROUP BY provider,reason_code,state
+                ORDER BY provider,COUNT(*) DESC,reason_code
+            """)
+        names={
+            'account_link_pending':'Account awaiting verified link',
+            'unverified_owner':'Unmatched provider account',
+            'company_not_member':'A&T membership not confirmed',
+            'company_membership_unconfirmed':'A&T membership not confirmed',
+            'historical_route_coverage_pending':'Historical route/baseline evidence',
+            'race_historical_route_coverage_pending':'Race duplicate evidence',
+            'historical_balance_pending':'Historical balance unresolved',
+            'route_evidence_pending':'Route/delivery fields incomplete',
+            'invalid_or_conflicting_pending':'Invalid/conflicting source versions',
+            'multiple_provider_owners':'Multiple account owners',
+            'invalid_source':'Invalid provider evidence',
+        }
+        messages=['**A&T Mileage Queue — reasons for held jobs**']
+        for provider,label in (('trucksbook','TrucksBook'),('trucky','Trucky')):
+            selected=[x for x in reasons if x['provider']==provider]
+            messages.append(f"**{label}: {sum(int(x['jobs']) for x in selected):,} pending/excluded records**")
+            for record in selected[:6]:
+                reason=record['reason_code']
+                caption=names.get(reason,reason.replace('_',' ').capitalize())
+                messages.append(f"• {caption}: **{int(record['jobs']):,}**")
+            if len(selected)>6:
+                messages.append(f"• Other reasons: **{sum(int(x['jobs']) for x in selected[6:]):,}**")
+        messages.append("These are recorded jobs, **not approved missing miles**. "
+                        "Existing verified jobs are retried automatically; conflicting records "
+                        "cannot be credited twice.")
+        await ctx.reply("\n".join(messages),
+                        mention_author=False,allowed_mentions=discord.AllowedMentions.none())
+        return
+    if view.lower() not in ('summary',''):
+        await ctx.reply("Use `!mileagequeue` or `!mileagequeue details`.",mention_author=False)
+        return
     async with db_pool.acquire() as conn:
         rows = await holding.holding_summary(conn)
     by_state={}
@@ -4859,7 +4900,7 @@ async def mileage_queue_status(ctx):
     excluded=by_state.get('excluded',0)
     await ctx.reply(
         "🚛 **A&T Automatic Mileage Queue**\n"
-        f"✅ Automatically processed: **{credited:,} jobs**\n"
+        f"✅ Recorded as credited (old or new): **{credited:,} jobs**\n"
         f"🔗 Waiting for verified account link: **{waiting_link:,}**\n"
         f"👷 Waiting for A&T membership: **{waiting_member:,}**\n"
         f"📋 Waiting for independent source/duplicate evidence: **{evidence:,}**\n"
