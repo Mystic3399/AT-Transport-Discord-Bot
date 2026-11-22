@@ -7659,6 +7659,12 @@ async def register_driver(ctx):
     if member.bot:
         return
 
+    # A slash interaction expires if we spend several seconds looking up
+    # driver records or creating the private verification channel first.
+    # Acknowledge it privately before any database or Discord API calls.
+    if ctx.interaction is not None:
+        await ctx.defer(ephemeral=True)
+
     if db_pool is None:
         await onboarding_reply(
             "The A&T verification database is "
