@@ -66,9 +66,9 @@ def holding_state(reason):
         return 'awaiting_historical_baseline'
     if reason in ('invalid_or_conflicting_pending','conflicting_job_pending',
                   'race_conflicting_route_evidence','conflicting_route_evidence',
-                  'multiple_provider_owners'):
+                  'multiple_provider_owners','source_conflict','unverified_or_conflicting_source'):
         return 'provider_conflict'
-    if reason in ('invalid_source','excluded','invalid_speed','cancelled','unlisted'):
+    if reason in ('invalid_source','unsupported_or_invalid_source','excluded','invalid_speed','cancelled','unlisted'):
         return 'excluded'
     if reason in ('credited','credited_real','credited_race','replayed'):
         return 'credited'
