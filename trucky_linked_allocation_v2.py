@@ -239,6 +239,14 @@ async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False):
                 if hold:
                     await _record_decision(conn, candidate, 'pending_reconciliation', hold)
                     return hold
+        if candidate['mileage_type'] == 'race':
+            # A Race bucket does not make an identical TrucksBook Real delivery
+            # independent. Do not credit Race and Real for the same journey.
+            from trucky_race_overlap_guard_v2 import race_overlap_hold
+            race_hold = await race_overlap_hold(conn, candidate)
+            if race_hold:
+                await _record_decision(conn, candidate, 'pending_reconciliation', race_hold)
+                return race_hold
         ownership_digest = hashlib.sha256(json.dumps({
             'policy': POLICY, 'discord': user, 'account': account,
             'steam': owner['steam_id64'], 'active_company': 49041
