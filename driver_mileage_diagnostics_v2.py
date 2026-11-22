@@ -22,14 +22,18 @@ async def inspect_driver(conn,discord_id):
            WHERE discord_user_id=$1 AND status='completed'
              AND completed_at IS NOT NULL) AS completed_tb_id,
           (SELECT status FROM unified_provider_claims
-           WHERE discord_user_id=$1 AND provider='trucksbook') AS ownership_claim_status,
+           WHERE discord_user_id=$1 AND provider='trucksbook'
+           ORDER BY reviewed_at DESC NULLS LAST LIMIT 1) AS ownership_claim_status,
           (SELECT ownership_confirmed FROM unified_provider_claims
-           WHERE discord_user_id=$1 AND provider='trucksbook') AS ownership_confirmed,
+           WHERE discord_user_id=$1 AND provider='trucksbook'
+           ORDER BY reviewed_at DESC NULLS LAST LIMIT 1) AS ownership_confirmed,
           (SELECT ownership_evidence_kind FROM unified_provider_claims
-           WHERE discord_user_id=$1 AND provider='trucksbook') AS ownership_evidence_kind,
+           WHERE discord_user_id=$1 AND provider='trucksbook'
+           ORDER BY reviewed_at DESC NULLS LAST LIMIT 1) AS ownership_evidence_kind,
           (SELECT reviewed_at IS NOT NULL AND reviewed_by IS NOT NULL
            FROM unified_provider_claims
-           WHERE discord_user_id=$1 AND provider='trucksbook') AS ownership_reviewed,
+           WHERE discord_user_id=$1 AND provider='trucksbook'
+           ORDER BY reviewed_at DESC NULLS LAST LIMIT 1) AS ownership_reviewed,
           (SELECT status FROM driver_verifications
            WHERE discord_user_id=$1) AS verification_status,
           COALESCE((SELECT real_miles FROM driver_progress
