@@ -55,7 +55,7 @@ class QueueSafety(unittest.IsolatedAsyncioTestCase):
         self.assertIn("WHERE automatic_mileage_holding_v2.state<>'credited'",statement)
         self.assertNotIn("driver_progress",statement)
         self.assertNotIn("UPDATE unified_v2_production_mileage_totals",statement)
-        self.assertEqual(conn.execute.await_args.args[6],'race')
+        self.assertEqual(conn.execute.await_args.args[5],'race')
 
     async def test_credited_status_needs_known_verified_driver(self):
         conn=type('Conn',(),{})()
