@@ -131,7 +131,10 @@ async def scan_zero_mile_driver_sources(conn,limit=40,*,include_credited=False):
           UNION SELECT discord_user_id FROM unified_provider_links
           WHERE provider='trucksbook'
         ), linked AS (
-          SELECT ids.discord_user_id,d.trucksbook_name,
+          SELECT ids.discord_user_id,
+            COALESCE(d.trucksbook_name,p.provider_display_name) AS trucksbook_name,
+            p.provider_account_id AS claimed_tb_id,
+            (p.verified_at IS NOT NULL) AS claim_verified,
             COALESCE(d.trucksbook_user_id::text,
               CASE WHEN p.verified_at IS NOT NULL THEN p.provider_account_id END,
               CASE WHEN v.status='completed' AND v.completed_at IS NOT NULL
@@ -145,6 +148,7 @@ async def scan_zero_mile_driver_sources(conn,limit=40,*,include_credited=False):
             OR d.trucksbook_name<>('__unlinked_driver_'||d.discord_user_id::text||'__'))
         )
         SELECT l.discord_user_id,l.trucksbook_name,l.tb_id,
+               l.claimed_tb_id,l.claim_verified,
           COALESCE((SELECT real_miles FROM driver_progress
                     WHERE discord_user_id=l.discord_user_id),0) AS real_miles,
           (SELECT COUNT(*) FROM processed_jobs j
@@ -154,12 +158,12 @@ async def scan_zero_mile_driver_sources(conn,limit=40,*,include_credited=False):
            FROM pending_provider_job_history_v2 h
            WHERE h.provider='trucksbook'
              AND h.source_kind='verified_webhook_source'
-             AND h.provider_account_id=l.tb_id) AS source_jobs,
+             AND h.provider_account_id=COALESCE(l.tb_id,l.claimed_tb_id)) AS source_jobs,
           (SELECT COUNT(DISTINCT h.provider_job_id)
            FROM pending_provider_job_history_v2 h
            WHERE h.provider='trucksbook'
              AND h.source_kind='verified_webhook_source'
-             AND h.provider_account_id=l.tb_id
+             AND h.provider_account_id=COALESCE(l.tb_id,l.claimed_tb_id)
              AND LOWER(COALESCE(h.evidence->>'stats_type','')) LIKE 'real%'
              AND NOT EXISTS(SELECT 1 FROM processed_jobs j
                             WHERE j.job_id=h.provider_job_id))
