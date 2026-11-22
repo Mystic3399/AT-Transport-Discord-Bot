@@ -38,7 +38,7 @@ async def repair_approved_provider_links(pool):
                 if c["ownership_evidence_kind"] != PROOF.get(provider):
                     continue
                 result["eligible"] += 1
-                # Prevent a cross-table mismatch from being silently overwritten.
+                # Serialize per-owner repair before checking unique constraints.\n                await conn.execute("SELECT pg_advisory_xact_lock($1)", int(user))\n                # Prevent a cross-table mismatch from being silently overwritten.
                 conflict = await conn.fetchval("""
                     SELECT EXISTS(
                         SELECT 1 FROM unified_provider_links l
