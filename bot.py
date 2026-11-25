@@ -1091,6 +1091,13 @@ intents.message_content = True
 class ATCommandBot(commands.Bot):
     async def setup_hook(self):
         self.add_dynamic_items(TachographFlip)
+        try:
+            from driver_number_integration import install
+            await install(self, GUILD_ID)
+        except Exception:
+            import traceback
+            print("DRIVER NUMBER INTEGRATION FAILED", flush=True)
+            traceback.print_exc()
 
     async def close(self):
         global public_http_runner
