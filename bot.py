@@ -3542,7 +3542,25 @@ async def ingest_trucky_company_jobs():
             if repair["repaired"] or repair["conflicts"] or repair.get("trucksbook_source_account_diagnostics"):
                 print("REGISTERED PROVIDER LINK REPAIR " +
                       json.dumps(repair,sort_keys=True),flush=True)
+            import completed_onboarding_tb_credit as onboarding_credit
+            guild = bot.get_guild(GUILD_ID)
+            if onboarding_credit.enabled() and guild is not None:
+                try:
+                    restored = await onboarding_credit.restore_confirmation_receipts(
+                        db_pool, guild.get_channel(VERIFICATION_LOG_CHANNEL_ID), bot.user.id)
+                    if restored:
+                        print(f"ONBOARDING CONFIRMATION RECEIPTS RESTORED: {restored}",flush=True)
+                except Exception as error:
+                    print(f"ONBOARDING CONFIRMATION RECEIPTS RETRY: {type(error).__name__}",flush=True)
             await replay_saved_trucksbook_jobs()
+            diagnostic_account = os.getenv("AT_V2_MILEAGE_DIAGNOSTIC_ACCOUNT", "")
+            if onboarding_credit.enabled() and re.fullmatch(r"[1-9][0-9]{0,18}", diagnostic_account):
+                try:
+                    async with db_pool.acquire() as conn:
+                        report = await onboarding_credit.recovery_report(conn, diagnostic_account)
+                    print("POST RECOVERY ACCOUNT " + json.dumps(report,sort_keys=True,default=str),flush=True)
+                except Exception as error:
+                    print(f"POST RECOVERY ACCOUNT RETRY: {type(error).__name__}",flush=True)
             # Eligibility is membership on either A&T tracker, tied to the
             # same Discord driver. A names-only match cannot release a job.
             alternate_members = frozenset(int(uid) for uid, status
