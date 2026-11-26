@@ -129,6 +129,12 @@ async def audit_account_matches(conn, candidate, *, lock=False):
     if verified_owner is not None:
         return verified_owner == user
 
+    # Company-approved completed onboarding is a separate mileage assignment,
+    # not provider ownership proof. The recovery worker checks live membership.
+    from completed_onboarding_tb_credit import completed_owner
+    if await completed_owner(conn, account=account, user=int(user)):
+        return True
+
     # Staff-reviewed Steam/profile ownership can survive a missing mirrored
     # unified_provider_links row. Never accept a bare self-entered ID.
     if await conn.fetchval("""
