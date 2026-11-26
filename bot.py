@@ -1312,6 +1312,13 @@ async def record_real_job(
             # Shared lock with accepted-link Trucky allocation. This also
             # protects retries after disabling that worker or a restart.
             await connection.execute('SELECT pg_advisory_xact_lock($1)', discord_user_id)
+            if historical_provider_account_id is not None:
+                import mileage_audit_confirmation_v2 as account_review
+                if not await account_review.audit_account_matches(
+                        connection, dict(discord_user_id=discord_user_id,
+                            source_provider_account_id=historical_provider_account_id)):
+                    return {'status':'source_account_disagrees','real_miles':None,
+                            'crossed_milestones':[]}
             if historical_backfill_source is not None:
                 # Recheck authoritative account + fully explained legacy totals
                 # INSIDE the writer transaction, after acquiring the same
@@ -3309,6 +3316,16 @@ async def replay_saved_trucksbook_jobs():
                       AND ((l.discord_user_id=d.discord_user_id AND l.provider_account_id<>$1)
                         OR (l.discord_user_id<>d.discord_user_id AND l.provider_account_id=$1)))
             """, account)
+            from completed_onboarding_tb_credit import completed_owner
+            assigned_owner = await completed_owner(conn, account=account)
+            company_assignment = False
+            if assigned_owner is not None:
+                assigned_id = int(assigned_owner["discord_user_id"])
+                if not owners:
+                    owners = [{"discord_user_id": assigned_id}]
+                    company_assignment = True
+                elif any(int(owner["discord_user_id"]) != assigned_id for owner in owners):
+                    owners = []
             if len(owners) != 1:
                 unresolved += 1
                 reasons['provider_link_not_verified'] += 1
@@ -3336,7 +3353,12 @@ async def replay_saved_trucksbook_jobs():
         current_member = (report is not None
                           and report.get("discord") == "In server"
                           and report.get("company") == "Active company driver")
-        if not current_member:
+        if company_assignment:
+            # Company-approved routing is never provider ownership proof.
+            # Require a fresh lookup of this exact account, even if the
+            # driver's other tracking account is an active member.
+            current_member = await verify_current_trucksbook_recovery_membership(account, report)
+        elif not current_member:
             # The periodic membership snapshot may be up to six hours old.
             # A fresh positive check against the EXACT independently verified
             # TrucksBook account can safely release a now-active driver.
@@ -3368,7 +3390,7 @@ async def replay_saved_trucksbook_jobs():
         result = await record_real_job(
             job_id,name,user,evidence["distance"],
             historical_backfill_source=historical_backfill_source,
-            historical_provider_account_id=account if historical_backfill_source else None)
+            historical_provider_account_id=account if historical_backfill_source or company_assignment else None)
         if result and result.get("status") == "added":
             credited += 1
             # Defer Discord API updates until the batch has settled. Several
