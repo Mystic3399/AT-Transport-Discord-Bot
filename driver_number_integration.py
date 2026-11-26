@@ -32,13 +32,9 @@ async def install(client, guild_id):
     async def on_message(message):
         if message.guild and message.guild.id == guild_id:
             await source.on_message(message)
-    async def on_member_join(member):
-        if member.guild.id == guild_id:
-            await source.on_member_join(member)
     for command in commands:
-        client.tree.add_command(command)
-    client.add_view(source.RoleButtonsView())
+        if command.name != "testwelcome":
+            client.tree.add_command(command)
     client.add_listener(on_message, "on_message")
-    client.add_listener(on_member_join, "on_member_join")
     client._driver_numbers_installed = True
     print("DRIVER NUMBER INTEGRATION READY", flush=True)
