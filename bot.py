@@ -8979,7 +8979,7 @@ async def register_trucky_in_channel(ctx, account_id: str = None):
 async def approve_unified_provider(
     ctx, provider: str = None, observed_steam_id64: str = None,
     observed_trucksbook_id: str = None, evidence_sha256: str = None,
-    membership_confirmation: str = None,
+    membership_confirmation: str = None, driver: discord.Member = None,
 ):
     """Management-only V2 beta approval within the applicant's private channel."""
     if ctx.guild is None or ctx.guild.id != GUILD_ID:
@@ -8991,17 +8991,25 @@ async def approve_unified_provider(
         await ctx.reply(
             "Use `!approveprovider trucky`, or `!approveprovider trucksbook "
             "<observed SteamID64> <observed TrucksBook ID> <evidence SHA-256> witnessed-profile-steam-member` "
-            "Independent TrucksBook profile review is staging-only and cannot authorise mileage.", mention_author=False,
+            "Independent TrucksBook profile review requires genuine witnessed evidence.", mention_author=False,
         )
         return
     if db_pool is None:
         await ctx.reply("Registration database unavailable.", mention_author=False)
         return
     verification = await get_verification_by_channel(ctx.channel.id)
-    if verification is None:
-        await ctx.reply("Use this command in the applicant's private verification channel.", mention_author=False)
+    if driver is not None:
+        if (not ctx.author.guild_permissions.administrator
+                or ctx.channel.id != VERIFICATION_LOG_CHANNEL_ID
+                or ctx.channel.permissions_for(ctx.guild.default_role).view_channel):
+            await ctx.reply("Existing driver reviews require an administrator in the private verification log channel.", mention_author=False)
+            return
+        applicant_id = driver.id
+    elif verification is not None and not ctx.channel.permissions_for(ctx.guild.default_role).view_channel:
+        applicant_id = int(verification["discord_user_id"])
+    else:
+        await ctx.reply("Use the private applicant channel, or add the driver mention in the private verification log channel.", mention_author=False)
         return
-    applicant_id = int(verification["discord_user_id"])
     if applicant_id == ctx.author.id:
         await ctx.reply("You cannot approve your own account.", mention_author=False)
         return
@@ -9010,10 +9018,11 @@ async def approve_unified_provider(
         await ctx.reply("No reviewable V2 claim for that provider.", mention_author=False)
         return
     if provider == "trucksbook":
-        if (os.getenv("AT_V2_ISOLATED_STAGING") != "YES"
+        from unified_registration_workflow_v2 import enabled as registration_enabled
+        if (not registration_enabled()
                 or membership_confirmation != "witnessed-profile-steam-member"):
             await ctx.reply(
-                "TrucksBook automatic approval is disabled. In isolated staging only, "
+                "TrucksBook review requires the approved registration release. "
                 "independent staff may witness the applicant's signed-in account, matching "
                 "read-only Steam mapping and active A&T membership, then use "
                 "!approveprovider trucksbook <observed SteamID64> <observed TrucksBook ID> "
@@ -9021,6 +9030,13 @@ async def approve_unified_provider(
                 "The old confirm-member / Steam-login flow cannot approve ownership.",
                 mention_author=False,
             )
+            return
+        if not observed_trucksbook_id or not re.fullmatch(r"[1-9][0-9]{0,18}", observed_trucksbook_id):
+            await ctx.reply("Supply the observed numeric TrucksBook account ID.", mention_author=False)
+            return
+        profile = await fetch_trucksbook_profile(int(observed_trucksbook_id))
+        if profile.get("success") is not True or profile.get("belongs_to_at") is not True:
+            await ctx.reply("Current A&T TrucksBook membership could not be confirmed.", mention_author=False)
             return
         try:
             await unified_driver_profiles.review_trucksbook_authenticated_profile(
@@ -9035,9 +9051,9 @@ async def approve_unified_provider(
             await ctx.reply("Review failed; no partial approval was saved.", mention_author=False)
             return
         await ctx.reply(
-            "Independent staff profile review recorded in staging. "
-            "This does not authorise job credit or duplicate reconciliation. "
-            "No mileage, roles, achievements or Company Mods access changed.",
+            "Independent staff profile review recorded. "
+            "Eligible saved jobs will be rechecked by the existing automatic recovery worker. "
+            "No mileage was manually awarded.",
             mention_author=False,
         )
         return
