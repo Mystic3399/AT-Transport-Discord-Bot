@@ -3247,6 +3247,7 @@ async def replay_saved_trucksbook_jobs():
     reasons = Counter()
     affected_users = {}
     queued = {}
+    company_membership_reports = {}
     for job_id, group in versions.items():
         if len(group) != 1 or not auto.trusted_account_id(group[0]["provider_account_id"]):
             unresolved += 1
@@ -3357,7 +3358,21 @@ async def replay_saved_trucksbook_jobs():
             # Company-approved routing is never provider ownership proof.
             # Require a fresh lookup of this exact account, even if the
             # driver's other tracking account is an active member.
-            current_member = await verify_current_trucksbook_recovery_membership(account, report)
+            # Do not wait for the periodic membership snapshot after startup.
+            # Confirm Discord membership directly once per driver per pass.
+            if user not in company_membership_reports:
+                refreshed = dict(report or {})
+                home_guild = bot.get_guild(GUILD_ID)
+                member = home_guild.get_member(user) if home_guild else None
+                if member is None and home_guild is not None:
+                    try:
+                        member = await home_guild.fetch_member(user)
+                    except discord.HTTPException:
+                        member = None
+                refreshed["discord"] = "In server" if member is not None and not member.bot else "Not confirmed"
+                company_membership_reports[user] = refreshed
+            current_member = await verify_current_trucksbook_recovery_membership(
+                account, company_membership_reports[user])
         elif not current_member:
             # The periodic membership snapshot may be up to six hours old.
             # A fresh positive check against the EXACT independently verified
