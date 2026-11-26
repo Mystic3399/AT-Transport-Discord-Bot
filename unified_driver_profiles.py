@@ -453,8 +453,9 @@ async def review_trucksbook_authenticated_profile(
     """
     import os
     import re
-    if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
-        raise ValueError("Authenticated profile review is restricted to isolated staging")
+    from unified_registration_workflow_v2 import enabled as registration_enabled
+    if not registration_enabled():
+        raise ValueError("Authenticated profile review requires the approved registration deployment")
     if reviewer_id == discord_user_id:
         raise ValueError("An independent staff member must review this account")
     if witnessed_profile_mapping is not True:
@@ -496,6 +497,20 @@ async def review_trucksbook_authenticated_profile(
             """, observed_trucksbook_id, discord_user_id)
             if conflicting:
                 raise ValueError("TrucksBook account has a conflicting ownership claim")
+            if await conn.fetchval("""
+                SELECT EXISTS(SELECT 1 FROM driver_links
+                    WHERE (trucksbook_user_id::text=$1 AND discord_user_id<>$2)
+                       OR (discord_user_id=$2 AND trucksbook_user_id IS NOT NULL
+                           AND trucksbook_user_id::text<>$1))
+            """, observed_trucksbook_id, discord_user_id):
+                raise ValueError("TrucksBook account conflicts with existing driver history")
+            if os.getenv("AT_V2_ISOLATED_STAGING") != "YES":
+                active = await conn.fetchval("""
+                    SELECT EXISTS(SELECT 1 FROM unified_driver_profiles
+                        WHERE discord_user_id=$1 AND status='active')
+                """, discord_user_id)
+                if not active:
+                    raise ValueError("Complete driver onboarding before ownership review")
             if (claim["status"] == "approved" and claim["membership_confirmed"]
                     and claim["ownership_confirmed"]
                     and claim["ownership_evidence_kind"] == "trucksbook_staff_reviewed_profile_steam_mapping"
