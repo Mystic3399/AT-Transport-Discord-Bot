@@ -161,9 +161,9 @@ async def complete_if_ready(pool, user_id, channel_id=None):
             if channel_id is not None:
                 # Applicant confirmation completes only this legacy onboarding row;
                 # preserve account IDs, mileage and historical profile records.
-                await conn.execute("""UPDATE driver_verifications SET status='completed',completed_at=COALESCE(completed_at,NOW())
+                await conn.execute("""UPDATE driver_verifications SET status='completed',completed_at=NOW()
                     WHERE discord_user_id=$1 AND verification_channel_id=$2
-                      AND status IN ('pending','confirmed')""", user_id, channel_id)
+                      AND status IN ('pending','confirmed','completed')""", user_id, channel_id)
     return True
 
 
