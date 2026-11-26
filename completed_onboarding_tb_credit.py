@@ -129,7 +129,7 @@ async def recovery_report(conn, account):
         LEFT JOIN driver_verifications v USING(discord_user_id)
         LEFT JOIN unified_provider_claims c ON c.discord_user_id=l.discord_user_id
             AND c.provider=l.provider AND c.provider_account_id=l.provider_account_id
-        LEFT JOIN driver_progress d USING(discord_user_id)
+        LEFT JOIN driver_progress d ON d.discord_user_id=l.discord_user_id
         WHERE l.provider='trucksbook' AND l.provider_account_id=$1
     """, account)
     if row is None:
