@@ -24,7 +24,7 @@ async def has_valid_tracking_link(conn, discord_user_id):
     """
     if type(discord_user_id) is not int or discord_user_id <= 0:
         return False
-    return bool(await conn.fetchval("""
+    existing = bool(await conn.fetchval("""
         SELECT EXISTS(
             SELECT 1 FROM unified_provider_links l
             JOIN unified_driver_profiles p USING(discord_user_id)
@@ -36,6 +36,10 @@ async def has_valid_tracking_link(conn, discord_user_id):
               AND d.trucksbook_name <> ('__unlinked_driver_'||d.discord_user_id::text||'__')
         )
     """, discord_user_id))
+    if existing:
+        return True
+    from completed_onboarding_tb_credit import completed_owner
+    return (await completed_owner(conn, user=discord_user_id)) is not None
 
 
 def allowed(member,role_ids=None):
