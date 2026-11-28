@@ -71,7 +71,7 @@ async def collect_snapshot(pool, guild, read_profile, membership):
                 generatedAt=datetime.now(timezone.utc).isoformat(),
                 mileagePolicy='higher-provider-mileage',totals=totals,profiles=profiles)
 
-async def game_coverage(pool):
+async def game_coverage(pool, profiles):
     """Read aggregate credited deliveries by their recorded source game."""
     async with pool.acquire() as connection:
         async with connection.transaction(readonly=True):
@@ -85,9 +85,10 @@ async def game_coverage(pool):
                 LEFT JOIN unified_provider_job_events e
                   ON e.provider=c.provider AND e.provider_job_id=c.provider_job_id
                  AND e.discord_user_id=c.discord_user_id
+                WHERE c.discord_user_id=ANY($1::bigint[])
                 GROUP BY c.provider, c.mileage_type, game
                 ORDER BY c.provider, c.mileage_type, game
-            """)
+            """, [int(profile['discordUserId']) for profile in profiles])
     return [dict(provider=row['provider'], game=row['game'],
                  mileageType=row['mileage_type'], jobs=int(row['jobs']),
                  miles=float(row['miles'])) for row in rows]
@@ -113,6 +114,6 @@ async def publish(pool, guild, read_profile, membership):
     print('WEBSITE COMPANY TOTALS PUBLISHED ' + json.dumps(snapshot['totals']) + f" profiles={len(snapshot['profiles'])}",flush=True)
 
     try:
-        print('WEBSITE CREDITED GAME COVERAGE ' + json.dumps(await game_coverage(pool)), flush=True)
+        print('WEBSITE CREDITED GAME COVERAGE ' + json.dumps(await game_coverage(pool, snapshot['profiles'])), flush=True)
     except Exception as error:
         print('WEBSITE GAME COVERAGE UNAVAILABLE: ' + type(error).__name__, flush=True)
