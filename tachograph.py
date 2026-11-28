@@ -286,7 +286,7 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             return
         maker = race_badge if race else badge
         image(maker(track["current"], False), (x+7, y+5, badge_width, bottom-y-10))
-        text(label_x, y+10, track_label + (" · " if compact else " PROGRESSION"),
+        text(label_x, y+10, track_label + (" MILEAGE" if compact else " PROGRESSION"),
              12 if compact else 14, accent, width=content_right-label_x)
         metal(label_x, y+28, track["name"], 17 if compact else 22,
               width=content_right-label_x-(0 if compact else 230))
@@ -296,7 +296,7 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             text(label_x, y+48, target, 15, WHITE, width=content_right-label_x)
         else:
             text(content_right-225, y+28, target, 20, WHITE, width=225)
-        bar_y = y+69 if compact else y+57
+        bar_y = y+69 if compact else y+53
         width = content_right-label_x
         draw.rounded_rectangle((label_x,bar_y,content_right,bar_y+13),5,
                                fill="#132b3d",outline=accent,width=1)
@@ -385,10 +385,12 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             text(x+58,395,label,13,CYAN,width=130)
             metal(x+58,414,value,25,width=126)
             draw.line((x-15,396,x-15,438),fill="#4789a7",width=1)
-        track_row((329,461,1083,550), real_track)
-        track_row((329,558,1083,647), race_track, race=True)
-        detail("verified-driver-shield",(934,192,31,35))
-        text(973,200,"LINKED",12,CYAN,width=100)
+        track_row((329,455,1083,550), real_track)
+        track_row((329,558,1083,653), race_track, race=True)
+        panel((934,169,1083,251))
+        detail("verified-driver-shield",(942,184,39,48))
+        text(987,188,"LINKED A&T",12,CYAN,width=87)
+        metal(987,209,"DRIVER",16,width=87)
     else:
         asset(ART/"company-logo.webp",(30,16,250,100))
         metal(330,40,"DRIVER CAREER RECORD",33,width=644)
@@ -461,15 +463,15 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
                                        outline=CYAN if real_current else AMBER,width=2)
             earned_real = real >= miles
             earned_race = race_track is not None and race_track["miles"] >= miles
-            if earned_race and not earned_real:
+            if earned_race and (race_current or not earned_real):
                 image(race_badge(miles),(x+3,y+3,80,87))
             else:
                 image(badge(miles,not earned_real),(x+3,y+3,80,87))
             centred_metal(x+1,y+91,threshold_key(miles).upper(),15,84)
             if real_current:
-                draw.polygon(((x+20,y+111),(x+14,y+116),(x+26,y+116)),fill=CYAN)
+                draw.rounded_rectangle((x+9,y+108,x+38,y+111),1,fill=CYAN)
             if race_current:
-                draw.polygon(((x+65,y+111),(x+59,y+116),(x+71,y+116)),fill=AMBER)
+                draw.rounded_rectangle((x+48,y+108,x+77,y+111),1,fill=AMBER)
         detail("footer-back",(273,660,566,30))
     if side == "front":
         detail("footer-front",(273,660,566,30))
