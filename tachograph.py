@@ -1,6 +1,7 @@
 """A&T tachograph artwork renderer and persistent appearance settings."""
 import json
 import random
+import re
 from decimal import Decimal
 from functools import lru_cache
 from io import BytesIO
@@ -74,6 +75,14 @@ TRUCK_LABELS = {
     "western-star-57x":"Western Star 57X",
     "scania-t-cab-longline":"Scania T-Cab Longline",
     "freightliner-cascadia":"Freightliner Cascadia",
+    "scania-streamline":"Scania R Streamline",
+    "scania-164l":"Scania 164L V8 Topline",
+    "mercedes-actros-mp6-longline":"Mercedes-Benz Actros MP6 Longline",
+    "iveco-s-way-longline":"Iveco S-Way Longline",
+    "volvo-fh16-heavy-haul":"Volvo FH16 8×4 Heavy Haul",
+    "mercedes-actros-wrecker":"Mercedes-Benz Actros Wrecker",
+    "kenworth-t680":"Kenworth T680 Next Generation",
+    "peterbilt-389":"Peterbilt 389",
 }
 
 
@@ -171,8 +180,44 @@ def race_badge(miles, locked=False):
         layer.alpha_composite(source.convert("RGBA"))
     return layer
 
+@lru_cache(maxsize=12)
+def club_insignia(threshold, earned=True):
+    key = CLUBS[threshold][0]
+    path = (ART/"design-details/mileage-club-medallion.webp"
+            if threshold == 40000 else ART/f"insignias/{key}.webp")
+    with Image.open(path) as source:
+        medal = source.convert("RGBA")
+    bounds = medal.getchannel("A").point(lambda value: 255 if value > 40 else 0).getbbox()
+    if bounds:
+        medal = medal.crop(bounds)
+    if not earned:
+        alpha = medal.getchannel("A")
+        medal = ImageOps.grayscale(medal).convert("RGBA")
+        medal.putalpha(alpha)
+    return medal
+
+
+def driver_identity(display_name):
+    """Extract an explicit bracketed driver number without inventing an ID."""
+    original = str(display_name).strip()
+    match = re.match(r"^\[(\d{1,8})\]\s*(.+)$", original)
+    if not match:
+        return None, original
+    number, name = match.groups()
+    title, separator, remainder = name.partition("|")
+    known_titles = {"ceo", "owner", "co-owner", "co owner", "co-founder",
+                    "co founder", "director", "manager", "driver", "staff",
+                    "events manager", "recruitment manager", "lead it server support"}
+    titles = [part.strip().casefold() for part in title.split("/")]
+    if separator and remainder.strip() and all(part in known_titles for part in titles):
+        name = remainder.strip()
+    return number, name.strip()
+
+
 def render(name, profile, prefs, side="front", role="DRIVER"):
     """Compose real data over independent artwork. Returns a Discord PNG."""
+    discord_display_name = name
+    driver_number, name = driver_identity(name)
     if side not in {"front", "back"}:
         raise ValueError("Unknown card side")
     with Image.open(ART / f"backgrounds/{side}.webp") as source:
@@ -274,29 +319,29 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         accent = AMBER if race else CYAN
         panel(box)
         draw.rounded_rectangle(box, 10, outline=accent, width=2)
-        badge_width = 88 if compact else 110
+        badge_width = 82 if compact else 96
         label_x = x + badge_width + 13
         content_right = right - (85 if compact else 18)
         track_label = "RACE" if race else "REAL"
         if track is None:
-            text(label_x, y + 12, track_label + " PROGRESSION", 14, accent)
-            metal(label_x, y + 36, "UNAVAILABLE", 22, width=content_right-label_x)
-            text(label_x, y + 67, "No credited Race total available", 12, accent,
+            text(label_x, y + 8, track_label + " PROGRESSION", 14, accent)
+            metal(label_x, y + 28, "UNAVAILABLE", 22, width=content_right-label_x)
+            text(label_x, y + 55, "No credited Race total available", 12, accent,
                  width=content_right-label_x)
             return
         maker = race_badge if race else badge
         image(maker(track["current"], False), (x+7, y+5, badge_width, bottom-y-10))
-        text(label_x, y+10, track_label + (" MILEAGE" if compact else " PROGRESSION"),
-             12 if compact else 14, accent, width=content_right-label_x)
-        metal(label_x, y+28, track["name"], 17 if compact else 22,
+        text(label_x, y+(5 if compact else 7), track_label + (" MILEAGE" if compact else " PROGRESSION"),
+             10 if compact else 12, accent, width=content_right-label_x)
+        metal(label_x, y+(19 if compact else 23), track["name"], 15 if compact else 20,
               width=content_right-label_x-(0 if compact else 230))
         amount = f'{int(track["miles"]):,}'
         target = f'{amount} / {track["target"]:,}' if track["target"] else amount + " MI"
         if compact:
-            text(label_x, y+48, target, 15, WHITE, width=content_right-label_x)
+            text(label_x, y+36, target, 13, WHITE, width=content_right-label_x)
         else:
-            text(content_right-225, y+28, target, 20, WHITE, width=225)
-        bar_y = y+69 if compact else y+53
+            text(content_right-225, y+24, target, 18, WHITE, width=225)
+        bar_y = y+49 if compact else y+48
         width = content_right-label_x
         draw.rounded_rectangle((label_x,bar_y,content_right,bar_y+13),5,
                                fill="#132b3d",outline=accent,width=1)
@@ -309,7 +354,7 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         if track["target"]:
             remaining = int(track["remaining"].to_integral_value(rounding="ROUND_CEILING"))
             caption = f'NEXT · {track["next_name"].upper()} · {remaining:,} MI'
-        text(label_x,bar_y+18,caption,10 if compact else 12,accent,width=width)
+        text(label_x,bar_y+(16 if compact else 18),caption,9 if compact else 10,accent,width=width)
         if compact and track["target"]:
             image(maker(track["target"], True), (right-79,y+10,71,bottom-y-20))
 
@@ -333,35 +378,41 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             with ZipFile(FLAGS) as archive:
                 with Image.open(BytesIO(archive.read(country["flag"]))) as flag:
                     image(flag.convert("RGBA"),(205,171,99,54))
-        # Balance the portrait between the chip and the lower content edge.
-        panel((37,268,321,640))
-        truck = ART/"trucks"/f"{prefs['truck_key']}.webp"
-        with Image.open(truck) as source:
-            original=source.convert("RGBA")
-            portrait=ImageOps.fit(original,(278,364),Image.Resampling.LANCZOS).filter(ImageFilter.GaussianBlur(16))
-            portrait=ImageEnhance.Brightness(portrait).enhance(0.45)
-            # Portrait framing: fill most of the height and favour the cab,
-            # while retaining the original aspect ratio and a little headroom.
-            scale=326/original.height
-            fitted=original.resize((round(original.width*scale),326),Image.Resampling.LANCZOS)
-            focal_x=round(fitted.width*0.55)
-            left=max(0,min(fitted.width-278,focal_x-139))
-            fitted=fitted.crop((left,0,min(left+278,fitted.width),326))
-            portrait.alpha_composite(fitted,((278-fitted.width)//2,19))
-        canvas.alpha_composite(portrait,(40,272))
-        text(345,183,"DRIVER NAME",15,CYAN)
-        metal(345,204,name,36,width=239)
+        panel((37,245,321,640))
+        with Image.open(ART/"trucks"/f"{prefs['truck_key']}.webp") as source:
+            # The portrait masters include headroom and the complete vehicle.
+            # Contain preserves every wheel and mirror across long and wide models.
+            portrait = source.convert("RGBA")
+            if prefs["truck_key"] in {
+                "scania-s-r-next-gen", "daf-xf", "daf-xg-plus", "man-euro-6",
+                "mercedes-actros-mp5", "mercedes-actros-mp6", "renault-t", "volvo-fh6",
+            }:
+                portrait = portrait.crop((0, round(portrait.height * .08),
+                                          portrait.width, round(portrait.height * .88)))
+                portrait = ImageOps.fit(portrait,(278,389),Image.Resampling.LANCZOS,
+                                       centering=(.65,.5))
+            image(portrait,(40,248,278,389))
+        if driver_number:
+            text(345,172,"DRIVER NO.",11,CYAN)
+            metal(424,168,driver_number,20,width=160)
+            text(345,197,"DRIVER NAME",12,CYAN)
+            metal(345,213,name,30,width=239)
+        else:
+            text(345,183,"DRIVER NAME",15,CYAN)
+            metal(345,204,name,36,width=239)
         draw.line((345,249,584,249),fill=CYAN,width=1)
-        text(345,267,"ROLE",15,CYAN)
-        metal(345,287,role,24,width=239)
-        draw.line((345,317,574,317),fill=CYAN,width=1)
-        text(345,329,"COUNTRY",15,CYAN)
-        metal(345,347,country["name"] if country else "NOT SET",23,width=254)
+        text(345,254,"ROLE",15,CYAN)
+        metal(345,274,role,24,width=239)
+        draw.line((345,305,574,305),fill=CYAN,width=1)
+        text(345,314,"COUNTRY",15,CYAN)
+        metal(345,334,country["name"] if country else "NOT SET",23,width=254)
+        if profile.get("member_since"):
+            text(345,366,"DISCORD JOINED · " + profile["member_since"],11,CYAN,width=254)
         panel((612,170,922,378))
         metal(629,176,"LINKED ACCOUNTS",16,width=260)
         draw.line((616,197,919,197),fill="#296181")
         accounts={item["provider"]:item for item in profile.get("linked_accounts",[])}
-        accounts["Discord"]={"name":name,"status":"Linked"}
+        accounts["Discord"]={"name":discord_display_name,"status":"Linked"}
         if profile.get("steam_id64"):
             accounts["Steam"]={"name":profile.get("steam_display_name") or "Name unavailable","status":"Verified"}
         for i,(service,icon) in enumerate((("Steam","steam"),("Discord","discord"),("TrucksBook","trucksbook"),("Trucky","trucky"),("Drivers Hub","drivers-hub"))):
@@ -374,7 +425,6 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             text(774,y+3,item.get("name") or "Not linked",14,width=110)
             if item.get("status","").lower() in {"verified","linked"}:
                 detail("verified-account-tick",(891,y+2,20,20))
-        detail("wolf-seal",(935,275,150,219))
         draw.line((345,385,924,385),fill="#4696b4",width=1)
         draw.line((345,449,924,449),fill="#4696b4",width=1)
         race=profile.get("trucky_race_miles")
@@ -385,85 +435,103 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             text(x+58,395,label,13,CYAN,width=130)
             metal(x+58,414,value,25,width=126)
             draw.line((x-15,396,x-15,438),fill="#4789a7",width=1)
-        track_row((329,455,1083,550), real_track)
-        track_row((329,558,1083,653), race_track, race=True)
+        panel((329,451,922,473))
+        latest = profile.get("latest_award")
+        text(342,455,"LATEST AWARD · " + latest if latest else "LATEST AWARD · NONE RECORDED",
+             11,CYAN,width=566)
+        track_row((329,480,922,560),real_track)
+        track_row((329,568,1083,650),race_track,race=True)
         panel((934,169,1083,251))
         detail("verified-driver-shield",(942,184,39,48))
         text(987,188,"LINKED A&T",12,CYAN,width=87)
         metal(987,209,"DRIVER",16,width=87)
-        panel((934,258,1083,449))
-        text(946,267,"PERSONAL",11,CYAN,width=126)
-        text(946,281,"ACHIEVEMENT",12,CYAN,width=126)
-        club = current_club(profile.get("permanent_achievements", ()))
-        threshold = club or 40000
-        insignia, club_label = CLUBS[threshold]
-        path = (ART/"design-details/mileage-club-medallion.webp"
-                if threshold == 40000 else ART/f"insignias/{insignia}.webp")
-        with Image.open(path) as source:
-            medal = source.convert("RGBA")
-            bounds = medal.getchannel("A").point(lambda value: 255 if value > 40 else 0).getbbox()
-            if bounds:
-                medal = medal.crop(bounds)
-        if club is None:
-            alpha = medal.getchannel("A")
-            medal = ImageOps.grayscale(medal).convert("RGBA")
-            medal.putalpha(alpha)
-        image(medal, (961,301,96,89))
-        if club is None:
-            detail("small-lock",(999,326,21,27))
-        centred_metal(943,394,threshold_key(threshold).upper(),20,131)
-        text(945,423,club_label if club is not None else "MILEAGE CLUB · LOCKED",
-             10,CYAN,width=128)
+        panel((934,258,1083,560))
+        centred_metal(940,266,"CLUB HONOURS",14,137)
+        for is_race, y in ((False,292),(True,426)):
+            accent = AMBER if is_race else CYAN
+            earned = profile.get("race_permanent_achievements" if is_race else "permanent_achievements",())
+            club = current_club(earned)
+            threshold = club or 40000
+            prefix = "RACE" if is_race else "REAL"
+            caption = prefix + (" · " if club else " · NEXT ") + threshold_key(threshold).upper()
+            text(946,y,caption,12,accent,width=126)
+            image(club_insignia(threshold,club is not None),(976,y+20,66,67))
+            if club is None:
+                detail("small-lock",(1001,y+42,18,23))
+            if club is not None:
+                text(944,y+94,CLUBS[club][1],10,accent,width=130)
+            else:
+                track = race_track if is_race else real_track
+                caption = "TOTAL UNAVAILABLE"
+                if track is not None:
+                    remaining = max(0,threshold-int(track["miles"]))
+                    caption = f"{remaining:,} MI TO CLUB"
+                text(944,y+94,caption,10,accent,width=130)
+        draw.line((945,415,1072,415),fill="#376681")
     else:
         asset(ART/"company-logo.webp",(30,16,250,100))
         metal(330,40,"DRIVER CAREER RECORD",33,width=644)
-        text(333,86,name,21,CYAN,width=640)
+        text(333,86,(f"DRIVER {driver_number} · " if driver_number else "")+name,21,CYAN,width=640)
         detail("tachograph-symbol",(1002,35,70,45))
-        panel((37,128,507,399))
+        panel((37,128,507,330))
         heading(45,134,454,"CURRENT RANKS")
         text(395,137,"NEXT RANK",13,CYAN,width=100)
-        track_row((44,162,499,272), real_track, compact=True)
-        track_row((44,279,499,390), race_track, race=True, compact=True)
-        panel((37,405,507,493))
-        heading(45,409,454,"CAREER RECORD")
+        track_row((44,159,499,240),real_track,compact=True)
+        track_row((44,246,499,327),race_track,race=True,compact=True)
+        panel((37,337,507,411))
+        heading(45,341,454,"CAREER RECORD")
         for i,(key,label,icon) in enumerate((
             ("jobs_completed","REAL JOBS","jobs-icon"),
             ("average_job_distance","AVERAGE JOB","road-icon"),
             ("longest_job_distance","LONGEST JOB","career-pin"),
-            ("weekly_wins","WEEKLY WINS","trophy-icon")
+            ("weekly_wins","WEEKLY WINS","trophy-icon"),
         )):
             x=47+i*113
-            detail(icon,(x+43,437,26,24))
+            detail(icon,(x+45,366,21,18))
             value=f"{int(profile.get(key) or 0):,}"
             if key in {"average_job_distance","longest_job_distance"}:
                 value+=" MI"
-            centred_metal(x,457,value,19,108)
-            label_width=draw.textlength(label,font=font(10))
-            text(x+(108-label_width)/2,479,label,10,CYAN,width=108)
-        panel((37,500,507,604))
-        heading(45,504,454,"PERMANENT ACHIEVEMENTS")
-        for i,miles in enumerate((40000,100000,250000,500000,750000,1000000)):
+            centred_metal(x,381,value,16,108)
+            label_width=draw.textlength(label,font=font(9))
+            text(x+(108-label_width)/2,398,label,9,CYAN,width=108)
+
+        panel((37,418,507,480))
+        heading(45,422,454,"MONTHLY REAL MILES")
+        text(346,426,profile.get("monthly_label","CURRENT MONTH"),10,CYAN,width=145)
+        monthly = profile.get("monthly_real_miles")
+        target = int(profile.get("monthly_target") or 10000)
+        if monthly is None:
+            text(58,449,"MONTHLY TOTAL UNAVAILABLE",13,CYAN,width=430)
+        else:
+            monthly = max(0,int(monthly))
+            metal(58,447,f"{monthly:,} / {target:,} MI",18,width=260)
+            remaining = max(0,target-monthly)
+            text(336,451,f"{remaining:,} MI TO TARGET" if remaining else "TARGET ACHIEVED",
+                 11,CYAN,width=154)
+            draw.rounded_rectangle((58,470,490,477),3,fill="#102c43",outline=CYAN)
+            fill = int(428*min(monthly/target,1))
+            if fill:
+                draw.rounded_rectangle((60,472,60+fill,475),1,fill=CYAN)
+
+        panel((37,487,507,610))
+        heading(45,491,454,"PERMANENT ACHIEVEMENTS")
+        for i,miles in enumerate(CLUBS):
             x=45+i*75
-            earned=miles in profile.get("permanent_achievements",())
-            insignia=CLUBS[miles][0]
-            path=ART/"design-details/mileage-club-medallion.webp" if miles==40000 else ART/f"insignias/{insignia}.webp"
-            with Image.open(path) as source:
-                medal=source.convert("RGBA")
-                bounds=medal.getchannel("A").point(lambda value:255 if value>40 else 0).getbbox()
-                if bounds:
-                    medal=medal.crop(bounds)
-            if not earned:
-                alpha=medal.getchannel("A")
-                medal=ImageOps.grayscale(medal).convert("RGBA")
-                medal.putalpha(alpha)
-            else:
-                glow=Image.new("RGBA",(74,76))
-                ImageDraw.Draw(glow).ellipse((7,0,67,59),fill=(29,199,255,105))
-                canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(4)),(x,527))
-            image(medal,(x+5,527,64,60))
-            if not earned:
-                detail("small-lock",(x+28,547,18,22))
-            centred_metal(x,587,threshold_key(miles).upper(),15,74)
+            earned_real = miles in profile.get("permanent_achievements",())
+            earned_race = miles in profile.get("race_permanent_achievements",())
+            image(club_insignia(miles,earned_real or earned_race),(x+12,517,50,46))
+            if not (earned_real or earned_race):
+                detail("small-lock",(x+28,533,17,22))
+            centred_metal(x,565,threshold_key(miles).upper(),13,74)
+            for y, label, earned, accent in (
+                (582,"REAL",earned_real,CYAN),(596,"RACE",earned_race,AMBER),
+            ):
+                draw.rounded_rectangle((x+7,y,x+67,y+11),4,
+                    fill=accent if earned else "#152c3d",outline=accent if earned else "#597080")
+                draw.text((x+16,y+1),label,font=font(8),
+                          fill="#061728" if earned else "#b3c3ce")
+                draw.ellipse((x+56,y+4,x+60,y+8),
+                             fill="#061728" if earned else "#597080")
         panel((94,611,507,649))
         detail("hall-of-fame-trophy",(104,615,36,29))
         text(150,622,"HALL OF FAME",13,width=115)
@@ -498,6 +566,8 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         detail("footer-back",(273,660,566,30))
     if side == "front":
         detail("footer-front",(273,660,566,30))
+    if profile.get("card_updated_at"):
+        text(858,678,"UPDATED " + profile["card_updated_at"],9,CYAN,width=224)
     output=BytesIO()
     canvas.convert("RGB").save(output,"PNG",optimize=True)
     output.seek(0)

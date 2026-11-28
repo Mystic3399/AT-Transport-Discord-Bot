@@ -2012,8 +2012,10 @@ def active_driver_ids(guild):
             and driver_membership_snapshot_v2.get(member.id, {}).get("company") != "Former company driver"]
 
 
-async def fetch_period_rankings(connection, guild, period_start, period_end):
+async def fetch_period_rankings(connection, guild, period_start, period_end, *, driver_id=None):
     member_ids = active_driver_ids(guild)
+    if driver_id is not None:
+        member_ids = [user_id for user_id in member_ids if user_id == driver_id]
     if not member_ids:
         return []
     trucky_jobs = ""
@@ -7855,6 +7857,50 @@ async def on_guild_role_update(before, after):
         await refresh_member_role_cards(member)
 
 
+async def fetch_card_career_details(connection, member):
+    """Use the leaderboard's credited mileage rules for the card's monthly target."""
+    start, end = leaderboard_period_bounds("monthly")
+    rankings = await fetch_period_rankings(
+        connection, member.guild, start, end, driver_id=member.id,
+    )
+    details = {
+        "monthly_real_miles": int(rankings[0]["real_miles"]) if rankings else 0,
+        "monthly_target": 10000,
+        "monthly_label": start.strftime("%B %Y").upper(),
+        "member_since": (
+            member.joined_at.astimezone(UK_TIMEZONE).strftime("%d %b %Y").upper()
+            if member.joined_at else None
+        ),
+        "card_updated_at": datetime.now(UK_TIMEZONE).strftime("%d/%m %H:%M UK"),
+        "race_permanent_achievements": (),
+    }
+    awards = list(await connection.fetch(
+        """
+        SELECT milestone_miles AS miles, 'rank' AS kind, recorded_at AS earned_at,
+               'real' AS track
+        FROM announced_milestones WHERE discord_user_id=$1
+        UNION ALL
+        SELECT achievement_miles, 'achievement', earned_at, 'real'
+        FROM permanent_achievements WHERE discord_user_id=$1
+        """, member.id,
+    ))
+    if await connection.fetchval("SELECT to_regclass('public.driver_race_achievements') IS NOT NULL"):
+        race_awards = await connection.fetch(
+            """SELECT threshold AS miles, kind, earned_at, 'race' AS track
+               FROM driver_race_achievements
+               WHERE discord_user_id=$1 AND kind='achievement'""", member.id,
+        )
+        awards.extend(race_awards)
+        details["race_permanent_achievements"] = tuple(int(row["miles"]) for row in race_awards)
+    if awards:
+        latest = max(awards, key=lambda row: (row["earned_at"], row["miles"], row["kind"]))
+        entries = PROGRESSION_ROLES if latest["kind"] == "rank" else ACHIEVEMENT_ROLES
+        name = next((name for miles, _, name in entries if miles == latest["miles"]), None)
+        if name:
+            details["latest_award"] = f'{name} · {latest["track"].upper()} MILEAGE'
+    return details
+
+
 async def make_tachograph(member, profile, side):
     # Fetch current Discord roles rather than relying on an old command member object.
     member = await member.guild.fetch_member(member.id)
@@ -7870,6 +7916,7 @@ async def make_tachograph(member, profile, side):
                 "SELECT display_name FROM driver_card_steam_names WHERE discord_user_id=$1 AND steam_id64=$2",
                 member.id, profile["steam_id64"],
             )
+            profile.update(await fetch_card_career_details(connection, member))
     role = tachograph.company_role(member, GUILD_ID)
     return await asyncio.to_thread(
         tachograph.render, member.display_name, profile, prefs, side, role
