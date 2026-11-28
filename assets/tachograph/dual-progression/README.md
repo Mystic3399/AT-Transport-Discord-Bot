@@ -15,3 +15,11 @@ Monthly Real mileage has a 10,000-mile target and uses the same UK calendar-mont
 All fleet portraits are dedicated blue/black A&T truck artwork, generated with the built-in image generator and packaged as WebP assets. Existing selection keys are preserved. New choices: Scania Streamline, Scania 164L, Mercedes MP6 Longline, Iveco S-Way Longline, Volvo FH16 Heavy Haul, Mercedes Actros Wrecker, Kenworth T680 and Peterbilt 389.
 
 Asset prompt set: one portrait per named truck model; correct model cab, grille, mirrors, wheels and chassis; electric-blue/black livery with silver wolf graphics and small A&T visor lettering; close three-quarter automotive framing with the entire cab visible; turquoise aurora, mountain pines and wet reflective road; no extra text, borders or people. Longline, bonneted and recovery variants retain their respective body equipment.
+
+## Connected Hub and native career controls
+
+Driver cards now include a role-backed division ribbon, a selectable earned Real or Race club honour, monthly achievement percentage and recorded-history target streak, and monthly/all-time Real standing. `!change achievement 100k`, `!change achievement race 40k`, `!change achievement auto` and `!change division Recovery` update the current driver's preferences after eligibility checks.
+
+Career Details is a native ephemeral Discord response, with five credited deliveries per page, Real/Race/game filters, best recorded month and job counts. Signed website lookups populate the Drivers Hub account row only for active, uniquely connected Hub identities. Native link buttons open the matching member profile on the existing website. The website projects credited records, supports filters and job details, and submits only the signed-in driver's appearance settings for bot validation. Preference revisions are acknowledged once, so a website save cannot repeatedly overwrite later Discord commands.
+
+The Hub's View Tachograph action proxies a signed, authenticated request to the bot's existing HTTP service. It uses the same renderer and current data as Discord, without a public card-data endpoint or exposing service credentials.

@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS driver_card_preferences (
     country_code TEXT,
     assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE driver_card_preferences ADD COLUMN IF NOT EXISTS featured_achievement BIGINT;
+ALTER TABLE driver_card_preferences ADD COLUMN IF NOT EXISTS featured_track TEXT NOT NULL DEFAULT 'real';
+ALTER TABLE driver_card_preferences ADD COLUMN IF NOT EXISTS division TEXT;
+ALTER TABLE driver_card_preferences ADD COLUMN IF NOT EXISTS preferences_updated_at TIMESTAMPTZ NOT NULL DEFAULT '1970-01-01T00:00:00Z';
 """
 
 
@@ -445,14 +449,25 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         detail("verified-driver-shield",(942,184,39,48))
         text(987,188,"LINKED A&T",12,CYAN,width=87)
         metal(987,209,"DRIVER",16,width=87)
+        if profile.get("division"):
+            draw.rounded_rectangle((44,612,314,635),4,fill="#071a28",outline=AMBER)
+            centred_metal(49,617,profile["division"]+" DIVISION",12,260)
         panel((934,258,1083,560))
-        centred_metal(940,266,"CLUB HONOURS",14,137)
+        centred_metal(940,266,"FEATURED HONOUR",12,137)
         for is_race, y in ((False,292),(True,426)):
             accent = AMBER if is_race else CYAN
             earned = profile.get("race_permanent_achievements" if is_race else "permanent_achievements",())
             club = current_club(earned)
+            selected_applied = False
+            if not is_race and prefs.get("featured_achievement"):
+                selected_track = prefs.get("featured_track", "real")
+                selected_earned = profile.get("race_permanent_achievements" if selected_track == "race" else "permanent_achievements", ())
+                if prefs["featured_achievement"] in selected_earned and prefs["featured_achievement"] in CLUBS:
+                    club = prefs["featured_achievement"]
+                    selected_applied = True
             threshold = club or 40000
-            prefix = "RACE" if is_race else "REAL"
+            if selected_applied and prefs.get("featured_track")=="race": accent=AMBER
+            prefix = "RACE" if is_race or (selected_applied and prefs.get("featured_track")=="race") else "REAL"
             caption = prefix + (" · " if club else " · NEXT ") + threshold_key(threshold).upper()
             text(946,y,caption,12,accent,width=126)
             image(club_insignia(threshold,club is not None),(976,y+20,66,67))
@@ -460,6 +475,8 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
                 detail("small-lock",(1001,y+42,18,23))
             if club is not None:
                 text(944,y+94,CLUBS[club][1],10,accent,width=130)
+                if not is_race:
+                    text(944,y+110,"DRIVER SELECTED" if selected_applied else "HIGHEST REAL CLUB",9,accent,width=130)
             else:
                 track = race_track if is_race else real_track
                 caption = "TOTAL UNAVAILABLE"
@@ -497,7 +514,7 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
 
         panel((37,418,507,480))
         heading(45,422,454,"MONTHLY REAL MILES")
-        text(346,426,profile.get("monthly_label","CURRENT MONTH"),10,CYAN,width=145)
+        text(325,426,profile.get("monthly_label","CURRENT MONTH")+(f" · {profile['target_streak']} MO STREAK" if profile.get("target_streak") else ""),9,CYAN,width=165)
         monthly = profile.get("monthly_real_miles")
         target = int(profile.get("monthly_target") or 10000)
         if monthly is None:
@@ -506,7 +523,7 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             monthly = max(0,int(monthly))
             metal(58,447,f"{monthly:,} / {target:,} MI",18,width=260)
             remaining = max(0,target-monthly)
-            text(336,451,f"{remaining:,} MI TO TARGET" if remaining else "TARGET ACHIEVED",
+            text(336,451,f"{remaining:,} MI TO TARGET" if remaining else f"{round(monthly/target*100):,}% ACHIEVED",
                  11,CYAN,width=154)
             draw.rounded_rectangle((58,470,490,477),3,fill="#102c43",outline=CYAN)
             fill = int(428*min(monthly/target,1))
@@ -537,6 +554,9 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         text(150,622,"HALL OF FAME",13,width=115)
         tier=profile.get("hall_of_fame_tier")
         text(283,622,str(tier).upper() if tier else "NOT YET INDUCTED",12,CYAN,width=211)
+        positions = profile.get("career_positions")
+        if positions:
+            text(100,654,positions,10,CYAN,width=400)
         detail("reverse-compass-seal",(20,605,68,65))
         panel((519,128,1080,649))
         heading(527,134,545,"PATH TO IMMORTAL")

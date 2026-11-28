@@ -100,7 +100,7 @@ def signed_payload(snapshot, secret, timestamp=None):
     signature = hmac.new(secret.encode(),f'POST\n{path}\n{timestamp}\n{body}'.encode(),hashlib.sha256).hexdigest()
     return body, {'content-type':'application/json','x-at-timestamp':timestamp,'x-at-signature':signature}
 
-async def publish(pool, guild, read_profile, membership):
+async def publish(pool, guild, read_profile, membership, career_builder=None):
     secret = os.getenv('AT_COMMAND_BRIDGE_SECRET','')
     if os.getenv('AT_COMMAND_BRIDGE_ENABLED') != 'true' or len(secret) < 32:
         return
@@ -113,7 +113,80 @@ async def publish(pool, guild, read_profile, membership):
                 raise RuntimeError(f'Website bridge HTTP {response.status}')
     print('WEBSITE COMPANY TOTALS PUBLISHED ' + json.dumps(snapshot['totals']) + f" profiles={len(snapshot['profiles'])}",flush=True)
 
+    if career_builder:
+        try:
+            await publish_careers(guild, career_builder)
+        except Exception as error:
+            print('WEBSITE CAREER SYNC RETRY: '+type(error).__name__,flush=True)
     try:
         print('WEBSITE CREDITED GAME COVERAGE ' + json.dumps(await game_coverage(pool, snapshot['profiles'])), flush=True)
     except Exception as error:
         print('WEBSITE GAME COVERAGE UNAVAILABLE: ' + type(error).__name__, flush=True)
+
+_link_cache = {}
+_link_loaded = 0
+
+def cached_hub_link(user_id):
+    if time.monotonic()-_link_loaded>180:
+        return None
+    return _link_cache.get(int(user_id))
+
+def service_headers(method, path, body=''):
+    secret=os.getenv('AT_COMMAND_BRIDGE_SECRET','')
+    timestamp=str(int(time.time()))
+    signature=hmac.new(secret.encode(),f'{method}\n{path}\n{timestamp}\n{body}'.encode(),hashlib.sha256).hexdigest()
+    return {'content-type':'application/json','x-at-timestamp':timestamp,'x-at-signature':signature}
+
+def valid_service_request(request):
+    secret=os.getenv('AT_COMMAND_BRIDGE_SECRET','')
+    if len(secret)<32 or os.getenv('AT_COMMAND_BRIDGE_ENABLED')!='true': return False
+    stamp=request.headers.get('x-at-timestamp','')
+    if not stamp.isdigit() or abs(time.time()-int(stamp))>300: return False
+    expected=hmac.new(secret.encode(),f'{request.method}\n{request.path_qs}\n{stamp}\n'.encode(),hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected,request.headers.get('x-at-signature',''))
+
+async def refresh_hub_links(force=False):
+    global _link_loaded, _link_cache
+    if not force and time.monotonic()-_link_loaded<60: return
+    if os.getenv('AT_COMMAND_BRIDGE_ENABLED')!='true' or len(os.getenv('AT_COMMAND_BRIDGE_SECRET',''))<32: return
+    path='/api/integrations/command-bridge'
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
+            async with session.get('https://at-transport-ltd.com'+path,headers=service_headers('GET',path),allow_redirects=False) as response:
+                if response.status!=200: raise RuntimeError('Hub identity lookup unavailable')
+                payload=await response.json()
+        fresh={}
+        for row in payload.get('linkedDrivers',[]):
+            uid=str(row.get('discordUserId',''))
+            url=row.get('profileUrl','')
+            if uid.isdigit() and row.get('displayName') and url==f'https://at-transport-ltd.com/drivers-hub/profile/{uid}':
+                fresh[int(uid)]={'name':str(row['displayName'])[:100],'url':url}
+        _link_cache=fresh; _link_loaded=time.monotonic()
+    except (aiohttp.ClientError,RuntimeError,ValueError,TimeoutError):
+        # Expired status is not asserted as linked when the website is unreachable.
+        if time.monotonic()-_link_loaded>180: _link_cache={}
+
+async def publish_careers(guild, builder):
+    await refresh_hub_links(force=True)
+    path='/api/integrations/driver-careers'
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+        preferences={}
+        async with session.get('https://at-transport-ltd.com'+path,headers=service_headers('GET',path),allow_redirects=False) as response:
+            if response.status==200:
+                content=await response.json()
+                preferences={int(p['discordUserId']):p for p in content.get('preferences',[]) if str(p.get('discordUserId','')).isdigit()}
+        profiles=[]
+        for member in guild.members:
+            if member.bot or not cached_hub_link(member.id): continue
+            try:
+                data=await builder(member,preferences.get(member.id))
+                if data: profiles.append(data)
+            except Exception as error:
+                print(f'HUB CAREER SYNC RETRY: {member.id} {type(error).__name__}',flush=True)
+        if not profiles: return
+        # Bound batches keep old company snapshot limits and retry behaviour separate.
+        for offset in range(0,len(profiles),5):
+            body=json.dumps({'profiles':profiles[offset:offset+5]},separators=(',',':'))
+            async with session.post('https://at-transport-ltd.com'+path,data=body.encode(),headers=service_headers('POST',path,body),allow_redirects=False) as response:
+                if response.status not in (200,202): raise RuntimeError(f'Career bridge HTTP {response.status}')
+        print(f'WEBSITE DRIVER CAREERS PUBLISHED profiles={len(profiles)}',flush=True)

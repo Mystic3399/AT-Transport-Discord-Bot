@@ -11,6 +11,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import tachograph
+import career_details
+import career_ui
+import website_company_bridge
 import career_art
 import race_progression
 import steam_profile_names
@@ -790,14 +793,13 @@ async def start_public_integrations():
             # require a separate release acceptance and are not activated here.
             await refresh_unified_registration(discord_user_id)
 
-        runner = web.AppRunner(
-            trucky_staging_receiver_v2.create_integrations_app(
+        integration_app = trucky_staging_receiver_v2.create_integrations_app(
                 db_pool, on_trucky_linked=on_trucky_linked,
                 on_steam_verified=refresh_unified_registration,
                 on_steam_failed=notify_steam_failure
-            ),
-            access_log=None,
-        )
+            )
+        integration_app.router.add_get("/api/driver-card", hub_card_response)
+        runner = web.AppRunner(integration_app,access_log=None)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
         await site.start()
@@ -1090,7 +1092,7 @@ intents.message_content = True
 
 class ATCommandBot(commands.Bot):
     async def setup_hook(self):
-        self.add_dynamic_items(TachographFlip)
+        self.add_dynamic_items(TachographFlip, CareerButton)
         try:
             from driver_number_integration import install
             await install(self, GUILD_ID)
@@ -3631,7 +3633,7 @@ async def publish_website_totals():
     try:
         import website_company_bridge
         await website_company_bridge.publish(db_pool,bot.get_guild(GUILD_ID),
-            fetch_driver_profile_stats,driver_membership_snapshot_v2)
+            fetch_driver_profile_stats,driver_membership_snapshot_v2,career_builder=build_hub_career)
     except Exception as error:
         print(f'WEBSITE COMPANY TOTALS RETRY: {type(error).__name__}: {error}',flush=True)
 
@@ -7901,6 +7903,137 @@ async def fetch_card_career_details(connection, member):
     return details
 
 
+async def assemble_hub_career(connection, member, profile, prefs):
+    summary = (await career_details.fetch(connection, [member.id]))[member.id]
+    start, end = leaderboard_period_bounds('monthly')
+    monthly = await fetch_period_rankings(connection, member.guild, start, end)
+    amount = next((int(r['real_miles']) for r in monthly if r['discord_user_id']==member.id), 0)
+    monthly_position = 1+sum(int(r['real_miles'])>amount for r in monthly) if amount else None
+    total = int(profile.get('real_miles') or 0)
+    all_position = await connection.fetchval('''WITH totals AS (
+      SELECT b.discord_user_id, FLOOR(b.trucksbook_real_miles+COALESCE(t.combined_real_miles,0)) miles
+      FROM unified_v2_production_mileage_baselines b LEFT JOIN unified_v2_production_mileage_totals t USING(discord_user_id)
+      UNION ALL SELECT p.discord_user_id,p.real_miles FROM driver_progress p
+      WHERE NOT EXISTS(SELECT 1 FROM unified_v2_production_mileage_baselines b WHERE b.discord_user_id=p.discord_user_id))
+      SELECT 1+COUNT(*) FROM totals WHERE miles>$1''', total) if total else None
+    real_awards = [int(v) for v in profile.get('permanent_achievements',()) if v in tachograph.CLUBS]
+    race_awards = [int(v) for v in profile.get('race_permanent_achievements',()) if v in tachograph.CLUBS]
+    divisions = career_details.division_choices(member)
+    selected_track=prefs.get('featured_track','real')
+    selected=prefs.get('featured_achievement')
+    earned=race_awards if selected_track=='race' else real_awards
+    if selected not in earned: selected=None
+    country=tachograph.countries().get(prefs.get('country_code'),{})
+    number,name=tachograph.driver_identity(member.display_name)
+    def rank(value):
+        result=tachograph.progression(value)
+        return {key:(math.ceil(value) if key=='remaining' else float(value) if key=='miles' else value) for key,value in result.items()} if result else None
+    accounts=list(profile.get('linked_accounts',[]))
+    accounts.extend([dict(provider='Discord',name=member.display_name,status='Linked')])
+    if profile.get('steam_id64'):
+        accounts.append(dict(provider='Steam',name=profile.get('steam_display_name') or 'Name unavailable',status='Verified'))
+    hub=website_company_bridge.cached_hub_link(member.id)
+    if hub: accounts.append(dict(provider='Drivers Hub',name=hub['name'],status='Linked'))
+    return dict(**{k:v for k,v in summary.items() if k!='monthlyHistory'},
+        discordUserId=str(member.id),displayName=member.display_name,driverNumber=number,name=name,
+        role=tachograph.company_role(member,GUILD_ID),division=prefs.get('division') if prefs.get('division') in divisions else divisions[0],
+        availableDivisions=divisions,truckKey=prefs['truck_key'],truckLabel=tachograph.available_trucks().get(prefs['truck_key'],'Fleet truck'),
+        availableTrucks=tachograph.available_trucks(),countryCode=prefs.get('country_code'),country=country.get('name','Not set'),
+        realMiles=total,raceMiles=float(profile['trucky_race_miles']) if profile.get('trucky_race_miles') is not None else None,
+        realJobs=int(profile.get('jobs_completed') or 0),longestJob=int(profile.get('longest_job_distance') or 0),
+        realRank=rank(total),raceRank=rank(profile.get('trucky_race_miles')),
+        realAchievements=real_awards,raceAchievements=race_awards,
+        featuredAchievement=selected or tachograph.current_club(real_awards),featuredTrack=selected_track if selected else 'real',featuredAutomatic=selected is None,
+        monthlyPosition=monthly_position,allTimePosition=int(all_position) if all_position else None,
+        accounts=accounts,updatedAt=datetime.now(timezone.utc).isoformat())
+
+
+async def build_hub_career(member, settings=None):
+    async with db_pool.acquire() as connection:
+        async with connection.transaction():
+            profile=await fetch_driver_profile_stats(connection,member.id)
+            if profile is None: return None
+            profile=dict(profile)
+            profile.update(await fetch_card_career_details(connection,member))
+            profile['steam_id64']=await connection.fetchval('SELECT steam_id64 FROM unified_steam_links WHERE discord_user_id=$1',member.id)
+            profile['steam_display_name']=await connection.fetchval('SELECT display_name FROM driver_card_steam_names WHERE discord_user_id=$1 AND steam_id64=$2',member.id,profile['steam_id64'])
+            prefs=await tachograph.appearance(connection,member.id)
+            if settings:
+                valid,reason=validate_career_settings(member,profile,settings)
+                try:
+                    requested_at=datetime.fromisoformat(settings.get('changedAt','').replace('Z','+00:00'))
+                    if requested_at.tzinfo is None: raise ValueError('Timestamp required')
+                    if prefs.get('preferences_updated_at') and requested_at<=prefs['preferences_updated_at']:
+                        valid,reason=False,'Newer Discord settings retained'
+                except (ValueError,TypeError):
+                    valid,reason=False,'Settings timestamp unavailable'
+                if valid:
+                    await connection.execute('''UPDATE driver_card_preferences SET truck_key=$2,country_code=$3,featured_achievement=$4,featured_track=$5,division=$6,preferences_updated_at=NOW() WHERE discord_user_id=$1''',member.id,settings['truckKey'],settings.get('countryCode'),settings.get('featuredAchievement'),settings.get('featuredTrack','real'),settings['division'])
+                    prefs=await tachograph.appearance(connection,member.id)
+                else:
+                    print(f'HUB PREFERENCE REJECTED: {member.id} {reason}',flush=True)
+            data=await assemble_hub_career(connection,member,profile,prefs)
+            if settings:
+                data['preferencesStatus']='Applied' if valid else reason
+                data['appliedPreferenceRevision']=settings.get('revision')
+            return data
+
+
+def validate_career_settings(member, profile, settings):
+    if settings.get('truckKey') not in tachograph.available_trucks(): return False,'Truck unavailable'
+    if settings.get('division') not in career_details.division_choices(member): return False,'Division role required'
+    code=settings.get('countryCode')
+    if code and code not in tachograph.countries(): return False,'Country unavailable'
+    track=settings.get('featuredTrack','real')
+    if track not in ('real','race'): return False,'Unknown achievement track'
+    selected=settings.get('featuredAchievement')
+    earned=profile.get('race_permanent_achievements' if track=='race' else 'permanent_achievements',())
+    if selected is not None and (selected not in tachograph.CLUBS or selected not in earned): return False,'Achievement not earned'
+    return True,'Applied'
+
+
+async def hub_card_response(request):
+    if not website_company_bridge.valid_service_request(request): return web.Response(status=401,text='Invalid service signature')
+    uid=request.query.get('driver','');side=request.query.get('side','front')
+    if not uid.isdigit() or side not in ('front','back'): return web.Response(status=400)
+    guild=bot.get_guild(GUILD_ID)
+    member=guild.get_member(int(uid)) if guild else None
+    if member is None or db_pool is None:return web.Response(status=404)
+    async with db_pool.acquire() as connection:
+        profile=await fetch_driver_profile_stats(connection,member.id)
+    if profile is None:return web.Response(status=404)
+    try:
+        png=await make_tachograph(member,profile,side)
+        return web.Response(body=png.getvalue(),content_type='image/png',headers={'Cache-Control':'private, no-store'})
+    except Exception as error:
+        print(f'HUB CARD RENDER RETRY: {type(error).__name__}',flush=True)
+        return web.Response(status=503,text='Card temporarily unavailable')
+
+
+class CareerButton(discord.ui.DynamicItem[discord.ui.Button],template=r'at:career:(?P<user_id>[0-9]+)'):
+    def __init__(self,user_id):
+        self.user_id=user_id
+        super().__init__(discord.ui.Button(label='Career Details',style=discord.ButtonStyle.secondary,custom_id=f'at:career:{user_id}'))
+    @classmethod
+    async def from_custom_id(cls,interaction,item,match):return cls(int(match['user_id']))
+    async def callback(self,interaction):
+        if interaction.guild_id!=GUILD_ID or db_pool is None:
+            await interaction.response.send_message('Driver database unavailable.',ephemeral=True);return
+        await interaction.response.defer(ephemeral=True)
+        member=interaction.guild.get_member(self.user_id)
+        if not member:
+            await interaction.followup.send('This driver is no longer in the server.',ephemeral=True);return
+        try:
+            data=await build_hub_career(member)
+            if not data:
+                await interaction.followup.send('Driver profile unavailable.',ephemeral=True);return
+            view=career_ui.CareerView(data,interaction.user.id,website_company_bridge.cached_hub_link(self.user_id))
+            await interaction.followup.send(embed=view.embed(),view=view,ephemeral=True,allowed_mentions=discord.AllowedMentions.none())
+        except Exception as error:
+            print(f'CAREER DETAILS RETRY: {type(error).__name__}',flush=True)
+            await interaction.followup.send('Unable to load career details. Please try again shortly.',ephemeral=True)
+
+
 async def make_tachograph(member, profile, side):
     # Fetch current Discord roles rather than relying on an old command member object.
     member = await member.guild.fetch_member(member.id)
@@ -7917,6 +8050,14 @@ async def make_tachograph(member, profile, side):
                 member.id, profile["steam_id64"],
             )
             profile.update(await fetch_card_career_details(connection, member))
+            career=await assemble_hub_career(connection,member,profile,prefs)
+            profile['target_streak']=career['targetStreak']
+            profile['division']=career['division']
+            profile['career_positions']='MONTHLY '+(f"#{career['monthlyPosition']}" if career['monthlyPosition'] else '—')+'  ·  ALL-TIME '+(f"#{career['allTimePosition']}" if career['allTimePosition'] else '—')
+    await website_company_bridge.refresh_hub_links()
+    hub=website_company_bridge.cached_hub_link(member.id)
+    if hub:
+        profile['linked_accounts']=[item for item in profile.get('linked_accounts',[]) if item['provider']!='Drivers Hub']+[dict(provider='Drivers Hub',name=hub['name'],status='Linked')]
     role = tachograph.company_role(member, GUILD_ID)
     return await asyncio.to_thread(
         tachograph.render, member.display_name, profile, prefs, side, role
@@ -7926,6 +8067,10 @@ async def make_tachograph(member, profile, side):
 def tachograph_view(user_id, destination):
     view = discord.ui.View(timeout=None)
     view.add_item(TachographFlip(user_id, destination))
+    view.add_item(CareerButton(user_id))
+    link=website_company_bridge.cached_hub_link(user_id)
+    if link:
+        view.add_item(discord.ui.Button(label="Open Hub Profile",url=link['url']))
     return view
 
 
@@ -7988,7 +8133,7 @@ async def save_card_country(ctx, country: str):
                 return
             await tachograph.appearance(connection, ctx.author.id)
             await connection.execute(
-                "UPDATE driver_card_preferences SET country_code=$2 WHERE discord_user_id=$1",
+                "UPDATE driver_card_preferences SET country_code=$2,preferences_updated_at=NOW() WHERE discord_user_id=$1",
                 ctx.author.id, None if choice == "CLEAR" else choice,
             )
     label = "Not set" if choice == "CLEAR" else choices[choice]["name"]
@@ -8100,7 +8245,48 @@ async def unlink_driver_autocomplete(interaction,current):
 
 @bot.hybrid_group(name="change", invoke_without_command=True, description="Change your driver card settings")
 async def card_change(ctx):
-    await ctx.reply("Use /change country or /change truck to update your driver card.", mention_author=False)
+    await ctx.reply("Use `!change country`, `!change truck`, `!change achievement` or `!change division` to update your driver card.", mention_author=False)
+
+
+@card_change.command(name='achievement', description='Choose an earned club honour for the front of your card')
+async def change_achievement(ctx, *, achievement: str):
+    if ctx.guild is None or ctx.guild.id!=GUILD_ID or db_pool is None:return
+    choice=achievement.casefold().strip();track='race' if choice.startswith('race ') else 'real'
+    choice=choice.removeprefix('race ').removeprefix('real ').strip()
+    selected=None
+    if choice not in ('auto','automatic'):
+        try:selected=int(float(choice.replace(',','').removesuffix('k').removesuffix('m'))*(1000000 if choice.endswith('m') else 1000 if choice.endswith('k') else 1))
+        except (ValueError,OverflowError):selected=-1
+    if ctx.interaction:await ctx.defer(ephemeral=True)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            profile=await fetch_driver_profile_stats(conn,ctx.author.id)
+            if profile is None:
+                await ctx.reply('Complete driver registration first.',mention_author=False);return
+            profile=dict(profile);profile.update(await fetch_card_career_details(conn,ctx.author))
+            earned=profile.get('race_permanent_achievements' if track=='race' else 'permanent_achievements',())
+            if selected is not None and (selected not in tachograph.CLUBS or selected not in earned):
+                await ctx.reply('Choose an earned club honour: `!change achievement 100k`, `!change achievement race 40k`, or `!change achievement auto`.',mention_author=False);return
+            await tachograph.appearance(conn,ctx.author.id)
+            await conn.execute('UPDATE driver_card_preferences SET featured_achievement=$2,featured_track=$3,preferences_updated_at=NOW() WHERE discord_user_id=$1',ctx.author.id,selected,track)
+    await ctx.reply('Featured honour saved. Use `!profile` to view it.',mention_author=False)
+
+
+@card_change.command(name='division', description='Choose a featured division from your Discord roles')
+async def change_division(ctx, *, division: str):
+    if ctx.guild is None or ctx.guild.id!=GUILD_ID or db_pool is None:return
+    member=await ctx.guild.fetch_member(ctx.author.id)
+    chosen=next((v for v in career_details.division_choices(member) if v.casefold()==division.casefold().strip()),None)
+    if chosen is None:
+        await ctx.reply('Choose one of your divisions: '+', '.join(career_details.division_choices(member)),mention_author=False);return
+    if ctx.interaction:await ctx.defer(ephemeral=True)
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            if await fetch_driver_profile_stats(conn,member.id) is None:
+                await ctx.reply('Complete driver registration first.',mention_author=False);return
+            await tachograph.appearance(conn,member.id)
+            await conn.execute('UPDATE driver_card_preferences SET division=$2,preferences_updated_at=NOW() WHERE discord_user_id=$1',member.id,chosen)
+    await ctx.reply('Featured division saved. Use `!profile` to view it.',mention_author=False)
 
 
 @card_change.command(name="country", description="Choose the country displayed on your driver card")
@@ -8124,7 +8310,7 @@ async def change_truck(ctx, *, truck: str):
                 await ctx.reply("Complete driver registration first.",mention_author=False)
                 return
             await tachograph.appearance(connection,ctx.author.id)
-            await connection.execute("UPDATE driver_card_preferences SET truck_key=$2 WHERE discord_user_id=$1",ctx.author.id,key)
+            await connection.execute("UPDATE driver_card_preferences SET truck_key=$2,preferences_updated_at=NOW() WHERE discord_user_id=$1",ctx.author.id,key)
     await ctx.reply(f"Card truck saved: **{tachograph.available_trucks()[key]}**. Use !profile to view it.",mention_author=False)
 
 

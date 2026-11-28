@@ -9,7 +9,7 @@ import tachograph
 
 
 def test_fleet_names_resolve_only_to_available_artwork():
-    assert len(tachograph.available_trucks())==18
+    assert len(tachograph.available_trucks())==26
     for key,label in tachograph.available_trucks().items():
         assert tachograph.resolve_truck(label)==key
         assert tachograph.resolve_truck(key)==key
