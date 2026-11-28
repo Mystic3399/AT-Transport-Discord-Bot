@@ -74,12 +74,13 @@ class AllGameBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['profiles'][0]['raceMiles'], 85.5)
         self.assertEqual(result['totals']['realMiles'], sum(p['realMiles'] for p in result['profiles']))
 
-    async def test_missing_canonical_baseline_preserves_previous_snapshot(self):
+    async def test_unmigrated_profile_keeps_existing_totals(self):
         async def legacy_profile(*args):
             return dict(real_miles=100, trucky_race_miles='0', jobs_completed=1)
         guild = SimpleNamespace(chunked=True, members=[SimpleNamespace(id=1, bot=False)])
-        with self.assertRaisesRegex(RuntimeError, 'baseline unavailable'):
-            await collect_snapshot(CreditedPool({}), guild, legacy_profile, {})
+        result = await collect_snapshot(CreditedPool({}), guild, legacy_profile, {})
+        self.assertEqual(result['profiles'][0]['realMiles'], 100)
+        self.assertEqual(result['totals']['realMiles'], 100)
 
     async def test_invalid_canonical_mileage_is_rejected(self):
         async def legacy_profile(*args):

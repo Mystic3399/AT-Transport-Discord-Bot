@@ -38,14 +38,15 @@ async def collect_snapshot(pool, guild, read_profile, membership):
                         LEFT JOIN unified_v2_production_mileage_totals t USING(discord_user_id)
                         WHERE b.discord_user_id=$1
                     """, member.id)
-                    if credited is None:
-                        raise RuntimeError('Verified mileage baseline unavailable; previous snapshot preserved')
-                    # These canonical totals cover both games and already apply
-                    # cross-provider duplicate decisions. Do not add provider
-                    # counters or depend on Discord progression-role activation.
-                    profile = dict(profile)
-                    profile['real_miles'] = credited['real_miles']
-                    profile['trucky_race_miles'] = credited['trucky_race_miles']
+                    # Older accounts may not have a migrated baseline yet.
+                    # Preserve their existing profile totals until migration.
+                    if credited is not None:
+                        # Canonical totals include both games and already apply
+                        # cross-provider duplicate decisions, independently of
+                        # Discord progression-role activation.
+                        profile = dict(profile)
+                        profile['real_miles'] = credited['real_miles']
+                        profile['trucky_race_miles'] = credited['trucky_race_miles']
                 drivers += 1
                 real += int(profile['real_miles'])
                 race += float(profile.get('trucky_race_miles') or 0)
