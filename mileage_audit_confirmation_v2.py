@@ -58,7 +58,6 @@ async def read_trucky_allocation_audit(pool, discord_user_id=None):
                       AND ($1::bigint IS NULL OR d.discord_user_id=$1)
                     ORDER BY d.provider_job_id,d.decision_id DESC
                 ) latest WHERE decision='pending_reconciliation'
-                  AND reason_code='historical_or_trucksbook_overlap'
                   AND NOT EXISTS(SELECT 1 FROM unified_v2_production_credit_ledger l
                     WHERE l.provider='trucky' AND l.provider_job_id=latest.provider_job_id)""", discord_user_id)
     return result
@@ -130,6 +129,36 @@ async def audit_account_matches(conn, candidate, *, lock=False):
     if verified_owner is not None:
         return verified_owner == user
 
+    # Company-approved completed onboarding is a separate mileage assignment,
+    # not provider ownership proof. The recovery worker checks live membership.
+    from completed_onboarding_tb_credit import completed_owner
+    if await completed_owner(conn, account=account, user=int(user)):
+        return True
+
+    # Staff-reviewed Steam/profile ownership can survive a missing mirrored
+    # unified_provider_links row. Never accept a bare self-entered ID.
+    if await conn.fetchval("""
+        SELECT EXISTS (
+          SELECT 1 FROM unified_provider_claims c
+          JOIN unified_driver_profiles p USING (discord_user_id)
+          WHERE c.discord_user_id=$1 AND c.provider='trucksbook'
+            AND c.provider_account_id=$2 AND c.status='approved'
+            AND c.ownership_confirmed=TRUE AND c.membership_confirmed=TRUE
+            AND c.ownership_evidence_kind='trucksbook_staff_reviewed_profile_steam_mapping'
+            AND c.reviewed_at IS NOT NULL AND c.reviewed_by IS NOT NULL
+            AND p.status='active'
+            AND NOT EXISTS (
+              SELECT 1 FROM unified_provider_links l
+              WHERE l.provider='trucksbook'
+                AND (l.provider_account_id=$2 AND l.discord_user_id<>$1
+                  OR l.discord_user_id=$1 AND l.provider_account_id<>$2))
+            AND NOT EXISTS (
+              SELECT 1 FROM driver_links d
+              WHERE d.trucksbook_user_id::text=$2 AND d.discord_user_id<>$1)
+        )
+    """, user, account):
+        return True
+
     # Some older registrations recorded the ID on the completed verification
     # but left it blank on the active legacy link. Require both records.
     if not await conn.fetchval("""
@@ -173,10 +202,14 @@ async def reconciled_repair_delta(conn, candidate):
           AND provider='trucky' AND mileage_type='real')""", candidate['discord_user_id'])
     if not overlap:
         return candidate['missing_distance'], None
-    if (os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES'
-            or candidate['recorded_distance'] != 0
+    # !mileageaudit is an explicit administrator-reviewed and -confirmed batch.
+    # Unlike the background worker it can invoke the existing verified
+    # journey matcher without enabling automatic reconciliation globally.
+    # The matcher's effects run in the audit savepoint (rolled back) and again
+    # in the confirmation transaction (committed atomically with the repair).
+    if (candidate['recorded_distance'] != 0
             or candidate['repair_kind'] not in ('missing_real', 'missing_wotr')):
-        return None, 'cross_provider_review_required'
+        return None, 'existing_job_requires_manual_route_review'
     from automatic_linked_mileage_v2 import reconcile_trucksbook
     delta, hold = await reconcile_trucksbook(
         conn, candidate['job_id'], candidate['discord_user_id'], candidate['actual_distance'],
@@ -190,6 +223,11 @@ async def create_mileage_audit_preview(pool,guild_id,channel_id,reviewer_id,job_
         async with conn.transaction(isolation='repeatable_read'):
             rows=await conn.fetch('''SELECT * FROM mileage_repair_candidates
                 WHERE applied_at IS NULL AND job_id=ANY($1::text[]) ORDER BY discord_user_id, job_id''',sorted(set(job_ids)))
+            # Required for the reviewed matcher even when the autonomous
+            # reconciliation worker is deliberately disabled. Purely additive.
+            if await conn.fetchval("SELECT to_regclass('unified_v2_production_credit_ledger') IS NOT NULL"):
+                from automatic_linked_mileage_v2 import SCHEMA as MATCHING_SCHEMA
+                await conn.execute(MATCHING_SCHEMA)
             candidates=[];held=0
             holds={}; additions={}
             # Simulate the entire batch in application order. The savepoint

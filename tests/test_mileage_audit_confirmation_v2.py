@@ -64,8 +64,10 @@ class AuditOutcomeTests(unittest.TestCase):
         node=next(n for n in ast.parse(SOURCE).body if isinstance(n,ast.AsyncFunctionDef) and n.name=='mileage_audit')
         body=ast.unparse(node)
         self.assertIn('read_trucky_allocation_audit',body)
-        self.assertIn('Already credited Real',body)
-        self.assertIn('Real jobs held',body)
+        self.assertIn('Trucky already credited',body)
+        self.assertIn('Trucky Real still held',body)
+        self.assertIn('show_details',body)
+        self.assertIn('held_reasons',body)
 
 
 class AuditOwnershipTests(unittest.IsolatedAsyncioTestCase):
@@ -92,3 +94,45 @@ class AuditOwnershipTests(unittest.IsolatedAsyncioTestCase):
         conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[None, True, 43]))
         candidate = dict(source_provider_account_id='100', discord_user_id=42)
         self.assertFalse(await audit_account_matches(conn, candidate))
+
+
+class VerifiedManualJourneyReviewTests(unittest.IsolatedAsyncioTestCase):
+    async def test_existing_trucky_miles_use_route_matcher_even_with_auto_worker_off(self):
+        from decimal import Decimal
+        from unittest.mock import patch
+        from mileage_audit_confirmation_v2 import reconciled_repair_delta
+        conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[True, True]))
+        candidate = dict(discord_user_id=42, job_id="123456", missing_distance=140,
+                         recorded_distance=0, actual_distance=140, repair_kind="missing_real")
+        with (patch.dict('os.environ', {'AT_V2_AUTOMATIC_LINKED_RECONCILIATION': 'NO'}),
+              patch('automatic_linked_mileage_v2.reconcile_trucksbook',
+                    new_callable=AsyncMock, return_value=(Decimal('140'), None)) as matcher):
+            result = await reconciled_repair_delta(conn, candidate)
+        self.assertEqual(result, (140, None))
+        matcher.assert_awaited_once_with(conn, '123456', 42, 140)
+
+    async def test_duplicate_and_missing_evidence_remain_held(self):
+        from unittest.mock import patch
+        from mileage_audit_confirmation_v2 import reconciled_repair_delta
+        conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[True, True]))
+        candidate = dict(discord_user_id=42, job_id="123456", missing_distance=140,
+                         recorded_distance=0, actual_distance=140, repair_kind="missing_real")
+        with patch('automatic_linked_mileage_v2.reconcile_trucksbook',
+                   new_callable=AsyncMock, return_value=(None, 'route_evidence_pending')):
+            self.assertEqual(await reconciled_repair_delta(conn, candidate),
+                             (None, 'route_evidence_pending'))
+
+    async def test_existing_job_corrections_do_not_bypass_cross_provider_review(self):
+        from mileage_audit_confirmation_v2 import reconciled_repair_delta
+        conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[True, True]))
+        candidate = dict(discord_user_id=42, job_id="123456", missing_distance=10,
+                         recorded_distance=130, actual_distance=140, repair_kind="distance_correction")
+        self.assertEqual(await reconciled_repair_delta(conn, candidate),
+                         (None, 'existing_job_requires_manual_route_review'))
+
+    async def test_without_trucky_real_credit_stays_eligible(self):
+        from mileage_audit_confirmation_v2 import reconciled_repair_delta
+        conn = SimpleNamespace(fetchval=AsyncMock(side_effect=[True, False]))
+        candidate = dict(discord_user_id=42, job_id="123456", missing_distance=140,
+                         recorded_distance=0, actual_distance=140, repair_kind="missing_real")
+        self.assertEqual(await reconciled_repair_delta(conn, candidate), (140, None))

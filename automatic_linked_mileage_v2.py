@@ -70,6 +70,148 @@ async def mark_suppressed(conn, provider, job_id, user, reason):
         """, provider, job_id, user, reason, digest)
 
 
+async def safely_independent_trucky_real_without_trucksbook(conn, candidate):
+    """Prove there is NO earlier TrucksBook mileage to duplicate.
+
+    Used only for an authenticated, owned Trucky Real job after the caller's
+    membership gates. No guessed route, unknown historical balance or recent
+    potentially matching Trucky Race credit may pass. This is a positive
+    all-zero check, not a waiver for incomplete provider evidence.
+    """
+    if candidate.get("mileage_type") != "real":
+        return False
+    delivered = candidate.get("delivered_at")
+    if (not isinstance(delivered, datetime) or delivered.tzinfo is None
+            or delivered > datetime.now(timezone.utc) - timedelta(minutes=30)):
+        return False
+    user = candidate["discord_user_id"]
+    facts = await conn.fetchrow("""
+        SELECT
+          COALESCE((SELECT real_miles FROM driver_progress
+                    WHERE discord_user_id=$1),0) AS profile_real,
+          COALESCE((SELECT SUM(miles)
+                    FROM unified_v2_production_credit_ledger
+                    WHERE provider='trucky' AND discord_user_id=$1
+                      AND mileage_type='real'),0) AS trucky_real,
+          (SELECT COUNT(*) FROM processed_jobs
+           WHERE discord_user_id=$1 AND LOWER(statistics) LIKE 'real%'
+             AND accepted_distance>0) AS trucksbook_jobs,
+          (SELECT COUNT(*) FROM pending_provider_job_history_v2 h
+           WHERE h.provider='trucksbook' AND h.source_kind='verified_webhook_source'
+             AND (
+               EXISTS(SELECT 1 FROM driver_links d
+                      WHERE d.discord_user_id=$1
+                        AND d.trucksbook_user_id::text=h.provider_account_id)
+               OR EXISTS(SELECT 1 FROM unified_provider_links l
+                      WHERE l.discord_user_id=$1 AND l.provider='trucksbook'
+                        AND l.provider_account_id=h.provider_account_id)
+             )) AS trucksbook_observations,
+          (SELECT COUNT(*) FROM unified_provider_claims c
+           WHERE c.discord_user_id=$1 AND c.provider='trucksbook'
+             AND c.status IN ('pending','approved')) AS trucksbook_claims,
+          (SELECT COUNT(*) FROM unified_v2_production_credit_ledger
+           WHERE provider='trucky' AND discord_user_id=$1
+             AND mileage_type='race'
+             AND (delivered_at IS NULL OR
+                  delivered_at BETWEEN $2::timestamptz - INTERVAL '120 minutes'
+                                   AND $2::timestamptz + INTERVAL '120 minutes'))
+           AS race_overlap
+    """,user,delivered)
+    if not facts:
+        return False
+    recorded = Decimal(str(facts["profile_real"]))
+    prior_trucky = Decimal(str(facts["trucky_real"]))
+    if not recorded.is_finite() or not prior_trucky.is_finite():
+        return False
+    return (
+        recorded == prior_trucky.to_integral_value(rounding="ROUND_FLOOR")
+        and all(int(facts[k]) == 0 for k in (
+            "trucksbook_jobs","trucksbook_observations",
+            "trucksbook_claims","race_overlap"))
+    )
+
+
+async def safely_independent_trucky_real_after_trucksbook_processing(conn, candidate):
+    """Approve only if every *credited* TB delivery predates this Trucky job.
+
+    processed_at is when the bot accepted a completed TrucksBook webhook, so a
+    subsequently completed Trucky job cannot be that previously processed
+    delivery. The saved whole-mile profile must be fully explained by immutable
+    tracked credits; any unprocessed matching-account TB source or nearby Race
+    credit prevents release. Does not infer routes from account names.
+    """
+    if candidate.get("mileage_type") != "real":
+        return False
+    delivered = candidate.get("delivered_at")
+    if (not isinstance(delivered, datetime) or delivered.tzinfo is None
+            or delivered > datetime.now(timezone.utc) - timedelta(minutes=30)):
+        return False
+    user = candidate["discord_user_id"]
+    facts = await conn.fetchrow("""
+        SELECT
+          COALESCE((SELECT real_miles FROM driver_progress
+            WHERE discord_user_id=$1),0) AS profile_real,
+          COALESCE((SELECT SUM(p.accepted_distance) FROM processed_jobs p
+            WHERE p.discord_user_id=$1 AND LOWER(p.statistics) LIKE 'real%'
+              AND p.accepted_distance>0 AND NOT EXISTS(
+                SELECT 1 FROM unified_v2_production_mileage_decisions d
+                WHERE d.provider='trucksbook' AND d.provider_job_id=p.job_id
+                  AND d.discord_user_id=$1 AND d.decision='duplicate_provider_job'
+                  AND d.reason_code='superseded_by_higher_real_credit')),0) AS tb_real,
+          COALESCE((SELECT SUM(miles) FROM unified_v2_production_credit_ledger
+            WHERE discord_user_id=$1 AND provider='trucky'
+              AND mileage_type='real'),0) AS trucky_real,
+          (SELECT COUNT(*) FROM processed_jobs p
+            WHERE p.discord_user_id=$1 AND LOWER(p.statistics) LIKE 'real%'
+              AND p.accepted_distance>0) AS tb_count,
+          (SELECT MAX(p.processed_at) FROM processed_jobs p
+            WHERE p.discord_user_id=$1 AND LOWER(p.statistics) LIKE 'real%'
+              AND p.accepted_distance>0) AS last_tb_processed,
+          (SELECT COUNT(*) FROM pending_provider_job_history_v2 h
+            WHERE h.provider='trucksbook'
+              AND h.source_kind='verified_webhook_source'
+              AND NOT EXISTS(SELECT 1 FROM processed_jobs p
+                             WHERE p.job_id=h.provider_job_id)
+              AND (
+                EXISTS(SELECT 1 FROM driver_links d
+                  WHERE d.discord_user_id=$1
+                    AND d.trucksbook_user_id::text=h.provider_account_id
+                    AND d.trucksbook_name <> ('__unlinked_driver_'||d.discord_user_id::text||'__'))
+                OR EXISTS(SELECT 1 FROM unified_provider_links l
+                  WHERE l.discord_user_id=$1 AND l.provider='trucksbook'
+                    AND l.provider_account_id=h.provider_account_id
+                    AND l.verified_at IS NOT NULL)
+              )) AS unpaid_tb_observations,
+          (SELECT COUNT(*) FROM unified_v2_production_credit_ledger
+            WHERE discord_user_id=$1 AND provider='trucky'
+              AND mileage_type='race'
+              AND (delivered_at IS NULL OR delivered_at BETWEEN
+                $2::timestamptz - INTERVAL '120 minutes'
+                AND $2::timestamptz + INTERVAL '120 minutes')
+          ) AS close_race_credits
+    """, user, delivered)
+    if not facts or int(facts["tb_count"]) < 1:
+        return False
+    last = facts["last_tb_processed"]
+    if not isinstance(last, datetime) or last.tzinfo is None:
+        return False
+    # A processed TrucksBook job must already have completed. A delivery after
+    # its processing timestamp cannot be the same physical journey.
+    if delivered <= last + timedelta(hours=2):
+        return False
+    if int(facts["unpaid_tb_observations"]) or int(facts["close_race_credits"]):
+        return False
+    try:
+        total = Decimal(str(facts["profile_real"]))
+        tb = Decimal(str(facts["tb_real"]))
+        trucky = Decimal(str(facts["trucky_real"]))
+        if not all(x.is_finite() and x >= 0 for x in (total,tb,trucky)):
+            return False
+        return total == tb + trucky.to_integral_value(rounding="ROUND_FLOOR")
+    except (ValueError,TypeError,InvalidOperation,KeyError):
+        return False
+
+
 async def reconcile_trucky(conn, candidate):
     """Return the credited TrucksBook amount being replaced, or a hold reason."""
     user = candidate["discord_user_id"]
@@ -78,6 +220,13 @@ async def reconcile_trucky(conn, candidate):
         candidate["provider_job_id"])
     if paired:
         return None, "duplicate_provider_job"
+    # A verified Trucky-only Real journey cannot double-count TrucksBook
+    # when independent live ledger/baseline facts prove no TB exposure at all.
+    # This can safely release old jobs even if the API omitted cargo/route.
+    if await safely_independent_trucky_real_without_trucksbook(conn, candidate):
+        return Decimal(0), None
+    if await safely_independent_trucky_real_after_trucksbook_processing(conn, candidate):
+        return Decimal(0), None
     if not candidate.get("job_metadata"):
         return None, "route_evidence_pending"
     incoming = dict(candidate, metadata=candidate["job_metadata"])
@@ -86,7 +235,15 @@ async def reconcile_trucky(conn, candidate):
         FROM processed_jobs p JOIN pending_provider_job_history_v2 h
           ON h.provider='trucksbook' AND h.provider_job_id=p.job_id
           AND h.source_kind='verified_webhook_source'
-        WHERE p.discord_user_id=$1 AND LOWER(p.statistics)='real'
+          AND (
+            EXISTS(SELECT 1 FROM driver_links d WHERE d.discord_user_id=p.discord_user_id
+              AND d.trucksbook_user_id::text=h.provider_account_id
+              AND d.trucksbook_name <> ('__unlinked_driver_'||d.discord_user_id::text||'__'))
+            OR EXISTS(SELECT 1 FROM unified_provider_links l
+              WHERE l.discord_user_id=p.discord_user_id AND l.provider='trucksbook'
+                AND l.provider_account_id=h.provider_account_id AND l.verified_at IS NOT NULL)
+          )
+        WHERE p.discord_user_id=$1 AND LOWER(p.statistics) LIKE 'real%'
           AND p.accepted_distance>0
         """, user)
     by_job = {}
@@ -95,6 +252,8 @@ async def reconcile_trucky(conn, candidate):
     found = []
     comparable_jobs = set()
     uncertain_route = False
+    from automatic_mileage_source_recovery_v2 import (
+        valid_temporal_trucksbook_observation, temporally_independent)
     for job_id, versions in by_job.items():
         comparisons = []
         for version in versions:
@@ -105,10 +264,25 @@ async def reconcile_trucky(conn, candidate):
             except (ValueError, TypeError, KeyError, InvalidOperation):
                 comparisons = []
                 break
+        if not comparisons:
+            # Old genuine webhook posts may have only delivery time and miles.
+            # Never invent a route: prove time separation from EVERY authentic
+            # source version, or keep the whole job held for further evidence.
+            timestamps = [valid_temporal_trucksbook_observation(
+                (v["evidence"] if isinstance(v["evidence"],dict)
+                 else json.loads(v["evidence"])),v["accepted_distance"])
+                for v in versions]
+            if (any(value is None for value in timestamps) or not all(
+                    temporally_independent(incoming["delivered_at"],value)
+                    for value in timestamps)):
+                return None, "historical_route_coverage_pending"
+            comparable_jobs.add(job_id)
+            continue
         if any(not item["metadata"].get("cargo") for item in comparisons):
-            if any(abs(incoming["delivered_at"] - item["delivered_at"]) <= timedelta(minutes=30)
+            if any(not temporally_independent(incoming["delivered_at"],item["delivered_at"])
                    for item in comparisons):
                 return None, "route_evidence_pending"
+            comparable_jobs.add(job_id)
             continue
         if comparisons:
             comparable_jobs.add(job_id)
@@ -155,7 +329,7 @@ async def reconcile_trucky(conn, candidate):
         SELECT b.snapshotted_at,
                COALESCE((SELECT real_miles FROM driver_progress WHERE discord_user_id=$1),0) AS total,
                COALESCE((SELECT SUM(accepted_distance) FROM processed_jobs
-                   WHERE discord_user_id=$1 AND LOWER(statistics)='real'
+                   WHERE discord_user_id=$1 AND LOWER(statistics) LIKE 'real%'
                      AND NOT EXISTS (SELECT 1 FROM unified_v2_production_mileage_decisions d
                          WHERE d.provider='trucksbook' AND d.provider_job_id=processed_jobs.job_id
                            AND d.discord_user_id=$1 AND d.decision='duplicate_provider_job'
@@ -166,7 +340,7 @@ async def reconcile_trucky(conn, candidate):
         LEFT JOIN unified_v2_production_mileage_baselines b ON b.discord_user_id=u.id
         """, user)
     processed_count = await conn.fetchval(
-        "SELECT COUNT(*) FROM processed_jobs WHERE discord_user_id=$1 AND LOWER(statistics)='real' AND accepted_distance>0",
+        "SELECT COUNT(*) FROM processed_jobs WHERE discord_user_id=$1 AND LOWER(statistics) LIKE 'real%' AND accepted_distance>0",
         user)
     if processed_count != len(comparable_jobs) and (
             baseline["snapshotted_at"] is None or candidate["delivered_at"] <= baseline["snapshotted_at"]):
@@ -209,10 +383,20 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
     """Return net legacy change for a new TB job, or a reason to hold it."""
     from decimal import ROUND_FLOOR
     rows = await conn.fetch("""
-        SELECT evidence FROM pending_provider_job_history_v2
+        SELECT evidence,provider_account_id FROM pending_provider_job_history_v2
         WHERE provider='trucksbook' AND provider_job_id=$1
           AND source_kind='verified_webhook_source'
         """, job_id)
+    if not rows:
+        return None, "route_evidence_pending"
+    # A source's author name is never proof. Its immutable provider account
+    # must match the driver's active or completed verified registration.
+    from mileage_audit_confirmation_v2 import audit_account_matches
+    for row in rows:
+        if not await audit_account_matches(conn,dict(
+                discord_user_id=user,
+                source_provider_account_id=row["provider_account_id"])):
+            return None, "unverified_trucksbook_account"
     incoming_versions = []
     try:
         for row in rows:
@@ -220,9 +404,33 @@ async def reconcile_trucksbook(conn, job_id, user, miles):
                 job_id, user, row["evidence"], miles, allow_missing_cargo=True,
             ))
     except (ValueError, TypeError, KeyError, InvalidOperation):
-        return None, "route_evidence_pending"
+        incoming_versions = []
     if not incoming_versions:
-        return None, "route_evidence_pending"
+        # Trusted old logbook messages may omit cargo, city or game. Where
+        # complete route data is absent, avoid inventing it. The only safe
+        # automatic approval here is when EVERY authenticated message has a
+        # valid delivery timestamp, and every existing Trucky Real credit is
+        # more than two hours away.
+        from automatic_mileage_source_recovery_v2 import (
+            valid_temporal_trucksbook_observation,temporally_independent)
+        times = []
+        for row in rows:
+            evidence = (json.loads(row["evidence"])
+                        if isinstance(row["evidence"],str) else row["evidence"])
+            observed_at = valid_temporal_trucksbook_observation(evidence,miles)
+            if observed_at is None:
+                return None, "route_evidence_pending"
+            times.append(observed_at)
+        credits = await conn.fetch("""
+            SELECT provider_job_id,miles,delivered_at
+            FROM unified_v2_production_credit_ledger
+            WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real'
+        """,user)
+        if any(credit["delivered_at"] is None or not all(
+                temporally_independent(credit["delivered_at"],observed)
+                for observed in times) for credit in credits):
+            return None, "route_evidence_pending"
+        return Decimal(miles), None
     credits = await conn.fetch("""
         SELECT provider_job_id,miles,delivered_at FROM unified_v2_production_credit_ledger
         WHERE discord_user_id=$1 AND provider='trucky' AND mileage_type='real'

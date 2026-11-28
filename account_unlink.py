@@ -14,6 +14,34 @@ CREATE TABLE IF NOT EXISTS driver_account_unlink_audit (
 SCOPES={'trucksbook','trucky','steam','all'}
 
 
+async def has_valid_tracking_link(conn, discord_user_id):
+    """Active earning role eligibility; old career rows are not active links.
+
+    /unlink preserves legacy driver_links and driver_progress for history.
+    Therefore mere existence of a driver_links row is not enough.
+    A non-retired, numeric legacy TrucksBook link or an independently verified
+    unified provider link on an active profile can earn live ranking roles.
+    """
+    if type(discord_user_id) is not int or discord_user_id <= 0:
+        return False
+    existing = bool(await conn.fetchval("""
+        SELECT EXISTS(
+            SELECT 1 FROM unified_provider_links l
+            JOIN unified_driver_profiles p USING(discord_user_id)
+            WHERE l.discord_user_id=$1 AND l.verified_at IS NOT NULL
+              AND p.status='active'
+        ) OR EXISTS(
+            SELECT 1 FROM driver_links d
+            WHERE d.discord_user_id=$1 AND d.trucksbook_user_id IS NOT NULL
+              AND d.trucksbook_name <> ('__unlinked_driver_'||d.discord_user_id::text||'__')
+        )
+    """, discord_user_id))
+    if existing:
+        return True
+    from completed_onboarding_tb_credit import completed_owner
+    return (await completed_owner(conn, user=discord_user_id)) is not None
+
+
 def allowed(member,role_ids=None):
     guild=getattr(member,'guild',None)
     if not guild or getattr(member,'bot',False): return False

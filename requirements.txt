@@ -3,3 +3,4 @@ asyncpg
 aiohttp
 beautifulsoup4
 Pillow
+python-dotenv>=1,<2

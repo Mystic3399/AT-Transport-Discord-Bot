@@ -292,6 +292,12 @@ async def _ingest_authenticated_job_records(pool, records):
                     'destination':job.get('destination_city_name'),'cargo':job.get('cargo_name')}
                 if all(isinstance(value,str) and value.strip() and len(value)<=300 for value in metadata.values()):
                     retained.update(metadata)
+                # Retain explicit authenticated vehicle categories for Coaches
+                # and ATS car jobs, even before the driver finishes registration.
+                from world_of_trucks_policy_v2 import authenticated_vehicle_type
+                typed_vehicle = authenticated_vehicle_type(job)
+                if typed_vehicle is not None:
+                    retained['vehicle_type'] = typed_vehicle
                 await record_pending_history(pool,'trucky',str(job['id']),str(job['user_id']),
                                              retained,source_kind='authenticated_api')
                 counts['history_retained'] += 1

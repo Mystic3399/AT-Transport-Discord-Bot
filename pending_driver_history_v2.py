@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS pending_history_capture_cursor_v2 (
 
 FIELDS={'game','game_id','status','stats_type','driven_distance_km','distance_unit','max_speed','max_speed_kmh',
         'completed_at','origin','destination','cargo','distance','unit','max_speed_unit',
-        'source_completion_local','source_message_at','candidate_driver_label','company_policy_classification'}
+        'source_completion_local','source_message_at','candidate_driver_label','company_policy_classification',
+        'vehicle_type'}
 
 async def install_schema(pool):
     async with pool.acquire() as conn:await conn.execute(SCHEMA)

@@ -60,9 +60,9 @@ async def test_new_assignment_uses_least_used_trucks():
 def load_bot_definitions():
     source=Path(__file__).resolve().parents[1]/"bot.py"
     tree=ast.parse(source.read_text())
-    names={"TachographFlip","tachograph_view"}
+    names={"TachographFlip","tachograph_view","CareerButton"}
     nodes=[node for node in tree.body if getattr(node,"name",None) in names]
-    ns={"discord":discord}
+    ns={"discord":discord,"website_company_bridge":SimpleNamespace(cached_hub_link=lambda uid:None)}
     exec(compile(ast.Module(body=nodes,type_ignores=[]),"bot.py","exec"),ns)
     return ns
 
@@ -90,7 +90,7 @@ async def test_flip_routes_survive_restart_and_replace_same_message():
     await restored.callback(interaction)
     interaction.edit_original_response.assert_awaited_once()
     kwargs=interaction.edit_original_response.call_args.kwargs
-    assert len(kwargs["view"].children)==1
+    assert len(kwargs["view"].children)==2
     assert kwargs["view"].children[0].item.custom_id=="at:tacho:42:front"
     assert item.template.fullmatch("at:tacho:42:race") is None
     assert len(kwargs["attachments"])==1

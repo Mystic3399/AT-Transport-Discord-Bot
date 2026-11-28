@@ -4,10 +4,15 @@ from datetime import datetime, timezone
 
 
 def company_status(trucksbook, trucky, discord_presence=None):
-    if discord_presence == "Not in server" or "not_member" in (trucksbook, trucky):
+    # An active verified A&T membership on EITHER provider qualifies.
+    # A departure on TrucksBook must never override an active Trucky account,
+    # nor vice versa. Discord departure still suspends current eligibility.
+    if discord_presence == "Not in server":
         return "Former company driver"
     if "member" in (trucksbook, trucky):
         return "Active company driver"
+    if trucksbook == "not_member" and trucky == "not_member":
+        return "Former company driver"
     return "Company status unconfirmed"
 
 

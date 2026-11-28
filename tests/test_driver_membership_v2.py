@@ -6,8 +6,8 @@ from driver_membership_v2 import company_status, inspect_driver, trucksbook_depa
 class StatusTests(unittest.TestCase):
     def test_membership_is_not_discord_presence(self):
         self.assertEqual(company_status('not_member', 'not_member'), 'Former company driver')
-        self.assertEqual(company_status('member', 'not_member'), 'Former company driver')
-        self.assertEqual(company_status('unknown', 'not_member'), 'Former company driver')
+        self.assertEqual(company_status('member', 'not_member'), 'Active company driver')
+        self.assertEqual(company_status('unknown', 'not_member'), 'Company status unconfirmed')
         self.assertEqual(company_status('unknown', 'unknown'), 'Company status unconfirmed')
 
 
@@ -33,7 +33,7 @@ class InspectionTests(unittest.IsolatedAsyncioTestCase):
         result = await inspect_driver({'discord_user_id': 1, 'trucksbook_user_id': 2,
             'trucky_account_id': '3'}, guild, {'3'}, AsyncMock(return_value={
                 'success': True, 'membership_status': 'not_member'}))
-        self.assertEqual(result['company'], 'Former company driver')
+        self.assertEqual(result['company'], 'Active company driver')
 
     async def test_provider_outage_does_not_mark_former(self):
         guild = Mock(); guild.get_member.return_value = object()

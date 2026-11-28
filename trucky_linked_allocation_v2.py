@@ -172,7 +172,8 @@ async def preview_historical_real_batch(pool, discord_user_id, job_ids, approval
     return results
 
 
-async def _settle_candidate(conn, candidate, member_ids):
+async def _settle_candidate(conn, candidate, member_ids, *, reviewed=False,
+                            alternate_member_ids=frozenset()):
     """One transaction per job. Caller must have checked the runtime boundary."""
     user = candidate['discord_user_id']
     account = candidate['provider_account_id']
@@ -180,19 +181,6 @@ async def _settle_candidate(conn, candidate, member_ids):
     async with conn.transaction():
         # Shared with legacy TrucksBook writer; serializes first-row creation.
         await conn.execute('SELECT pg_advisory_xact_lock($1)', user)
-        owner = await conn.fetchrow("""
-            SELECT l.provider_account_id,s.steam_id64
-            FROM unified_provider_links l
-            JOIN unified_steam_links s USING(discord_user_id)
-            JOIN unified_driver_profiles p USING(discord_user_id)
-            JOIN unified_registration_sessions r USING(discord_user_id)
-            WHERE l.provider='trucky' AND l.provider_account_id=$1
-              AND l.discord_user_id=$2 AND s.verified_at IS NOT NULL
-              AND p.status='active' AND r.status='approved'
-            FOR SHARE OF l,s,p,r
-        """, account, user)
-        if owner is None or account not in member_ids:
-            return 'account_link_pending'
         previous = await conn.fetchrow("""SELECT discord_user_id,provider_account_id,
             mileage_type,miles,source_evidence_sha256 FROM unified_v2_production_credit_ledger
             WHERE provider='trucky' AND provider_job_id=$1""", job_id)
@@ -210,6 +198,23 @@ async def _settle_candidate(conn, candidate, member_ids):
                 )
                 return 'replayed'
             return 'conflicting_job_pending'
+        owner = await conn.fetchrow("""
+            SELECT l.provider_account_id,s.steam_id64
+            FROM unified_provider_links l
+            JOIN unified_steam_links s USING(discord_user_id)
+            JOIN unified_driver_profiles p USING(discord_user_id)
+            WHERE l.provider='trucky' AND l.provider_account_id=$1
+              AND l.discord_user_id=$2 AND l.verified_at IS NOT NULL
+              AND s.verified_at IS NOT NULL AND p.status='active'
+            FOR SHARE OF l,s,p
+        """, account, user)
+        # A driver is eligible when currently in A&T on EITHER provider.
+        # A verified TrucksBook company membership must belong to the same
+        # Discord driver as this verified Trucky account, never a name match.
+        if owner is None:
+            return 'account_link_pending'
+        if account not in member_ids and user not in alternate_member_ids:
+            return 'company_not_member'
         totals = await conn.fetchrow("""SELECT combined_real_miles,trucky_race_miles
             FROM unified_v2_production_mileage_totals WHERE discord_user_id=$1 FOR UPDATE""", user)
         existing_real = totals['combined_real_miles'] if totals else Decimal(0)
@@ -231,7 +236,7 @@ async def _settle_candidate(conn, candidate, member_ids):
             # Even without a saved TB link, an existing unexplained balance is
             # historical evidence, never permission to add a second total.
             if overlap or int(legacy or 0) != int(existing_real.to_integral_value(rounding=ROUND_FLOOR)):
-                if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
+                if not reviewed and os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') != 'YES':
                     await _record_decision(conn, candidate, 'pending_reconciliation', 'historical_or_trucksbook_overlap')
                     return 'pending_reconciliation'
                 from automatic_linked_mileage_v2 import reconcile_trucky
@@ -239,6 +244,14 @@ async def _settle_candidate(conn, candidate, member_ids):
                 if hold:
                     await _record_decision(conn, candidate, 'pending_reconciliation', hold)
                     return hold
+        if candidate['mileage_type'] == 'race':
+            # A Race bucket does not make an identical TrucksBook Real delivery
+            # independent. Do not credit Race and Real for the same journey.
+            from trucky_race_overlap_guard_v2 import race_overlap_hold
+            race_hold = await race_overlap_hold(conn, candidate)
+            if race_hold:
+                await _record_decision(conn, candidate, 'pending_reconciliation', race_hold)
+                return race_hold
         ownership_digest = hashlib.sha256(json.dumps({
             'policy': POLICY, 'discord': user, 'account': account,
             'steam': owner['steam_id64'], 'active_company': 49041
@@ -293,7 +306,7 @@ async def _record_decision(conn, candidate, decision, reason):
         candidate['provider_job_id'], candidate['discord_user_id'], decision, reason, candidate['source_sha256'])
 
 
-async def allocate_saved_linked_history(pool):
+async def allocate_saved_linked_history(pool, *, alternate_member_ids=frozenset()):
     """Reassociates old vault jobs automatically after registration; bounded credits.
 
     Unlinked jobs stay in the same durable vault, with separate Real/Race audit
@@ -308,28 +321,94 @@ async def allocate_saved_linked_history(pool):
         if actual != os.environ.get('AT_V2_LINKED_MILEAGE_DATABASE_SHA256'):
             return {'status': 'database_identity_blocked', 'mileage_awarded': False}
         await conn.execute(SCHEMA)
+        from automatic_mileage_holding_v2 import SCHEMA as HOLDING_SCHEMA
+        await conn.execute(HOLDING_SCHEMA)
         if os.getenv('AT_V2_AUTOMATIC_LINKED_RECONCILIATION') == 'YES':
             from automatic_linked_mileage_v2 import SCHEMA as AUTOMATIC_SCHEMA
             await conn.execute(AUTOMATIC_SCHEMA)
         rows = await conn.fetch("""SELECT h.provider,h.provider_job_id,h.provider_account_id,
                 h.source_kind,h.evidence,l.discord_user_id
             FROM pending_provider_job_history_v2 h
-            JOIN unified_provider_links l ON l.provider=h.provider AND l.provider_account_id=h.provider_account_id
+            LEFT JOIN unified_provider_links l
+              ON l.provider=h.provider AND l.provider_account_id=h.provider_account_id
+             AND l.verified_at IS NOT NULL
             WHERE h.provider='trucky' AND h.source_kind='authenticated_api'
             ORDER BY h.provider_job_id,h.payload_sha256""")
+    from automatic_mileage_holding_v2 import store_state
     groups = defaultdict(list)
     for row in rows:
         groups[row['provider_job_id']].append(dict(row))
+    # Account-level diagnostics are derived from the same verified-link join
+    # used for allocation. Never print IDs or infer ownership from names.
+    linked_accounts = {str(row['provider_account_id']) for row in rows
+                       if row['discord_user_id'] is not None}
+    unlinked_accounts = {str(row['provider_account_id']) for row in rows
+                         if row['discord_user_id'] is None}
+    link_diagnostics = {'verified_linked_accounts': len(linked_accounts),
+                        'unlinked_source_accounts': len(unlinked_accounts),
+                        'source_accounts_with_mixed_link_state': len(linked_accounts & unlinked_accounts)}
+    # An old immutable credit remains earned when its driver later departs.
+    # Read those ledger facts in bulk so the pending queue never relabels
+    # already-paid history as newly unpaid just because membership changed.
+    async with pool.acquire() as conn:
+        ledgers = await conn.fetch("""
+            SELECT provider_job_id,discord_user_id,provider_account_id,
+                   mileage_type,miles,source_evidence_sha256
+            FROM unified_v2_production_credit_ledger
+            WHERE provider='trucky' AND provider_job_id = ANY($1::text[])
+        """, list(groups))
+    existing = {row['provider_job_id']:dict(row) for row in ledgers}
     counts = defaultdict(int)
     credits = 0
     for versions in groups.values():
-        users = {v['discord_user_id'] for v in versions}
-        candidate = vault_candidate(versions, next(iter(users))) if len(users) == 1 else None
+        job_id = versions[0]['provider_job_id']
+        owners = {v['discord_user_id'] for v in versions if v['discord_user_id'] is not None}
+        accounts = {v['provider_account_id'] for v in versions}
+        account = next(iter(accounts)) if len(accounts)==1 else None
+        user = next(iter(owners)) if len(owners)==1 else None
+        if len(accounts) != 1 or len(owners) > 1:
+            counts['invalid_or_conflicting_pending'] += 1
+            async with pool.acquire() as conn:
+                await store_state(conn,'trucky',job_id,None,driver_id=None,
+                                  reason='multiple_provider_owners')
+            continue
+        prior=existing.get(job_id)
+        if prior:
+            previously_credited=vault_candidate(versions,int(prior['discord_user_id']))
+            if previously_credited is None or not (
+                prior['provider_account_id']==account
+                and prior['mileage_type']==previously_credited['mileage_type']
+                and prior['miles']==previously_credited['miles']
+                and prior['source_evidence_sha256']==previously_credited['source_sha256']
+            ):
+                counts['conflicting_job_pending'] += 1
+                async with pool.acquire() as conn:
+                    await store_state(conn,'trucky',job_id,account,
+                                      reason='conflicting_job_pending')
+                continue
+            async with pool.acquire() as conn:
+                await store_state(conn,'trucky',job_id,account,
+                    driver_id=int(prior['discord_user_id']),
+                    mileage_type=previously_credited['mileage_type'],
+                    miles=previously_credited['miles'],reason='replayed')
+            counts['replayed'] += 1
+            continue
+        if user is None:
+            reason = ('company_not_member' if account not in members else
+                      'account_link_pending')
+            counts[reason] += 1
+            async with pool.acquire() as conn:
+                await store_state(conn,'trucky',job_id,account,reason=reason)
+            continue
+        candidate = vault_candidate(versions, user)
         if candidate is None:
             counts['invalid_or_conflicting_pending'] += 1
+            async with pool.acquire() as conn:
+                await store_state(conn,'trucky',job_id,account,driver_id=user,
+                                  reason='invalid_or_conflicting_pending')
             continue
-        # Inspect ALL observations, including any conflicting account that no
-        # longer has a saved link. A join alone must not hide that conflict.
+        # Inspect all saved versions, including accounts that no longer have
+        # a link; an ambiguous owner/job can never be settled by a new link.
         async with pool.acquire() as conn:
             all_versions = await conn.fetch("""SELECT provider,provider_job_id,provider_account_id,source_kind,evidence
                 FROM pending_provider_job_history_v2 WHERE provider='trucky'
@@ -337,13 +416,41 @@ async def allocate_saved_linked_history(pool):
             candidate = vault_candidate([dict(v) for v in all_versions], candidate['discord_user_id'])
             if candidate is None:
                 counts['invalid_or_conflicting_pending'] += 1
+                await store_state(conn,'trucky',job_id,account,
+                                  reason='invalid_or_conflicting_pending')
                 continue
-            outcome = await _settle_candidate(conn, candidate, members)
+            outcome = await _settle_candidate(
+                conn,candidate,members,alternate_member_ids=alternate_member_ids)
+            await store_state(conn,'trucky',job_id,account,
+                      driver_id=user,mileage_type=candidate['mileage_type'],
+                      miles=candidate['miles'],reason=outcome)
         counts[outcome] += 1
         if outcome.startswith('credited_'):
             credits += 1
             if credits >= 100:
                 break
+    # Read from committed ledger, never assume previewed/queued miles were paid.
+    # Include previously recovered jobs from this day even on subsequent polls.
+    async with pool.acquire() as conn:
+        paid = await conn.fetch("""
+            SELECT mileage_type,COUNT(*)::BIGINT AS jobs,
+                   COALESCE(SUM(miles),0) AS miles
+            FROM unified_v2_production_credit_ledger
+            WHERE provider='trucky'
+              AND canonical_credit_key LIKE 'accepted-link-trucky:%'
+              AND credited_at >= NOW() - INTERVAL '24 hours'
+            GROUP BY mileage_type
+        """)
+    verified_awards = {
+        row['mileage_type']: {'jobs':int(row['jobs']),
+                              'miles':str(row['miles'])}
+        for row in paid
+    }
     return {'status': 'linked_history_processed', 'counts': dict(counts),
-            'mileage_awarded': credits > 0, 'registration_changed': False,
-            'roles_changed': False, 'company_mods_unlocked': False}
+            'mileage_awarded': credits > 0,
+            'credited_this_run': credits,
+            'ledger_awards_last_24h': verified_awards,
+            'registration_changed': False,
+            'queued_unverified': counts.get('account_link_pending',0)+counts.get('company_not_member',0),
+            'roles_changed': False, 'company_mods_unlocked': False,
+            'source_link_diagnostics': link_diagnostics}

@@ -1,0 +1,326 @@
+"""Automation cannot guess identity, historical balances or missing job evidence."""
+import ast
+from datetime import datetime,timedelta,timezone
+from pathlib import Path
+from types import SimpleNamespace
+import unittest
+
+from automatic_mileage_source_recovery_v2 import (
+    valid_replay_window, trusted_account_id, temporally_independent,
+    valid_temporal_trucksbook_observation
+)
+
+NOW=datetime.now(timezone.utc)
+ROOT=Path(__file__).resolve().parents[1]
+
+class AutomaticSourceProofTests(unittest.TestCase):
+    def evidence(self, posted=NOW, **kw):
+        return dict(unit="mi",stats_type="Real",distance=120,
+                    source_message_at=posted.isoformat(),**kw)
+
+    def test_only_new_jobs_after_known_snapshot_can_replay(self):
+        ev=self.evidence()
+        self.assertTrue(valid_replay_window(ev,NOW-timedelta(days=3)))
+        self.assertFalse(valid_replay_window(ev,None))
+        self.assertFalse(valid_replay_window(ev,NOW-timedelta(minutes=40)))
+        self.assertFalse(valid_replay_window(ev,NOW+timedelta(hours=1)))
+        self.assertFalse(valid_replay_window(dict(ev,unit="km"),NOW-timedelta(days=3)))
+        self.assertFalse(valid_replay_window(dict(ev,distance=120.5),NOW-timedelta(days=3)))
+
+    def test_no_name_or_invalid_account_is_an_ownership_proof(self):
+        for account in ("", "A&T Driver", "0", "123 456", "001",None):
+            self.assertFalse(trusted_account_id(account))
+        self.assertTrue(trusted_account_id("553238"))
+
+    def test_trusted_time_only_can_exclude_distant_delivery_not_close_overlap(self):
+        ev=self.evidence(NOW-timedelta(hours=5))
+        posted=valid_temporal_trucksbook_observation(ev,120)
+        self.assertIsNotNone(posted)
+        self.assertTrue(temporally_independent(NOW,posted))
+        self.assertFalse(temporally_independent(NOW-timedelta(hours=4),posted))
+        self.assertIsNone(valid_temporal_trucksbook_observation(dict(ev,distance=121),120))
+        self.assertIsNone(valid_temporal_trucksbook_observation(dict(ev,unit="km"),120))
+        self.assertIsNone(valid_temporal_trucksbook_observation(dict(ev,stats_type="Race"),120))
+
+    def test_wotr_real_jobs_are_included_in_duplicate_matching(self):
+        text=(ROOT/"automatic_linked_mileage_v2.py").read_text(encoding="utf-8")
+        self.assertIn("LOWER(p.statistics) LIKE 'real%'",text)
+        self.assertIn("LOWER(statistics) LIKE 'real%'",text)
+        self.assertNotIn("LOWER(p.statistics)='real'",text)
+
+    def test_history_scan_records_proof_not_direct_credit(self):
+        tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
+        scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                  and n.name=="capture_configured_mileage_history")
+        body=ast.unparse(scan)
+        self.assertIn("MILEAGE_AUDIT_CHANNEL_IDS",body)
+        self.assertIn("audit_source_allowed",body)
+        self.assertIn("retain_trucksbook_source_observation",body)
+        self.assertNotIn("record_real_job(",body)
+
+    def test_legacy_writer_blocks_double_credit_with_trucky_race(self):
+        tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
+        scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                  and n.name=="record_real_job")
+        body=ast.unparse(scan)
+        self.assertIn("pending_race_cross_provider_review",body)
+        self.assertIn("pending_race_cross_provider_evidence",body)
+        self.assertIn("valid_temporal_trucksbook_observation",body)
+        self.assertIn("mileage_type='race'",body)
+
+    def test_background_leaderboard_updates_do_not_spam_discord(self):
+        text=(ROOT/"bot.py").read_text(encoding="utf-8")
+        self.assertIn("@tasks.loop(minutes=10)",text)
+        self.assertIn("async def leaderboard_rollover_task",text)
+        self.assertIn("await asyncio.sleep(600)",text)
+        self.assertIn("WHERE LOWER(statistics) LIKE 'real%'",text)
+
+    def test_auto_replay_updates_leaderboard_once_per_batch(self):
+        tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
+        scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                  and n.name=="replay_saved_trucksbook_jobs")
+        code=ast.unparse(scan)
+        self.assertEqual(code.count("await refresh_driver_leaderboard(guild)"),1)
+        self.assertIn("affected_users",code)
+
+    def test_automatic_replay_requires_snapshots_and_exact_accounts(self):
+        tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
+        scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                  and n.name=="replay_saved_trucksbook_jobs")
+        code=ast.unparse(scan)
+        for required in ("trusted_account_id","valid_replay_window",
+                         "audit_account_matches","has_valid_tracking_link",
+                         "read_only_database_fingerprint","record_real_job"):
+            self.assertIn(required,code)
+
+
+class VerifiedTimeOnlyReconciliationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_automatically_credits_independent_verified_real_without_route(self):
+        from decimal import Decimal
+        from unittest.mock import AsyncMock,patch
+        from automatic_linked_mileage_v2 import reconcile_trucksbook
+        source={"evidence":dict(stats_type="Real",distance=140,unit="mi",
+                source_message_at=(NOW-timedelta(hours=6)).isoformat()),
+                "provider_account_id":"553238"}
+        credits=[{"provider_job_id":"200", "miles":Decimal("190"),
+                  "delivered_at":NOW}]
+        conn=SimpleNamespace(fetch=AsyncMock(side_effect=[[source],credits]))
+        with patch("mileage_audit_confirmation_v2.audit_account_matches",
+                   new_callable=AsyncMock,return_value=True) as link:
+            self.assertEqual(await reconcile_trucksbook(conn,"100",42,140),
+                             (Decimal(140),None))
+            link.assert_awaited_once()
+
+    async def test_nearby_real_credit_cannot_be_duplicated_without_route(self):
+        from decimal import Decimal
+        from unittest.mock import AsyncMock,patch
+        from automatic_linked_mileage_v2 import reconcile_trucksbook
+        source={"evidence":dict(stats_type="Real",distance=140,unit="mi",
+                source_message_at=(NOW-timedelta(minutes=20)).isoformat()),
+                "provider_account_id":"553238"}
+        credits=[{"provider_job_id":"200", "miles":Decimal("190"),
+                  "delivered_at":NOW}]
+        conn=SimpleNamespace(fetch=AsyncMock(side_effect=[[source],credits]))
+        with patch("mileage_audit_confirmation_v2.audit_account_matches",
+                   new_callable=AsyncMock,return_value=True):
+            self.assertEqual(await reconcile_trucksbook(conn,"100",42,140),
+                             (None,"route_evidence_pending"))
+
+    async def test_unverified_account_cannot_use_temporal_fallback(self):
+        from unittest.mock import AsyncMock,patch
+        from automatic_linked_mileage_v2 import reconcile_trucksbook
+        source={"evidence":dict(stats_type="Real",distance=140,unit="mi",
+                source_message_at=(NOW-timedelta(hours=6)).isoformat()),
+                "provider_account_id":"553238"}
+        conn=SimpleNamespace(fetch=AsyncMock(return_value=[source]))
+        with patch("mileage_audit_confirmation_v2.audit_account_matches",
+                   new_callable=AsyncMock,return_value=False):
+            self.assertEqual(await reconcile_trucksbook(conn,"100",42,140),
+                             (None,"unverified_trucksbook_account"))
+
+    def test_legacy_completed_registration_is_considered_for_auto_ownership(self):
+        tree=ast.parse((ROOT/"bot.py").read_text(encoding="utf-8"))
+        scan=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                  and n.name=="replay_saved_trucksbook_jobs")
+        body=ast.unparse(scan)
+        self.assertIn("driver_verifications",body)
+        self.assertIn("v.status='completed'",body)
+        self.assertIn("v.completed_at IS NOT NULL",body)
+
+
+class FreshCompanyMembershipRecovery(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_verified_active_company_account_can_retry_now(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+        cache={}
+        look=AsyncMock(return_value={"success":True,"belongs_to_at":True})
+        row={"discord":"In server","trucksbook_link_conflict":False}
+        self.assertTrue(await current_trucksbook_member("553238",row,look,cache,now=NOW))
+        look.assert_awaited_once_with(553238)
+        self.assertTrue(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW+timedelta(seconds=119)))
+        self.assertEqual(look.await_count,1)
+        self.assertTrue(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW+timedelta(seconds=125)))
+        self.assertEqual(look.await_count,2)
+
+    async def test_departed_discord_or_unverified_owner_cannot_retry(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+        look=AsyncMock(return_value={"success":True,"belongs_to_at":True})
+        for row in (None,{},{"discord":"Not in server"},
+                    {"discord":"In server","trucksbook_link_conflict":True}):
+            self.assertFalse(await current_trucksbook_member("553238",row,look,{}))
+        for account in ("", "0", "A&T Mystic3399", " 553238"):
+            self.assertFalse(await current_trucksbook_member(
+                account,{"discord":"In server"},look,{}))
+        look.assert_not_awaited()
+
+    async def test_missing_positive_membership_never_credits(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+        row={"discord":"In server","trucksbook_link_conflict":False}
+        for value in (None,{},{"success":True,"belongs_to_at":False},
+                      {"success":False,"belongs_to_at":True}):
+            look=AsyncMock(return_value=value)
+            self.assertFalse(await current_trucksbook_member(
+                "553238",row,look,{},now=NOW))
+        async def broken(_):
+            raise RuntimeError("API not available")
+        self.assertFalse(await current_trucksbook_member(
+            "553238",row,broken,{},now=NOW))
+
+    async def test_negative_status_refreshes_after_ten_minutes(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import current_trucksbook_member
+        cache={}
+        look=AsyncMock(side_effect=[
+            {"success":True,"belongs_to_at":False},
+            {"success":True,"belongs_to_at":True}])
+        row={"discord":"In server"}
+        self.assertFalse(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW))
+        self.assertFalse(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW+timedelta(minutes=9)))
+        self.assertEqual(look.await_count,1)
+        self.assertTrue(await current_trucksbook_member(
+            "553238",row,look,cache,now=NOW+timedelta(minutes=11)))
+        self.assertEqual(look.await_count,2)
+
+
+class AccountedTrucksBookHistoricalBackfillTests(unittest.IsolatedAsyncioTestCase):
+    def evidence(self):
+        return {
+            'unit':'mi', 'distance':155, 'stats_type':'Real',
+            'source_message_at':(NOW-timedelta(days=14)).isoformat()
+        }
+
+    def facts(self, **overrides):
+        row=dict(real_miles=0,accounted_jobs_miles=0,
+                 unsupported_prior_jobs=0,trucky_links=0,
+                 other_ledger_credits=0,linked_combined_real=0,
+                 linked_race=0)
+        row.update(overrides)
+        return row
+
+    async def test_zero_balance_driver_can_restore_old_a_and_t_webhook(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import (
+            safely_restore_accounted_trucksbook_history)
+        conn=SimpleNamespace(fetchrow=AsyncMock(return_value=self.facts()))
+        self.assertTrue(await safely_restore_accounted_trucksbook_history(
+            conn,4123,self.evidence(),155))
+        conn.fetchrow.assert_awaited_once()
+
+    async def test_subsequent_old_job_still_eligible_after_first_restore(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import (
+            safely_restore_accounted_trucksbook_history)
+        conn=SimpleNamespace(fetchrow=AsyncMock(
+            return_value=self.facts(real_miles=155,accounted_jobs_miles=155)))
+        self.assertTrue(await safely_restore_accounted_trucksbook_history(
+            conn,4123,self.evidence(),155))
+
+    async def test_unexplained_legacy_or_foreign_provider_miles_never_awarded(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import (
+            safely_restore_accounted_trucksbook_history)
+        for change in (
+            dict(real_miles=170),
+            dict(real_miles=100,accounted_jobs_miles=110),
+            dict(trucky_links=1),
+            dict(other_ledger_credits=1),
+            dict(linked_combined_real=30),
+            dict(linked_race=100),
+            dict(unsupported_prior_jobs=1),
+        ):
+            with self.subTest(change=change):
+                conn=SimpleNamespace(fetchrow=AsyncMock(return_value=self.facts(**change)))
+                self.assertFalse(await safely_restore_accounted_trucksbook_history(
+                    conn,4123,self.evidence(),155))
+
+    async def test_source_requires_trusted_time_class_distance_and_user(self):
+        from unittest.mock import AsyncMock
+        from automatic_mileage_source_recovery_v2 import (
+            safely_restore_accounted_trucksbook_history)
+        for observation in (
+            dict(self.evidence(),unit='km'),
+            dict(self.evidence(),stats_type='Race'),
+            dict(self.evidence(),distance=999),
+            dict(self.evidence(),source_message_at='unverified'),
+            dict(self.evidence(),source_message_at=(NOW+timedelta(days=1)).isoformat()),
+        ):
+            with self.subTest(observation=observation):
+                conn=SimpleNamespace(fetchrow=AsyncMock())
+                self.assertFalse(await safely_restore_accounted_trucksbook_history(
+                    conn,4123,observation,155))
+                conn.fetchrow.assert_not_awaited()
+
+    def test_locked_writer_reverifies_account_and_baseline(self):
+        import ast
+        from pathlib import Path
+        root=Path(__file__).resolve().parents[1]
+        tree=ast.parse((root/'bot.py').read_text(encoding='utf-8'))
+        writer=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                    and n.name=='record_real_job')
+        code=ast.unparse(writer)
+        self.assertIn('pg_advisory_xact_lock',code)
+        self.assertIn('historical_backfill_source',code)
+        self.assertIn('audit_account_matches',code)
+        self.assertIn('has_valid_tracking_link',code)
+        self.assertIn('safely_restore_accounted_trucksbook_history',code)
+        self.assertLess(code.index('pg_advisory_xact_lock'),
+                        code.index('safely_restore_accounted_trucksbook_history'))
+
+    def test_historical_replay_preserves_original_credit_and_progression(self):
+        import ast
+        from pathlib import Path
+        root=Path(__file__).resolve().parents[1]
+        tree=ast.parse((root/'bot.py').read_text(encoding='utf-8'))
+        replay=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                    and n.name=='replay_saved_trucksbook_jobs')
+        code=ast.unparse(replay)
+        self.assertIn('historical_backfill_source',code)
+        self.assertIn('record_real_job',code)
+        self.assertIn('sync_member_progression_role',code)
+        self.assertIn('sync_permanent_system_for_driver',code)
+
+
+class LinkedProfileZeroMileageDiagnostics(unittest.TestCase):
+    def test_admin_driveraudit_uses_exact_account_history_not_display_name_for_credit(self):
+        import ast
+        from pathlib import Path
+        root=Path(__file__).resolve().parents[1]
+        tree=ast.parse((root/'bot.py').read_text(encoding='utf-8'))
+        command=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef)
+                     and n.name=='specific_driver_mileage_audit')
+        code=ast.unparse(command)
+        self.assertIn('has_guild_permissions(administrator=True)',code)
+        self.assertIn('legacy_account',code)
+        self.assertIn('unified_account',code)
+        self.assertIn("provider_account_id = $1".replace(' = ','='),code)
+        self.assertIn('candidate_driver_label',code)
+        self.assertIn('unprocessed_jobs',code)
+        self.assertNotIn('record_real_job(',code)
+        self.assertNotIn('UPDATE driver_progress',code)
+        self.assertNotIn('INSERT INTO processed_jobs',code)
