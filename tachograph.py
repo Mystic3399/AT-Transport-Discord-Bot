@@ -15,6 +15,15 @@ SHIELDS = ART / "rank-badges/shield-edition/AT-Tachograph-Shield-Badges.zip"
 FLAGS = ART / "country-flags/AT-Tachograph-World-Flags.zip"
 MILES = (0,5000,10000,15000,20000,25000,30000,35000,40000,50000,75000,
          100000,150000,200000,300000,400000,500000,600000,700000,800000,900000,1000000)
+RANK_NAMES = (
+    "New Driver", "Road Runner", "Distance Driver", "Aurora Driver",
+    "Wolf Pack Driver", "Viking Hauler", "Elite Hauler", "A&T Veteran",
+    "A&T Road Legend", "Beyond Horizons", "Horizon Wolf", "A&T Centurion",
+    "Viking Pathfinder", "Road Guardian", "Aurora Pathfinder", "Viking Roadmaster",
+    "Horizon Legend", "Alpha Roadmaster", "Aurora Commander",
+    "Guardian of the Horizon", "Beyond the Horizon", "A&T Immortal",
+)
+AMBER = "#ffca58"
 WHITE, CYAN, GOLD = "#eef7ff", "#7cdcff", "#f1ce79"
 CLUBS = {
     40000: ("mileage-club-40k", "MILEAGE CLUB"),
@@ -137,6 +146,31 @@ def badge(miles, locked):
             return layer
 
 
+
+def progression(value):
+    """Return a track's rank from its own credited total, preserving unavailable."""
+    if value is None:
+        return None
+    miles = Decimal(str(value))
+    if not miles.is_finite() or miles < 0:
+        raise ValueError("Mileage must be finite and nonnegative")
+    index = max(i for i, threshold in enumerate(MILES) if miles >= threshold)
+    target = MILES[index + 1] if index + 1 < len(MILES) else None
+    return dict(miles=miles, current=MILES[index], name=RANK_NAMES[index],
+                target=target, next_name=RANK_NAMES[index + 1] if target else None,
+                remaining=max(Decimal(0), Decimal(target or miles) - miles))
+
+
+@lru_cache(maxsize=44)
+def race_badge(miles, locked=False):
+    """Reuse the full approved shield with an amber frame and explicit Race ribbon."""
+    layer = Image.new("RGBA", (180, 200))
+    fitted = ImageOps.contain(badge(miles, locked), (162, 178), Image.Resampling.LANCZOS)
+    layer.alpha_composite(fitted, ((180 - fitted.width) // 2, 4))
+    with Image.open(ART / "design-details/race-shield-overlay.webp") as source:
+        layer.alpha_composite(source.convert("RGBA"))
+    return layer
+
 def render(name, profile, prefs, side="front", role="DRIVER"):
     """Compose real data over independent artwork. Returns a Discord PNG."""
     if side not in {"front", "back"}:
@@ -207,11 +241,6 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
                      fill="#081e33",outline="#409fc7")
         text(x+12,y+3,label,15,CYAN,width=width-24)
 
-    def plate(x,y,width,label):
-        draw.polygon(((x+6,y),(x+width-6,y),(x+width,y+6),(x+width-4,y+22),(x+4,y+22),(x,y+6)),
-                     fill="#07182b",outline="#339ac2")
-        metal(x+width//2-18,y+1,label,18,width=width-12)
-
     def image(layer,box):
         x,y,w,h=box
         layer=ImageOps.contain(layer,(w,h),Image.Resampling.LANCZOS)
@@ -240,50 +269,53 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
             return
         asset(ART/f"design-details/{key}.webp",box)
 
-    def shield(miles,box):
-        layer=badge(miles,real < miles)
-        if miles == current:
-            x,y,w,h=box
-            fitted=ImageOps.contain(layer,(w,h),Image.Resampling.LANCZOS)
-            glow=Image.new("RGBA",canvas.size)
-            mask=Image.new("L",canvas.size)
-            mask.paste(fitted.getchannel("A"),(x+(w-fitted.width)//2,y+(h-fitted.height)//2))
-            mask=mask.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(5))
-            glow.paste((36,205,255,255),(0,0,canvas.width,canvas.height))
-            glow.putalpha(mask.point(lambda value: int(value*0.8)))
-            canvas.alpha_composite(glow)
-        image(layer,box)
-
-    def progress(x,y,w,compact=False):
-        label = "MAXIMUM RANK ACHIEVED" if next_rank is None else f"{remaining:,} MILES TO NEXT RANK"
-        if compact:
-            metal(x,y,label,14,width=w)
-            draw.polygon(((x+4,y+24),(x+w-4,y+24),(x+w,y+32),(x+w-4,y+40),(x+4,y+40),(x,y+32)),
-                         fill="#102c43",outline="#dfc99b")
-            fraction=1 if next_rank is None else min(real/next_rank,1)
-            draw.rectangle((x+4,y+27,x+4+int((w-8)*fraction),y+36),fill="#48d0ff")
-            target=f"{real:,} / {next_rank:,}" if next_rank is not None else f"{real:,} REAL MILES"
-            metal(x+10,y+44,target,16,width=w-10)
+    def track_row(box, track, *, race=False, compact=False):
+        x, y, right, bottom = box
+        accent = AMBER if race else CYAN
+        panel(box)
+        draw.rounded_rectangle(box, 10, outline=accent, width=2)
+        badge_width = 88 if compact else 110
+        label_x = x + badge_width + 13
+        content_right = right - (85 if compact else 18)
+        track_label = "RACE" if race else "REAL"
+        if track is None:
+            text(label_x, y + 12, track_label + " PROGRESSION", 14, accent)
+            metal(label_x, y + 36, "UNAVAILABLE", 22, width=content_right-label_x)
+            text(label_x, y + 67, "No credited Race total available", 12, accent,
+                 width=content_right-label_x)
             return
-        panel((x-10,y-9,x+w+10,y+91))
-        target=f"{real:,} / {next_rank:,}" if next_rank is not None else f"{real:,} REAL MILES"
-        metal(x,y,target,23,width=w)
-        shape=((x+5,y+31),(x+w-5,y+31),(x+w,y+41),(x+w-5,y+52),(x+5,y+52),(x,y+41))
-        draw.polygon(shape,fill="#152c3d",outline="#e2c891")
-        # Match the approved absolute progress display.
-        fraction=1 if next_rank is None else min(real/next_rank,1)
-        end=x+5+int((w-10)*fraction)
-        if end>x+5:
-            for line in range(34,50):
-                fade=(line-34)/15
-                draw.line((x+5,y+line,end,y+line),fill=(int(43+74*(1-fade)),int(147+91*(1-fade)),248))
-        metal(x,y+62,label,16,width=w)
+        maker = race_badge if race else badge
+        image(maker(track["current"], False), (x+7, y+5, badge_width, bottom-y-10))
+        text(label_x, y+10, track_label + (" · " if compact else " PROGRESSION"),
+             12 if compact else 14, accent, width=content_right-label_x)
+        metal(label_x, y+28, track["name"], 17 if compact else 22,
+              width=content_right-label_x-(0 if compact else 230))
+        amount = f'{int(track["miles"]):,}'
+        target = f'{amount} / {track["target"]:,}' if track["target"] else amount + " MI"
+        if compact:
+            text(label_x, y+48, target, 15, WHITE, width=content_right-label_x)
+        else:
+            text(content_right-225, y+28, target, 20, WHITE, width=225)
+        bar_y = y+69 if compact else y+57
+        width = content_right-label_x
+        draw.rounded_rectangle((label_x,bar_y,content_right,bar_y+13),5,
+                               fill="#132b3d",outline=accent,width=1)
+        fraction = min(track["miles"]/track["target"],Decimal(1)) if track["target"] else Decimal(1)
+        fill_width = int((width-4)*fraction)
+        if fill_width:
+            draw.rounded_rectangle((label_x+2,bar_y+2,label_x+2+fill_width,bar_y+11),
+                                   3,fill=accent)
+        caption = "MAXIMUM RANK ACHIEVED"
+        if track["target"]:
+            remaining = int(track["remaining"].to_integral_value(rounding="ROUND_CEILING"))
+            caption = f'NEXT · {track["next_name"].upper()} · {remaining:,} MI'
+        text(label_x,bar_y+18,caption,10 if compact else 12,accent,width=width)
+        if compact and track["target"]:
+            image(maker(track["target"], True), (right-79,y+10,71,bottom-y-20))
 
     real = max(0,int(profile.get("real_miles") or 0))
-    idx = max(i for i,m in enumerate(MILES) if real >= m)
-    current = MILES[idx]
-    next_rank = MILES[idx+1] if idx+1<len(MILES) else None
-    remaining = max(0,(next_rank or real)-real)
+    real_track = progression(real)
+    race_track = progression(profile.get("trucky_race_miles"))
     if side == "front":
         asset(ART/"company-logo.webp",(30,20,254,110))
         metal(382 if side=="front" else 335,45,
@@ -346,59 +378,27 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         draw.line((345,385,924,385),fill="#4696b4",width=1)
         draw.line((345,449,924,449),fill="#4696b4",width=1)
         race=profile.get("trucky_race_miles")
-        values=(("REAL MILES",f"{real:,}"),("TRUCKY RACE",f"{Decimal(str(race)):,.0f}" if race is not None else "Unavailable"),("REAL JOBS",str(profile.get("jobs_completed",0))))
+        values=(("REAL MILES",f"{real:,}"),("TRUCKY RACE",f"{int(Decimal(str(race))):,}" if race is not None else "Unavailable"),("REAL JOBS",str(profile.get("jobs_completed",0))))
         for i,(label,value) in enumerate(values):
             x=360+i*192
             detail(("road-icon","trophy-icon","jobs-icon")[i],(x,398,39,38))
             text(x+58,395,label,13,CYAN,width=130)
             metal(x+58,414,value,25,width=126)
             draw.line((x-15,396,x-15,438),fill="#4789a7",width=1)
-        text(461,456,"CURRENT RANK",11,CYAN,width=110)
-        featured=[MILES[idx-1] if idx > 0 else None,current,next_rank]
-        for i,miles in enumerate(featured):
-            x=335+i*120
-            if miles is not None:
-                shield(miles,(x,471,111,147))
-                plate(x+4,624,104,threshold_key(miles).upper())
-        panel((708,463,1083,654))
-        detail("verified-driver-shield",(724,473,53,53))
-        text(790,480,"LINKED A&T DRIVER",17,width=273)
-        draw.line((721,535,1069,535),fill="#286582",width=1)
-        club = current_club(profile.get("permanent_achievements",()))
-        if club is not None:
-            insignia,label = CLUBS[club]
-            path = ART/"design-details/mileage-club-medallion.webp" if club==40000 else ART/f"insignias/{insignia}.webp"
-            glow=Image.new("RGBA",canvas.size)
-            ImageDraw.Draw(glow).ellipse((723,545,813,622),fill=(24,194,255,95))
-            canvas.alpha_composite(glow.filter(ImageFilter.GaussianBlur(6)))
-            with Image.open(path) as source:
-                medal=source.convert("RGBA")
-                bounds=medal.getchannel("A").point(lambda value:255 if value>55 else 0).getbbox()
-                if bounds:
-                    medal=medal.crop(bounds)
-            image(ImageEnhance.Brightness(medal).enhance(1.2),(720,541,99,79))
-            centred_metal(716,619,threshold_key(club).upper(),17,108)
-            label_size=10
-            while label_size>8 and draw.textlength(label,font=font(label_size))>108:
-                label_size-=1
-            label_width=draw.textlength(label,font=font(label_size))
-            text(770-label_width/2,639,label,label_size,width=108)
-        progress(841,557,232)
-        # Compact numeric progress fills the remaining lower-right safe area.
+        track_row((329,461,1083,550), real_track)
+        track_row((329,558,1083,647), race_track, race=True)
+        detail("verified-driver-shield",(934,192,31,35))
+        text(973,200,"LINKED",12,CYAN,width=100)
     else:
         asset(ART/"company-logo.webp",(30,16,250,100))
         metal(330,40,"DRIVER CAREER RECORD",33,width=644)
         text(333,86,name,21,CYAN,width=640)
         detail("tachograph-symbol",(1002,35,70,45))
         panel((37,128,507,399))
-        heading(45,134,454,"CURRENT RANK")
-        text(335,137,"NEXT RANK",15,CYAN,width=150)
-        shield(current,(65,165,195,213))
-        if next_rank is not None:
-            shield(next_rank,(319,170,143,169))
-        else:
-            centred_metal(307,237,"MAXIMUM RANK",16,184)
-        progress(299,333,186,compact=True)
+        heading(45,134,454,"CURRENT RANKS")
+        text(395,137,"NEXT RANK",13,CYAN,width=100)
+        track_row((44,162,499,272), real_track, compact=True)
+        track_row((44,279,499,390), race_track, race=True, compact=True)
         panel((37,405,507,493))
         heading(45,409,454,"CAREER RECORD")
         for i,(key,label,icon) in enumerate((
@@ -447,15 +447,29 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         detail("reverse-compass-seal",(20,605,68,65))
         panel((519,128,1080,649))
         heading(527,134,545,"PATH TO IMMORTAL")
+        text(880,138,"● REAL",11,CYAN,width=78)
+        text(967,138,"● RACE",11,AMBER,width=85)
         for i,miles in enumerate(MILES):
             row,col=divmod(i,6)
             # All ranks share one cell size; centre the final four in the same grid.
             x=529+col*90+(90 if row==3 else 0)
             y=169+row*116
-            if miles==current:
-                draw.rounded_rectangle((x,y,x+86,y+112),5,fill="#103755",outline="#49beff",width=2)
-            shield(miles,(x+3,y+3,80,87))
-            centred_metal(x+1,y+93,threshold_key(miles).upper(),17,84)
+            real_current = miles == real_track["current"]
+            race_current = race_track is not None and miles == race_track["current"]
+            if real_current or race_current:
+                draw.rounded_rectangle((x,y,x+86,y+112),5,fill="#103755",
+                                       outline=CYAN if real_current else AMBER,width=2)
+            earned_real = real >= miles
+            earned_race = race_track is not None and race_track["miles"] >= miles
+            if earned_race and not earned_real:
+                image(race_badge(miles),(x+3,y+3,80,87))
+            else:
+                image(badge(miles,not earned_real),(x+3,y+3,80,87))
+            centred_metal(x+1,y+91,threshold_key(miles).upper(),15,84)
+            if real_current:
+                draw.polygon(((x+20,y+111),(x+14,y+116),(x+26,y+116)),fill=CYAN)
+            if race_current:
+                draw.polygon(((x+65,y+111),(x+59,y+116),(x+71,y+116)),fill=AMBER)
         detail("footer-back",(273,660,566,30))
     if side == "front":
         detail("footer-front",(273,660,566,30))
