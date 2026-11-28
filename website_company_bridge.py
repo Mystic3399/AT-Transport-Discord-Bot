@@ -19,12 +19,33 @@ async def collect_snapshot(pool, guild, read_profile, membership):
     profiles = []
     async with pool.acquire() as connection:
         async with connection.transaction(isolation='repeatable_read', readonly=True):
+            has_credited_totals = bool(await connection.fetchval("""
+                SELECT to_regclass('public.unified_v2_production_mileage_baselines') IS NOT NULL
+                   AND to_regclass('public.unified_v2_production_mileage_totals') IS NOT NULL
+            """))
             for member in guild.members:
                 if member.bot or membership.get(member.id, {}).get('company') == 'Former company driver':
                     continue
                 profile = await read_profile(connection, member.id)
                 if profile is None:
                     continue
+                if has_credited_totals:
+                    credited = await connection.fetchrow("""
+                        SELECT b.trucksbook_real_miles
+                                   + COALESCE(t.combined_real_miles, 0) AS real_miles,
+                               COALESCE(t.trucky_race_miles, 0) AS trucky_race_miles
+                        FROM unified_v2_production_mileage_baselines b
+                        LEFT JOIN unified_v2_production_mileage_totals t USING(discord_user_id)
+                        WHERE b.discord_user_id=$1
+                    """, member.id)
+                    if credited is None:
+                        raise RuntimeError('Verified mileage baseline unavailable; previous snapshot preserved')
+                    # These canonical totals cover both games and already apply
+                    # cross-provider duplicate decisions. Do not add provider
+                    # counters or depend on Discord progression-role activation.
+                    profile = dict(profile)
+                    profile['real_miles'] = credited['real_miles']
+                    profile['trucky_race_miles'] = credited['trucky_race_miles']
                 drivers += 1
                 real += int(profile['real_miles'])
                 race += float(profile.get('trucky_race_miles') or 0)
