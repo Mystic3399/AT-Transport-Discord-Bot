@@ -391,6 +391,29 @@ def render(name, profile, prefs, side="front", role="DRIVER"):
         detail("verified-driver-shield",(942,184,39,48))
         text(987,188,"LINKED A&T",12,CYAN,width=87)
         metal(987,209,"DRIVER",16,width=87)
+        panel((934,258,1083,449))
+        text(946,267,"PERSONAL",11,CYAN,width=126)
+        text(946,281,"ACHIEVEMENT",12,CYAN,width=126)
+        club = current_club(profile.get("permanent_achievements", ()))
+        threshold = club or 40000
+        insignia, club_label = CLUBS[threshold]
+        path = (ART/"design-details/mileage-club-medallion.webp"
+                if threshold == 40000 else ART/f"insignias/{insignia}.webp")
+        with Image.open(path) as source:
+            medal = source.convert("RGBA")
+            bounds = medal.getchannel("A").point(lambda value: 255 if value > 40 else 0).getbbox()
+            if bounds:
+                medal = medal.crop(bounds)
+        if club is None:
+            alpha = medal.getchannel("A")
+            medal = ImageOps.grayscale(medal).convert("RGBA")
+            medal.putalpha(alpha)
+        image(medal, (961,301,96,89))
+        if club is None:
+            detail("small-lock",(999,326,21,27))
+        centred_metal(943,394,threshold_key(threshold).upper(),20,131)
+        text(945,423,club_label if club is not None else "MILEAGE CLUB · LOCKED",
+             10,CYAN,width=128)
     else:
         asset(ART/"company-logo.webp",(30,16,250,100))
         metal(330,40,"DRIVER CAREER RECORD",33,width=644)
